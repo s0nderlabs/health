@@ -1,5 +1,6 @@
 import { describe, expect, test, afterEach } from 'bun:test'
 import { IpcServer, IpcClient, type EventMsg } from '../src/ipc.js'
+import type { HealthEvent } from '../src/types.js'
 import { join } from 'path'
 import { tmpdir } from 'os'
 
@@ -12,14 +13,14 @@ afterEach(() => {
   while (cleanup.length) cleanup.pop()!()
 })
 
-function makeServer(path: string, target = 'main') {
+function makeServer(path: string) {
   const acked: number[] = []
+  const connects: number[] = []
   const disconnects: number[] = []
   const server = new IpcServer(path, {
-    eventTarget: () => target,
     onAck: (id) => acked.push(id),
-    onSubscriberConnected: () => {},
-    onSubscriberDisconnected: () => disconnects.push(Date.now()),
+    onSubscriberConnected: (sessionId) => connects.push(sessionId),
+    onSubscriberDisconnected: (sessionId) => disconnects.push(sessionId),
     onRpc: async (method, params) => {
       if (method === 'echo') return { echoed: params }
       if (method === 'big') return { blob: 'x'.repeat(Number(params.size ?? 0)) }
@@ -28,16 +29,29 @@ function makeServer(path: string, target = 'main') {
   })
   server.start()
   cleanup.push(() => server.stop())
-  return { server, acked, disconnects }
+  return { server, acked, connects, disconnects }
 }
 
-function makeClient(path: string, session: string) {
+function makeClient(path: string, session: string, wantEvents = true) {
   const received: EventMsg[] = []
-  const client = new IpcClient(path, session, async (e) => {
-    received.push(e)
-  })
+  const client = new IpcClient(
+    path,
+    session,
+    async (e) => {
+      received.push(e)
+    },
+    () => {},
+    wantEvents,
+  )
   cleanup.push(() => client.stop())
   return { client, received }
+}
+
+function evt(id: number): HealthEvent & { id: number } {
+  return {
+    id, class: 'workout.card', priority: 'info', dedupe_key: `k${id}`,
+    content: `event ${id}`, meta: {}, created_at: new Date().toISOString(),
+  }
 }
 
 async function waitFor(cond: () => boolean, ms = 2000): Promise<void> {
@@ -49,40 +63,96 @@ async function waitFor(cond: () => boolean, ms = 2000): Promise<void> {
 }
 
 describe('ipc server/client', () => {
-  test('events reach the target session and get acked', async () => {
+  test('events reach a subscribed session and get acked', async () => {
     const path = sockPath()
     const { server, acked } = makeServer(path)
     const { client, received } = makeClient(path, 'main')
     await client.connectLoop()
     await waitFor(() => server.hasSubscriber())
 
-    const pushed = server.pushEvent({
-      id: 42, class: 'recovery.brief', priority: 'info', dedupe_key: 'k',
-      content: 'Recovery 55% (amber).', meta: { class: 'recovery.brief' }, created_at: new Date().toISOString(),
-    })
-    expect(pushed).toBe(true)
+    const pushedTo = server.pushEvent(evt(42))
+    expect(pushedTo.length).toBe(1)
     await waitFor(() => received.length === 1 && acked.length === 1)
-    expect(received[0].content).toContain('55%')
+    expect(received[0].content).toContain('event 42')
     expect(acked[0]).toBe(42)
+    expect(client.eventsEnabled).toBe(true) // hello_ok arrived with events: true
   })
 
-  test('non-target sessions get RPC but never events', async () => {
+  test('events broadcast to every SUBSCRIBED session; RPC works everywhere', async () => {
     const path = sockPath()
-    const { server } = makeServer(path, 'main')
-    const { client, received } = makeClient(path, 'sidecar')
-    await client.connectLoop()
-    await Bun.sleep(100)
+    const { server } = makeServer(path)
+    const a = makeClient(path, 'main')
+    const b = makeClient(path, 'second')
+    await a.client.connectLoop()
+    await b.client.connectLoop()
+    await waitFor(() => server.subscriberCount() === 2)
 
-    expect(server.hasSubscriber()).toBe(false)
-    const pushed = server.pushEvent({
-      id: 1, class: 'workout.card', priority: 'info', dedupe_key: 'k',
-      content: 'x', meta: {}, created_at: new Date().toISOString(),
-    })
-    expect(pushed).toBe(false)
-    expect(received.length).toBe(0)
+    const pushedTo = server.pushEvent(evt(1))
+    expect(pushedTo.length).toBe(2)
+    await waitFor(() => a.received.length === 1 && b.received.length === 1)
 
-    const result = await client.rpc<{ echoed: Record<string, unknown> }>('echo', { a: 1 })
+    const result = await b.client.rpc<{ echoed: Record<string, unknown> }>('echo', { a: 1 })
     expect(result.echoed).toEqual({ a: 1 })
+  })
+
+  test('a channel-less session (events: false) gets RPC but NEVER events', async () => {
+    const path = sockPath()
+    const { server, connects } = makeServer(path)
+    const toolsOnly = makeClient(path, 'plain-session', false)
+    await toolsOnly.client.connectLoop()
+    await Bun.sleep(150)
+
+    expect(server.hasSubscriber()).toBe(false) // no EVENT subscriber
+    expect(connects.length).toBe(0) // onSubscriberConnected must not fire
+    const pushedTo = server.pushEvent(evt(5))
+    expect(pushedTo.length).toBe(0)
+    expect(toolsOnly.received.length).toBe(0)
+    expect(toolsOnly.client.eventsEnabled).toBe(false)
+
+    const result = await toolsOnly.client.rpc<{ echoed: Record<string, unknown> }>('echo', { x: 2 })
+    expect(result.echoed).toEqual({ x: 2 })
+  })
+
+  test('exclusions target pushes: latecomer gets its copy, earlier recipient is skipped', async () => {
+    const path = sockPath()
+    const { server, connects } = makeServer(path)
+    const a = makeClient(path, 'first')
+    await a.client.connectLoop()
+    await waitFor(() => server.subscriberCount() === 1)
+    const aId = connects[0]
+
+    const first = server.pushEvent(evt(7))
+    expect(first).toEqual([aId])
+
+    const b = makeClient(path, 'second')
+    await b.client.connectLoop()
+    await waitFor(() => server.subscriberCount() === 2)
+
+    // re-push excluding a's session id: only b receives
+    const second = server.pushEvent(evt(7), new Set(first))
+    expect(second.length).toBe(1)
+    expect(second[0]).not.toBe(aId)
+    await waitFor(() => b.received.length === 1)
+    expect(a.received.length).toBe(1) // still just its original copy
+  })
+
+  test('subscriber ids flow through connect/disconnect callbacks', async () => {
+    const path = sockPath()
+    const { server, connects, disconnects } = makeServer(path)
+    const a = makeClient(path, 'main')
+    const b = makeClient(path, 'second')
+    await a.client.connectLoop()
+    await b.client.connectLoop()
+    await waitFor(() => connects.length === 2)
+
+    b.client.stop()
+    await waitFor(() => disconnects.length === 1)
+    expect(connects).toContain(disconnects[0])
+    expect(server.subscriberCount()).toBe(1)
+
+    a.client.stop()
+    await waitFor(() => disconnects.length === 2)
+    expect(server.subscriberCount()).toBe(0)
   })
 
   test('rpc errors propagate as rejections', async () => {
@@ -105,24 +175,6 @@ describe('ipc server/client', () => {
     expect(result.blob).toBe('x'.repeat(size))
   })
 
-  test('onSubscriberDisconnected fires only when the TARGET session drops', async () => {
-    const path = sockPath()
-    const { server, disconnects } = makeServer(path, 'main')
-    const side = makeClient(path, 'sidecar')
-    await side.client.connectLoop()
-    await Bun.sleep(80)
-    side.client.stop() // non-target drop: must NOT fire
-    await Bun.sleep(120)
-    expect(disconnects.length).toBe(0)
-
-    const main = makeClient(path, 'main')
-    await main.client.connectLoop()
-    await waitFor(() => server.hasSubscriber())
-    main.client.stop() // target drop: must fire
-    await waitFor(() => disconnects.length === 1)
-    expect(disconnects.length).toBe(1)
-  })
-
   test('client reconnects after server restart and events resume', async () => {
     const path = sockPath()
     const first = makeServer(path)
@@ -135,11 +187,8 @@ describe('ipc server/client', () => {
 
     const second = makeServer(path)
     await waitFor(() => second.server.hasSubscriber(), 5000)
-    second.server.pushEvent({
-      id: 7, class: 'system.health', priority: 'notable', dedupe_key: 'k7',
-      content: 'back', meta: {}, created_at: new Date().toISOString(),
-    })
+    second.server.pushEvent(evt(9))
     await waitFor(() => received.length === 1)
-    expect(received[0].id).toBe(7)
+    expect(received[0].id).toBe(9)
   })
 })

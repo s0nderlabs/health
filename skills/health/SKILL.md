@@ -58,7 +58,7 @@ Format tightly. A short table for the numbers is fine; the verdict is prose.
 
 1. `health__config` action get; show current settings readably.
 2. If the user described changes, translate to a set call (event toggles,
-   thresholds, quiet hours, daily budget, event_target) and confirm what changed.
+   thresholds, quiet hours, daily budget) and confirm what changed.
 
 ### `status`
 

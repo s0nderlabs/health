@@ -32,7 +32,6 @@ export function loadConfig(): HealthConfig {
       quiet_hours: parsed.quiet_hours === undefined ? DEFAULT_CONFIG.quiet_hours : parsed.quiet_hours,
       daily_budget: parsed.daily_budget ?? DEFAULT_CONFIG.daily_budget,
       cooldown_minutes: { ...DEFAULT_CONFIG.cooldown_minutes, ...parsed.cooldown_minutes },
-      event_target: parsed.event_target ?? DEFAULT_CONFIG.event_target,
       poll_interval_minutes: parsed.poll_interval_minutes ?? DEFAULT_CONFIG.poll_interval_minutes,
       webhook: { ...DEFAULT_CONFIG.webhook, ...parsed.webhook },
     }

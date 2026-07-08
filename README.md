@@ -75,20 +75,24 @@ signature against your client secret; everything else is rejected.
 
 ## Sessions and routing
 
-Events push to ONE session (default name `main`, set via `event_target`);
-every session with the plugin loaded gets the tools (`/health`, config,
-status). If you launch Claude Code through a wrapper script, load the channel
-only where you want it:
+Sessions started with the health channel receive the event stream; every
+session with the plugin loaded gets the tools (`/health`, config, status).
+The channel is the opt-in:
 
 ```bash
 claude --channels=plugin:health@s0nderlabs
 ```
 
+Events queue durably and redeliver until some channel session acknowledges
+one (an ack marks it done for all). Un-acked events retry across session
+drops and reconnects; per-class expiry eventually retires anything nobody
+was around to see (a three-day-old bedtime nudge helps no one).
+
 ## Configuration
 
 Talk to it (`/health config`) or edit `~/.config/health/config.json`:
 event class toggles, thresholds, quiet hours, daily event budget, poll
-interval, webhook port/path, target session.
+interval, webhook port/path.
 
 ## Data + security posture
 

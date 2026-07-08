@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // healthd: the always-on daemon. Owns the token rotator, the SQLite archive,
 // the poller, the webhook receiver, the decision engine, and event delivery
-// to the target CC session. Exactly one instance runs (launchd + pidfile).
+// to every connected CC session. Exactly one instance runs (launchd + pidfile).
 
 import { readFileSync, writeFileSync, unlinkSync, existsSync } from 'fs'
 import { AuthBrokenError } from './auth.js'
@@ -9,6 +9,7 @@ import { ensureRuntimeDir, loadConfig, inQuietHours, PID_PATH, SOCKET_PATH } fro
 import { Store } from './store.js'
 import { Engine } from './engine.js'
 import { IpcServer } from './ipc.js'
+import { InFlightTracker } from './delivery.js'
 import { backfill, pollOnce, type Fact } from './poller.js'
 import { startWebhookReceiver } from './webhook.js'
 
@@ -81,25 +82,24 @@ const onFact = (fact: Fact): void => {
   }
 }
 
-// Events pushed but not yet acked. Without this, the 250ms-coalesced delivery
-// and the 5-minute tick would re-push an event whose ack is still in flight,
-// injecting a duplicate channel message. Cleared on ack (delivered) or when the
-// subscriber drops (so the event redelivers cleanly on reconnect).
-const inFlight = new Set<number>()
+// Per-event, per-recipient in-flight tracking: prevents duplicate injection
+// while an ack is pending, gives latecomer sessions a targeted push, frees an
+// event when all its recipients drop, and TTL-frees it when no ack arrives
+// (failed handler, suspended session) so nothing strands. See delivery.ts.
+const inFlight = new InFlightTracker()
 
 const ipc = new IpcServer(SOCKET_PATH, {
-  eventTarget: () => config().event_target,
   onAck: (eventId) => {
     store.markDelivered(eventId)
-    inFlight.delete(eventId)
+    inFlight.acked(eventId)
   },
-  onSubscriberConnected: () => {
-    log('event target session connected, draining queue')
-    inFlight.clear() // fresh connection: anything previously in flight was never acked
+  onSubscriberConnected: (sessionId) => {
+    log(`session ${sessionId} subscribed (${ipc.subscriberCount()} live), draining queue`)
     scheduleDelivery()
   },
-  onSubscriberDisconnected: () => {
-    inFlight.clear() // un-acked events must redeliver on the next connect
+  onSubscriberDisconnected: (sessionId) => {
+    inFlight.sessionDropped(sessionId) // fully-dropped events become redeliverable
+    scheduleDelivery()
   },
   onRpc: async (method, params) => rpc(method, params),
 })
@@ -109,8 +109,8 @@ function deliverPending(): void {
   const quiet = inQuietHours(config())
   for (const e of store.undeliveredEvents()) {
     if (quiet && e.priority !== 'alert') continue // holds until quiet hours end
-    if (inFlight.has(e.id)) continue // already pushed, awaiting ack
-    if (ipc.pushEvent(e)) inFlight.add(e.id) // delivered_at is stamped on ack
+    const pushedTo = ipc.pushEvent(e, inFlight.exclusions(e.id))
+    inFlight.pushed(e.id, pushedTo) // delivered_at is stamped on ack
   }
 }
 
@@ -260,7 +260,11 @@ setInterval(() => {
   scheduleDelivery() // re-check quiet-hours holds
 }, 5 * 60_000)
 
-log(`up: poll every ${config().poll_interval_minutes}min, webhook :${config().webhook.port}${config().webhook.path}, target session "${config().event_target}"`)
+// Delivery heartbeat: picks up TTL-expired in-flight events (failed handler,
+// suspended session) within a minute instead of waiting for the 5-min tick.
+setInterval(scheduleDelivery, 60_000)
+
+log(`up: poll every ${config().poll_interval_minutes}min, webhook :${config().webhook.port}${config().webhook.path}, events push to every connected session`)
 
 // ── Shutdown ──────────────────────────────────────────────────────
 

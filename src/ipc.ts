@@ -1,13 +1,15 @@
 // Daemon <-> MCP-server IPC: newline-delimited JSON over a unix socket.
-// The daemon is the server. Sessions say hello with their name; only the
-// configured event_target session receives event pushes (main-only inbound),
-// every session may use RPC (reads, config, status).
+// The daemon is the server. Sessions say hello with their name and whether
+// they want the EVENT STREAM (channel-enabled sessions only; a plugin's MCP
+// server auto-loads in every CC session, but only sessions started with the
+// health channel can render events, so channel-less sessions must not receive
+// or ack them). Every session may use RPC (reads, config, status).
 
 import type { Socket } from 'bun'
 import { unlinkSync, existsSync } from 'fs'
 import type { HealthEvent } from './types.js'
 
-export interface HelloMsg { t: 'hello'; session: string; proto: number }
+export interface HelloMsg { t: 'hello'; session: string; proto: number; events?: boolean }
 export interface HelloOkMsg { t: 'hello_ok'; events: boolean }
 export interface EventMsg { t: 'event'; id: number; content: string; meta: Record<string, string> }
 export interface AckMsg { t: 'ack'; id: number }
@@ -79,31 +81,33 @@ class LineBuffer {
 
 interface Session {
   socket: Socket<unknown>
+  id: number // unique per connection; delivery tracking keys on this
   name: string
+  events: boolean // did this session subscribe to the event stream?
   lines: LineBuffer
 }
 
 export class IpcServer {
   private sessions = new Map<Socket<unknown>, Session>()
   private listener: ReturnType<typeof Bun.listen> | null = null
+  private nextSessionId = 1
 
   constructor(
     private socketPath: string,
     private opts: {
-      eventTarget: () => string
       onRpc: RpcHandler
       onAck: (eventId: number) => void
-      onSubscriberConnected: () => void
-      onSubscriberDisconnected?: () => void
+      onSubscriberConnected: (sessionId: number) => void
+      onSubscriberDisconnected?: (sessionId: number) => void
     },
   ) {}
 
   private dropSocket(socket: Socket<unknown>): void {
     const session = this.sessions.get(socket)
-    const wasTarget = session?.name === this.opts.eventTarget()
+    const wasSubscriber = !!session && !!session.name && session.events
     this.sessions.delete(socket)
     pendingWrites.delete(socket)
-    if (wasTarget) this.opts.onSubscriberDisconnected?.()
+    if (wasSubscriber) this.opts.onSubscriberDisconnected?.(session.id)
   }
 
   start(): void {
@@ -113,7 +117,13 @@ export class IpcServer {
       unix: this.socketPath,
       socket: {
         open(socket) {
-          self.sessions.set(socket, { socket, name: '', lines: new LineBuffer() })
+          self.sessions.set(socket, {
+            socket,
+            id: self.nextSessionId++,
+            name: '',
+            events: false,
+            lines: new LineBuffer(),
+          })
         },
         data(socket, chunk) {
           const session = self.sessions.get(socket)
@@ -136,9 +146,10 @@ export class IpcServer {
   private handle(session: Session, msg: IpcMsg): void {
     if (msg.t === 'hello') {
       session.name = msg.session
-      const isTarget = msg.session === this.opts.eventTarget()
-      writeFrame(session.socket, { t: 'hello_ok', events: isTarget })
-      if (isTarget) this.opts.onSubscriberConnected()
+      // events defaults to true for older clients that predate the flag.
+      session.events = msg.events !== false
+      writeFrame(session.socket, { t: 'hello_ok', events: session.events })
+      if (session.events) this.opts.onSubscriberConnected(session.id)
       return
     }
     if (msg.t === 'ack') {
@@ -160,21 +171,27 @@ export class IpcServer {
     }
   }
 
-  /** Push one event to the connected target session. False if it is not connected. */
-  pushEvent(e: HealthEvent & { id: number }): boolean {
-    const target = this.opts.eventTarget()
+  /**
+   * Push one event to every event-subscribed session NOT in `exclude`.
+   * Returns the session ids actually pushed to (empty if none).
+   */
+  pushEvent(e: HealthEvent & { id: number }, exclude: ReadonlySet<number> = EMPTY_IDS): number[] {
+    const pushedTo: number[] = []
     for (const session of this.sessions.values()) {
-      if (session.name === target) {
-        writeFrame(session.socket, { t: 'event', id: e.id, content: e.content, meta: e.meta })
-        return true
-      }
+      if (!session.name || !session.events) continue
+      if (exclude.has(session.id)) continue
+      writeFrame(session.socket, { t: 'event', id: e.id, content: e.content, meta: e.meta })
+      pushedTo.push(session.id)
     }
-    return false
+    return pushedTo
+  }
+
+  subscriberCount(): number {
+    return [...this.sessions.values()].filter((s) => s.name && s.events).length
   }
 
   hasSubscriber(): boolean {
-    const target = this.opts.eventTarget()
-    return [...this.sessions.values()].some((s) => s.name === target)
+    return this.subscriberCount() > 0
   }
 
   stop(): void {
@@ -182,6 +199,8 @@ export class IpcServer {
     if (existsSync(this.socketPath)) unlinkSync(this.socketPath)
   }
 }
+
+const EMPTY_IDS: ReadonlySet<number> = new Set()
 
 // ── Client (MCP server side) ──────────────────────────────────────
 
@@ -192,11 +211,15 @@ export class IpcClient {
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
   private stopped = false
 
+  /** Effective subscription as confirmed by the daemon's hello_ok. */
+  eventsEnabled = false
+
   constructor(
     private socketPath: string,
     private sessionName: string,
     private onEvent: (e: EventMsg) => Promise<void>,
     private log: (msg: string) => void = () => {},
+    private wantEvents = true,
   ) {}
 
   /** Connect with retry; resolves once connected (or keeps retrying forever in background). */
@@ -221,8 +244,8 @@ export class IpcClient {
         socket: {
           open(socket) {
             self.socket = socket
-            writeFrame(socket, { t: 'hello', session: self.sessionName, proto: 1 })
-            self.log(`ipc connected as ${self.sessionName}`)
+            writeFrame(socket, { t: 'hello', session: self.sessionName, proto: 1, events: self.wantEvents })
+            self.log(`ipc connected as ${self.sessionName} (events: ${self.wantEvents})`)
             resolve()
           },
           data(_socket, chunk) {
@@ -252,6 +275,10 @@ export class IpcClient {
   }
 
   private handle(msg: IpcMsg): void {
+    if (msg.t === 'hello_ok') {
+      this.eventsEnabled = msg.events
+      return
+    }
     if (msg.t === 'event') {
       void this.onEvent(msg)
         .then(() => {

@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.1
+
+### Changed
+
+- Events now broadcast to every channel-enabled session instead of routing to
+  a single configured target (`event_target` removed from config and tools).
+  Loading the plugin with the channel IS the subscription; first ack marks an
+  event delivered for all.
+- Channel-less sessions (a plugin's MCP server auto-loads in every CC session)
+  now identify themselves and get tools only: they can no longer receive and
+  silently swallow events Claude Code would never render.
+- Delivery hardening: per-recipient in-flight tracking (no duplicate injection,
+  latecomer sessions get targeted pushes of still-undelivered events, an event
+  whose recipients all drop redelivers) plus a 60-second ack TTL so a failed
+  handler or suspended session cannot strand an event.
+- The plugin manifest is dual-mode: `${CLAUDE_PLUGIN_ROOT:-.}` resolves to the
+  plugin cache when installed and to the repo when loaded as a dev channel
+  (`claude --dangerously-load-development-channels=server:health` from the repo
+  root now works for local development).
+
 ## 0.1.0
 
 Initial release. The full loop, local-only:

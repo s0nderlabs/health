@@ -10,7 +10,7 @@ import { Store } from './store.js'
 import { DB_PATH } from './config.js'
 import { existsSync } from 'fs'
 
-const VERSION = '0.1.0'
+const VERSION = '0.1.1'
 
 const INSTRUCTIONS = `
 health: WHOOP recovery, sleep, and strain as a live channel. The daemon on this
@@ -92,7 +92,7 @@ export function createServer(ipc: IpcClient) {
       {
         name: 'health__config',
         description:
-          'View or update health settings: event class toggles, thresholds, quiet hours, daily event budget, poll interval, target session.',
+          'View or update health settings: event class toggles, thresholds, quiet hours, daily event budget, poll interval.',
         inputSchema: {
           type: 'object' as const,
           properties: {
@@ -105,7 +105,6 @@ export function createServer(ipc: IpcClient) {
             },
             daily_budget: { type: 'number', description: 'Max non-alert events delivered per day' },
             poll_interval_minutes: { type: 'number' },
-            event_target: { type: 'string', description: 'Session name that receives event pushes' },
           },
           required: ['action'],
         },
@@ -143,8 +142,12 @@ export function createServer(ipc: IpcClient) {
           const { action: _a, ...patch } = args
           return toolResult(JSON.stringify(await ipc.rpc('config_set', patch), null, 2))
         }
-        case 'health__status':
-          return toolResult(JSON.stringify(await ipc.rpc('status'), null, 2))
+        case 'health__status': {
+          const status = (await ipc.rpc('status')) as Record<string, unknown>
+          return toolResult(
+            JSON.stringify({ ...status, this_session_receives_events: ipc.eventsEnabled }, null, 2),
+          )
+        }
         default:
           return toolError(`Unknown tool: ${req.params.name}`)
       }

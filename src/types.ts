@@ -175,7 +175,6 @@ export interface HealthConfig {
   quiet_hours: { start: string; end: string } | null
   daily_budget: number
   cooldown_minutes: Partial<Record<EventClass, number>>
-  event_target: string
   poll_interval_minutes: number
   webhook: {
     port: number
@@ -221,7 +220,6 @@ export const DEFAULT_CONFIG: HealthConfig = {
     'calibration.note': 10080,
     'system.health': 360,
   },
-  event_target: 'main',
   poll_interval_minutes: 5,
   webhook: {
     port: 8789,
