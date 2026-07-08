@@ -1,0 +1,24 @@
+# secrets and token store, never commit
+.env
+.tokens.json
+
+node_modules/
+vendor/
+*.log
+
+# local databases + runtime
+*.db
+*.db-shm
+*.db-wal
+
+# throwaway empirical probes (superseded by src/; kept on disk for reference)
+probe.ts
+webhook-test.ts
+webhook-overnight.log
+
+# internal design + strategy artifacts (private framing, not for the public repo)
+CLAUDE.md
+docs/
+
+# dev-only local mcp config for the test harness
+test/.mcp.json
