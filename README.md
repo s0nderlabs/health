@@ -157,7 +157,8 @@ interval, webhook port/path, live-ingest port/max-HR/session threshold.
 - Tokens and client secret: macOS Keychain only. WHOOP rotates refresh tokens
   on every use; the daemon persists the new one before anything can touch it.
 - Archive: `~/.claude/channels/health/health.db` (SQLite). Back it up; it is
-  your health history.
+  your health history. A human-readable `daily-log.md` (one line per day) sits
+  beside it, regenerated from the archive as a durable memory anchor.
 - Webhook receiver binds 127.0.0.1 only; public exposure is your tunnel's job,
   and every request is HMAC-verified.
 - The plugin's read scope is exactly WHOOP's six read scopes. It can write

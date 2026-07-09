@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.5.0 - 2026-07-09
+
+### Added
+
+- **Coach schedule + calibration awareness.** `health__read` now returns
+  `plan_today` (the /gym-authored session with an `is_today` freshness flag)
+  and `calibration` (days of data + whether WHOOP still flags calibration),
+  so the in-chat coach reads a rest day, a PR day, and an early-days score
+  correctly instead of guessing.
+- **Workout-intent labels stapled onto scored cards.** A tapped/spoken intent
+  is logged with a plan-derived label and a PR flag (detected from the plan
+  title), then claimed by the workout it best fits (in-window, closest to
+  start, once only) so the scored card reads "Session: Deadlift 1RM Test (PR
+  attempt)" and the archive is self-describing. Consume-once keying means a
+  cooldown walk or a two-a-day can never wear another session's label, and a
+  score revision keeps the label it already earned.
+- **Daemon-maintained daily log** at `~/.claude/channels/health/daily-log.md`:
+  one line per day (recovery, HRV, RHR, sleep, strain, steps), newest first,
+  90 days, regenerated on every scored fact. The durable memory anchor that
+  journal and gym tooling read instead of querying the archive.
+- **Body-stat canon** documented for the coach: the gym log is canonical for
+  body weight (the WHOOP profile value goes stale); max HR = the WHOOP
+  profile value auto-raised by any higher observed workout max, and every
+  zone derives from it. Zone max synced to 187 on both the daemon and phone.
+- **tmux BPM status segment** wired into the status line at a 5s refresh.
+
 ## 0.4.0 - 2026-07-09
 
 ### Added

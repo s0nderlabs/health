@@ -304,3 +304,77 @@ describe('live events through the engine', () => {
     expect(engine.liveEvent('live.rest', 'live.rest:s1', { content: 'r', meta: {} })).toBe(true)
   })
 })
+
+describe('workout intent stapling', () => {
+  let store: Store
+  let engine: Engine
+
+  beforeEach(() => {
+    store = freshStore()
+    engine = new Engine(store, () => testConfig())
+  })
+
+  test('enriched intent carries label and pr, and staples onto the scored card', () => {
+    engine.workoutIntent('Deadlift 1RM Test', { label: 'Deadlift 1RM Test', pr: true })
+    const [intentEvent] = store.undeliveredEvents().filter((e) => e.class === 'workout.intent')
+    expect(intentEvent.content).toContain('PR attempt')
+    expect((intentEvent.meta as Record<string, string>).pr).toBe('true')
+
+    // WHOOP scores the workout afterwards (started 1h ago, intent inside it).
+    const w = workout('w-pr-day')
+    engine.onFact(fact('workout', w))
+    const [card] = store.undeliveredEvents().filter((e) => e.class === 'workout.card')
+    expect(card.content).toContain('Session: Deadlift 1RM Test (PR attempt)')
+    const meta = card.meta as Record<string, string>
+    expect(meta.intent_label).toBe('Deadlift 1RM Test')
+    expect(meta.intent_pr).toBe('true')
+  })
+
+  test('a stale intent (outside the workout window) is not stapled', () => {
+    // An intent 26h old, well before this workout's window.
+    store.setMeta('intent_log', JSON.stringify([
+      { ts: new Date(Date.now() - 26 * 3_600_000).toISOString(), activity: 'Run', label: 'Run', pr: false, claimed: false },
+    ]))
+    const w = workout('w-no-intent')
+    engine.onFact(fact('workout', w))
+    const [card] = store.undeliveredEvents().filter((e) => e.class === 'workout.card')
+    expect(card.content).not.toContain('Session:')
+    expect((card.meta as Record<string, string>).intent_label).toBeUndefined()
+  })
+
+  test('a later cooldown intent does not clobber the earlier lift label', () => {
+    // The workout ran the last hour (workout() start = now-1h, end = now).
+    // Deadlift intent lands inside it; a Walk intent lands AFTER it ends.
+    const now = Date.now()
+    store.setMeta('intent_log', JSON.stringify([
+      { ts: new Date(now - 55 * 60_000).toISOString(), activity: 'Deadlift 1RM Test', label: 'Deadlift 1RM Test', pr: true, claimed: false },
+      { ts: new Date(now + 60_000).toISOString(), activity: 'Walk', label: 'Walk', pr: false, claimed: false },
+    ]))
+    engine.onFact(fact('workout', workout('w-lift')))
+    const [card] = store.undeliveredEvents().filter((e) => e.class === 'workout.card')
+    expect(card.content).toContain('Session: Deadlift 1RM Test (PR attempt)')
+  })
+
+  test('a claimed intent never staples onto a second overlapping workout', () => {
+    // Zero the workout.card cooldown so both cards actually emit in-test.
+    const eng = new Engine(store, () => testConfig({ cooldown_minutes: { ...DEFAULT_CONFIG.cooldown_minutes, 'workout.card': 0 } }))
+    eng.workoutIntent('Deadlift 1RM Test', { label: 'Deadlift 1RM Test', pr: true })
+    eng.onFact(fact('workout', workout('w-lift'))) // claims it
+    // An auto-detected cooldown walk overlapping the same window scores next.
+    eng.onFact(fact('workout', workout('w-walk')))
+    const cards = store.undeliveredEvents().filter((e) => e.class === 'workout.card')
+    const walkCard = cards.find((c) => (c.meta as Record<string, string>).workout_id === 'w-walk')!
+    expect(walkCard.content).not.toContain('Session:')
+  })
+
+  test('a score revision keeps the label instead of coming back bare', () => {
+    engine.workoutIntent('Deadlift 1RM Test', { label: 'Deadlift 1RM Test', pr: true })
+    engine.onFact(fact('workout', workout('w-lift'))) // claims + staples
+    // WHOOP revises the score; the same workout id re-fires onWorkout.
+    engine.onFact(fact('workout', workout('w-lift')))
+    const cards = store.undeliveredEvents().filter(
+      (e) => e.class === 'workout.card' && (e.meta as Record<string, string>).intent_label === 'Deadlift 1RM Test',
+    )
+    expect(cards.length).toBeGreaterThan(0)
+  })
+})

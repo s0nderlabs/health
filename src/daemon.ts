@@ -4,9 +4,10 @@
 // to every connected CC session. Exactly one instance runs (launchd + pidfile).
 
 import { readFileSync, writeFileSync, unlinkSync, existsSync } from 'fs'
+import { join } from 'path'
 import { randomBytes } from 'node:crypto'
 import { AuthBrokenError } from './auth.js'
-import { ensureRuntimeDir, loadConfig, saveConfig, configFileWritable, inQuietHours, resolvePlanPath, PID_PATH, SOCKET_PATH } from './config.js'
+import { ensureRuntimeDir, loadConfig, saveConfig, configFileWritable, inQuietHours, resolvePlanPath, PID_PATH, SOCKET_PATH, RUNTIME_DIR } from './config.js'
 import { Store } from './store.js'
 import { Engine } from './engine.js'
 import { IpcServer } from './ipc.js'
@@ -102,9 +103,18 @@ function cached<T>(fn: () => T, ttlMs = 30_000): () => T {
 }
 
 const liveState = new LiveState({
-  // Config override, else the highest HR WHOOP ever scored (with a floor:
-  // early data underestimates true max).
-  getMaxHr: cached(() => config().live.max_hr ?? Math.max(store.maxWorkoutHr() ?? 0, 185)),
+  // Canon (his ruling, Jul 9 2026): config override first, else the WHOOP
+  // profile max HR (187) auto-raised by any higher observed workout max.
+  // Observed alone is useless early (lifting never approaches true max).
+  getMaxHr: cached(() => {
+    const override = config().live.max_hr
+    if (override) return override
+    const profile =
+      ((store.db.query('SELECT max_heart_rate FROM body WHERE id = 1').get() as
+        | { max_heart_rate?: number }
+        | null)?.max_heart_rate) || 187
+    return Math.max(store.maxWorkoutHr() ?? 0, profile, 187)
+  }),
   getRestHr: cached(() => {
     const rhr = store.latestRecovery()?.resting_heart_rate
     return typeof rhr === 'number' && rhr > 25 ? rhr : 60
@@ -125,7 +135,7 @@ const liveListener = new LiveListener(liveState, () => config().live.token, {
   // Phone-side surfaces: intent taps ride the same event path as the MCP tool,
   // steps land in the archive, plan reads come from the /gym-authored file,
   // and phone liveness persists for the cert-expiry watchdog.
-  onIntent: (activity) => engine.workoutIntent(activity),
+  onIntent: (activity) => engine.workoutIntent(activity, intentEnrichment(activity)),
   onSteps: (samples, deletedUuids) => {
     const { added } = store.upsertStepsSamples(samples)
     const { deleted } = store.deleteStepsSamples(deletedUuids)
@@ -160,10 +170,37 @@ const onFact = (fact: Fact): void => {
       scheduleDelivery()
     }
     engine.onFact(fact)
+    // The durable memory anchor: any archive-changing fact refreshes the
+    // one-line-per-day log that the /gym skill and journal tooling read.
+    if (fact.kind === 'recovery' || fact.kind === 'sleep' || fact.kind === 'cycle' || fact.kind === 'workout') {
+      scheduleDailyLog()
+    }
   } catch (err) {
     log(`engine error on ${fact.kind}: ${err}`)
   }
 }
+
+// ── Daily log (health -> memory-system bridge) ────────────────────
+// Regenerated wholesale from the archive (idempotent, no append bookkeeping):
+// one terse line per day, newest first, 90 days. Local file only: the same
+// privacy domain as the SQLite archive it summarizes.
+let dailyLogScheduled = false
+function scheduleDailyLog(): void {
+  if (dailyLogScheduled) return
+  dailyLogScheduled = true
+  setTimeout(() => {
+    dailyLogScheduled = false
+    try {
+      writeDailyLog(store)
+    } catch (err) {
+      log(`daily-log write failed: ${err}`)
+    }
+  }, 5_000)
+}
+// Boot refresh so the daily log exists/reflects the archive even before the
+// next fact arrives. Lives BELOW the let-binding: module-scope `let` has a
+// temporal dead zone, and calling above it crashes the daemon at startup.
+if (ready) scheduleDailyLog()
 
 // Per-event, per-recipient in-flight tracking: prevents duplicate injection
 // while an ack is pending, gives latecomer sessions a targeted push, frees an
@@ -236,6 +273,9 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
         // lift today" on programmed rest days). Training data only; is_today
         // false means the file is stale and should be read as "no plan yet".
         plan_today: readPlanToday(resolvePlanPath(config())),
+        // How far into WHOOP's calibration we are: scores are ballpark the
+        // first ~4 days, baselines firm up around day 30.
+        calibration: calibrationStatus(store),
       }
     }
     case 'trend': {
@@ -250,7 +290,7 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
     }
     case 'intent': {
       const activity = String(params.activity ?? 'workout')
-      const surfaced = engine.workoutIntent(activity)
+      const surfaced = engine.workoutIntent(activity, intentEnrichment(activity))
       return { activity, surfaced }
     }
     case 'poll_now': {
@@ -399,6 +439,7 @@ if (!ready) {
   }
   ready = true
   log('backfill complete: event engine is now live')
+  scheduleDailyLog() // fresh install: write the log now, not one poll later
 } else {
   await guarded('startup poll', () => pollOnce(store, onFact))
 }
@@ -464,4 +505,88 @@ function readPlanToday(planPath: string): Record<string, unknown> | null {
   } catch {
     return null
   }
+}
+
+/** Days of scored data + whether WHOOP still flags calibration, so the coach
+ *  can hedge with a number ("day 3 of ~30") instead of guessing from vibes. */
+function calibrationStatus(s: Store): Record<string, unknown> {
+  const first = s.db.query('SELECT MIN(created_at) AS at FROM recoveries').get() as {
+    at: string | null
+  } | null
+  const days = first?.at ? Math.floor((Date.now() - Date.parse(first.at)) / 86_400_000) + 1 : 0
+  const latest = s.latestRecovery()
+  return {
+    days_of_data: days,
+    calibrating: Boolean(latest?.user_calibrating),
+    baselines_solid_after_days: 30,
+  }
+}
+
+/** Plan-derived enrichment for a workout intent: when the declared activity
+ *  IS today's programmed session, carry the plan title as the label and
+ *  detect a PR day (title or any rung mentions PR/1RM), so the intent and
+ *  the eventual scored card are self-describing. */
+function intentEnrichment(activity: string): { label?: string; pr?: boolean } {
+  const plan = readPlanToday(resolvePlanPath(config()))
+  if (!plan || plan.is_today !== true || plan.rest === true) return {}
+  const title = typeof plan.title === 'string' ? plan.title : ''
+  if (!title || activity.trim().toLowerCase() !== title.trim().toLowerCase()) return {}
+  // PR detection: the TITLE only, never free-text notes. Scanning the whole
+  // plan JSON matched negating note text ("not a PR day") and flipped pr on.
+  const pr = /\b(1\s*rm|pr)\b/i.test(title)
+  return { label: title, pr }
+}
+
+/** One line per day, newest first, regenerated from the archive. The bridge
+ *  between the live health feed and the durable memory system: /gym and the
+ *  journal tooling read this instead of querying SQLite. */
+function writeDailyLog(s: Store): void {
+  const days = 90
+  const byDay = new Map<string, { rec?: string; sleep?: string; strain?: string; steps?: string }>()
+  const localDate = (iso: string, shiftMs = 0) =>
+    new Date(Date.parse(iso) + shiftMs).toLocaleDateString('sv')
+  const row = (d: string) => {
+    let r = byDay.get(d)
+    if (!r) {
+      r = {}
+      byDay.set(d, r)
+    }
+    return r
+  }
+  for (const rec of s.recentRecoveries(days)) {
+    if (rec.score_state !== 'SCORED' || rec.recovery_score == null) continue
+    const score = Math.round(rec.recovery_score as number)
+    const band = score >= 67 ? 'green' : score >= 34 ? 'amber' : 'red'
+    const sleep = rec.sleep_id ? s.getSleepById(rec.sleep_id as string) : null
+    const d = localDate(rec.created_at as string)
+    row(d).rec =
+      `recovery ${score}% ${band} · HRV ${Math.round(rec.hrv_rmssd_milli as number)} · RHR ${Math.round(rec.resting_heart_rate as number)}` +
+      (rec.user_calibrating ? ' (calibrating)' : '')
+    if (sleep?.in_bed_milli != null) {
+      const h = Math.floor((sleep.in_bed_milli as number) / 3_600_000)
+      const m = Math.round(((sleep.in_bed_milli as number) % 3_600_000) / 60_000)
+      const perf = sleep.performance_pct != null ? ` (${Math.round(sleep.performance_pct as number)}% of need)` : ''
+      row(d).sleep = `sleep ${h}h${String(m).padStart(2, '0')}m${perf}`
+    }
+  }
+  for (const c of s.recentCycles(days)) {
+    if (c.score_state !== 'SCORED' || c.strain == null) continue
+    // Cycles start at the previous evening's sleep onset; +12h lands the
+    // label on the day the cycle actually covers.
+    const d = localDate(c.start as string, 12 * 3_600_000)
+    row(d).strain = `strain ${(c.strain as number).toFixed(1)}`
+  }
+  for (const st of s.stepsByDay(days) as Array<{ day: string; total: number }>) {
+    row(st.day).steps = `steps ${st.total}`
+  }
+  const dates = [...byDay.keys()].sort().reverse()
+  const lines = dates.map((d) => {
+    const r = byDay.get(d)
+    if (!r) return d
+    return [d, r.rec, r.sleep, r.strain, r.steps].filter(Boolean).join(' | ')
+  })
+  const header =
+    '# health daily log (daemon-maintained, regenerated on every scored fact)\n' +
+    '# one line per day, newest first, last 90 days. Source of truth: health.db.\n\n'
+  writeFileSync(join(RUNTIME_DIR, 'daily-log.md'), header + lines.join('\n') + '\n')
 }

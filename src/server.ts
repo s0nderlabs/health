@@ -10,7 +10,7 @@ import { Store } from './store.js'
 import { DB_PATH } from './config.js'
 import { existsSync } from 'fs'
 
-const VERSION = '0.4.0'
+const VERSION = '0.5.0'
 
 const INSTRUCTIONS = `
 health: WHOOP recovery, sleep, and strain as a live channel. The daemon on this
@@ -34,7 +34,12 @@ event carries class + priority + ts, plus per class:
 - strain.threshold: strain, cycle_id. vitals.alert: drivers, date (the ONE
   priority=alert class). trend.alert: date. bedtime.nudge: date.
   calibration.note: week. system.health: daemon problems.
-- workout.intent: activity (the user tapped/said "starting X now": act on it).
+- workout.intent: activity, label?, pr? (the user tapped/said "starting X
+  now": act on it; label = the plan title when it IS today's session, and
+  pr=true means treat it as a PR attempt).
+- workout.card also carries intent_label / intent_pr when a declared intent
+  matched the scored workout: "powerlifting" with intent_label "Deadlift 1RM
+  Test" IS the PR session, coach it as such.
 - live.session / live.zone / live.rest: BLE-feed milestones, see below.
 
 How to act on events (the behavioral contract):
@@ -74,6 +79,19 @@ rest flag, lifts with weights/ladders). Check is_today: false means the file
 is stale, treat as "no plan written yet". USE IT: never coach "if you train
 today" blind; a rest:true day means protect the rest, and a PR day changes
 how every recovery number should be read. null = the plan bridge is unused.
+
+calibration in health__read: days_of_data + calibrating. Hedge with the
+number ("day 3: scores are ballpark") instead of guessing.
+
+BODY-STAT CANON (the user's ruling): body.weight_kilogram is a typed WHOOP
+profile value and goes stale: the user's gym log is canonical for body
+weight; never use the WHOOP number for coaching math. Max HR canon = the
+WHOOP profile value auto-raised by any higher observed workout max (the
+zones everywhere derive from it); observed max alone is meaningless early.
+
+A daemon-maintained daily log (one line per day: recovery/HRV/RHR/sleep/
+strain/steps, 90 days) lives at ~/.claude/channels/health/daily-log.md as
+the durable memory anchor: journal/gym tooling reads it instead of the db.
 
 Live feed semantics (health__live and status.live): active_source is the
 WRITER of the live record (mac has priority at home), not merely the freshest

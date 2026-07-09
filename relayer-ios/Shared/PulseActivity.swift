@@ -25,10 +25,11 @@ struct PulseAttributes: ActivityAttributes {
 }
 
 enum HrZones {
-    /// Mirrors the daemon's default max HR for zone math. The daemon owns the
+    /// Mirrors the daemon's canonical max HR (WHOOP profile value, raised by
+    /// any higher observed workout max) for zone math. The daemon owns the
     /// real value; this is display-only and synced by hand until the socket
     /// carries it.
-    static let maxHr = 185.0
+    static let maxHr = 187.0
 
     static func zone(for bpm: Int) -> Int {
         let pct = Double(bpm) / maxHr

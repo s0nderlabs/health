@@ -7,6 +7,16 @@ import type { Fact } from './poller.js'
 import type { EventClass, EventPriority, HealthConfig, WhoopCycle, WhoopRecovery, WhoopSleep, WhoopWorkout } from './types.js'
 import * as fmt from './format.js'
 
+/** A logged workout intent, claimed once by the workout it best fits. */
+interface IntentRow {
+  ts: string
+  activity: string
+  label: string
+  pr: boolean
+  claimed: boolean
+  workout_id?: string
+}
+
 export class Engine {
   constructor(
     private store: Store,
@@ -107,8 +117,22 @@ export class Engine {
 
   private onWorkout(w: WhoopWorkout): void {
     if (w.score_state !== 'SCORED' || !w.score) return
-    this.emit('workout.card', 'info', `workout.card:${w.id}`, fmt.workoutCard(w))
+    const card = fmt.workoutCard(w)
+    // Staple the declared intent onto WHOOP's anonymous sport label so the
+    // archive entry is self-describing ("Deadlift 1RM Test", pr). Claimed
+    // once per intent, closest-to-start, so a cooldown walk or two-a-day can
+    // never wear another session's label. A score REVISION re-fires here;
+    // the intent is already claimed, so the superseding card keeps the label
+    // via meta idempotently rather than re-claiming or dropping it.
+    const intent = this.claimIntentFor(w) ?? this.claimedIntentFor(w)
+    if (intent) {
+      card.content += ` Session: ${intent.label}${intent.pr ? ' (PR attempt)' : ''}.`
+      card.meta.intent_label = intent.label
+      if (intent.pr) card.meta.intent_pr = 'true'
+    }
+    this.emit('workout.card', 'info', `workout.card:${w.id}`, card)
   }
+
 
   private onCycle(c: WhoopCycle): void {
     const config = this.getConfig()
@@ -247,11 +271,74 @@ export class Engine {
   }
 
   /** Manual workout-intent trigger (the only start-detection WHOOP allows). */
-  workoutIntent(activity: string): boolean {
+  workoutIntent(activity: string, enrich?: { label?: string; pr?: boolean }): boolean {
     const ts = new Date().toISOString()
+    const label = enrich?.label?.trim() || activity
+    const pr = enrich?.pr === true
+    // Append (not overwrite) to a short intent log, so a lift-then-cooldown-
+    // walk, a two-a-day, or a slow-scoring workout can never clobber an
+    // earlier session's label. Each intent is claimed once by the workout it
+    // best matches (see onWorkout), keeping the durable archive honest.
+    const log = this.intentLog()
+    log.push({ ts, activity, label, pr, claimed: false })
+    // Prune to 24h + a hard cap so the meta value stays bounded.
+    const cutoff = Date.now() - 24 * 3_600_000
+    const pruned = log.filter((i) => Date.parse(i.ts) >= cutoff).slice(-16)
+    this.store.setMeta('intent_log', JSON.stringify(pruned))
     return this.emit('workout.intent', 'info', `workout.intent:${ts}`, {
-      content: `Starting now: ${activity}. Logged as intent at ${ts}; WHOOP will score it after completion.`,
-      meta: { class: 'workout.intent', activity },
+      content: `Starting now: ${label}.${pr ? ' This is a PR attempt.' : ''} Logged as intent at ${ts}; WHOOP will score it after completion.`,
+      meta: {
+        class: 'workout.intent',
+        activity,
+        ...(label !== activity ? { label } : {}),
+        ...(pr ? { pr: 'true' } : {}),
+      },
     })
+  }
+
+  private intentLog(): IntentRow[] {
+    try {
+      const raw = this.store.getMeta('intent_log')
+      return raw ? (JSON.parse(raw) as IntentRow[]) : []
+    } catch {
+      return []
+    }
+  }
+
+  /** Claim the unclaimed intent that best fits a scored workout (in its
+   *  window, closest to its start) and stamp it with this workout's id so it
+   *  can never staple onto a second overlapping workout (an auto-detected
+   *  cooldown walk, a two-a-day). Returns null if nothing fits. */
+  private claimIntentFor(w: WhoopWorkout): { label: string; pr: boolean } | null {
+    const start = Date.parse(w.start)
+    const end = Date.parse(w.end)
+    const log = this.intentLog()
+    let bestIdx = -1
+    let bestGap = Infinity
+    for (let i = 0; i < log.length; i++) {
+      const it = log[i]
+      if (it.claimed) continue
+      const t = Date.parse(it.ts)
+      if (t < start - 30 * 60_000 || t > end) continue
+      const gap = Math.abs(t - start)
+      if (gap < bestGap) {
+        bestGap = gap
+        bestIdx = i
+      }
+    }
+    if (bestIdx < 0) return null
+    const claimed = log[bestIdx]
+    log[bestIdx] = { ...claimed, claimed: true, workout_id: w.id }
+    this.store.setMeta('intent_log', JSON.stringify(log))
+    return { label: claimed.label, pr: claimed.pr }
+  }
+
+  /** For a score REVISION of an already-labeled workout: return the intent
+   *  THIS workout id previously claimed, so the superseding card keeps its
+   *  label instead of coming back bare. Keyed to the id, so a different
+   *  overlapping workout never inherits it. */
+  private claimedIntentFor(w: WhoopWorkout): { label: string; pr: boolean } | null {
+    const it = this.intentLog().find((i) => i.claimed && i.workout_id === w.id)
+    return it ? { label: it.label, pr: it.pr } : null
   }
 }
