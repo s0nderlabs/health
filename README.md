@@ -110,13 +110,15 @@ Bluetooth if the log stalls before "scanning".
 
 `relayer-ios/` is a SwiftUI app that takes over as the band's receiver
 whenever you are away from the Mac (gym, outside), speaking the same
-raw-frame protocol over a tailnet-only `tailscale serve` HTTPS endpoint. The
-daemon referees which device holds the band (mac-priority arbitration;
-reacquire probes run only at rest and only while the phone reports being on
-wifi, so a phone out on cellular is never interrupted). Handover is silent
-in both directions: a parked phone keeps a pending BLE connect armed, so
-walking out of the Mac's range hands it the band without opening the app.
-The app adds: a Plan tab rendering the training
+raw-frame protocol over a tailnet-only `tailscale serve` HTTPS endpoint. At
+home the daemon deliberately holds the band on BOTH receivers when it can
+(the band accepts a second central when two connects race its advertising
+window): the Mac writes the live record, the phone rides along as a hot
+standby and takes over with zero gap if the Mac drops. Away, the phone is
+the sole holder; a phone on cellular or low battery is never interrupted.
+Handover is silent in both directions: a parked phone keeps a pending BLE
+connect armed, so walking out of the Mac's range hands it the band without
+opening the app. The app adds: a Plan tab rendering the training
 plan your main session's coach writes to `plan.json` (tap-to-expand ladders,
 set-by-set completion, rest timers parsed from the plan's own prescriptions),
 a one-tap workout intent that lands in your live Claude session, a

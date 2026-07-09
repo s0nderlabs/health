@@ -112,6 +112,7 @@ final class SocketLeg: NSObject, URLSessionWebSocketDelegate {
         sendJSON([
             "type": "hello", "source": "phone",
             "device": deviceName ?? "iphone", "transport": transport,
+            "caps": ["release", "battery"],
         ])
         flush()
         schedulePing(webSocketTask)

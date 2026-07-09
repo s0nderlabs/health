@@ -95,6 +95,10 @@ final class LiveActivityController {
         }
     }
 
+    /// Daemon-assigned role while streaming: standby = the mac is the writer
+    /// and this phone is the dual-hold hot spare. Display truth only.
+    var standby = false
+
     /// Live frames land here (already on main). Throttled to ~10s unless the
     /// zone changes; the lock screen shows trend, not telemetry.
     func update(bpm: Int?) {
@@ -106,7 +110,9 @@ final class LiveActivityController {
         lastZone = zone
         state.bpm = bpm
         state.zone = zone
-        state.stateLine = bpm == nil ? "signal quiet" : "phone has the band"
+        state.stateLine = bpm == nil
+            ? "signal quiet"
+            : (standby ? "standby · Mac is live" : "phone has the band")
         push()
     }
 

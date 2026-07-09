@@ -131,6 +131,15 @@ final class BleLeg: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         startScan()
     }
 
+    /// Dual-up: drop a live connection NOW; didDisconnect re-arms the pending
+    /// connect (the radio stays on), so we immediately re-enter the race for
+    /// the band's post-drop advertising window alongside the mac.
+    func release() {
+        guard radioMode == .on, let p = peripheral, p.state == .connected else { return }
+        rlog("release: dropping the band for the dual-up race")
+        central.cancelPeripheralConnection(p)
+    }
+
     /// Foreground nudge: a pending connect that has sat unanswered for a long
     /// time may point at a rotated identifier; trade it for a fresh scan
     /// (which would also find the band if it were simply out of range).
@@ -267,16 +276,26 @@ final class BleLeg: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         connectGeneration += 1
         delegate?.bleStatus(connected: false, device: nil)
         // Keep the reference. If the radio should be on, re-arm a pending
-        // connect RIGHT NOW, inside the disconnect wake window: it persists
-        // through suspension and fires when the band is back in range. The
-        // old rescan path needed live timers the suspended app doesn't get.
+        // connect inside the disconnect wake window: it persists through
+        // suspension and fires when the band is back in range. The old
+        // rescan path needed live timers the suspended app doesn't get.
         // Identifier check: resetAndRescan drops a wedged band on purpose
         // (peripheral = nil before the cancel lands); never resurrect it.
         guard radioMode == .on, peripheral?.identifier == p.identifier else { return }
         rlog("re-arming pending connect to \(p.name ?? "unnamed")")
         anchorArmedAt = Date()
-        central.connect(p)
         delegate?.blePhase(.connecting(p.name ?? "band"))
+        // ~50ms defer, NOT synchronous: an immediate connect inside
+        // didDisconnect can wedge CoreBluetooth into a phantom .connecting
+        // with no real pending connection (Apple forums, hard-confirmed).
+        // Still comfortably inside the wake window a suspended app gets.
+        let gen = connectGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self = self, self.connectGeneration == gen,
+                  self.radioMode == .on, let cur = self.peripheral,
+                  cur.identifier == p.identifier, cur.state == .disconnected else { return }
+            self.central.connect(cur)
+        }
     }
 
     // Discovery/subscription failures after a successful connect must never

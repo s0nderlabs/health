@@ -6,19 +6,34 @@
 //
 // Protocol (JSON per message):
 //   relayer -> daemon:
-//     {type:'hello', source:'mac'|'phone', device?, transport?}  -> {type:'ok'} | {type:'standdown'}
+//     {type:'hello', source:'mac'|'phone', device?, transport?, caps?:[...]}
+//         -> {type:'ok'} | {type:'standdown'}
 //     {type:'hr', ts:<ISO|epoch-ms>, raw:<base64>}      (buffered frames replay with original ts)
 //     {type:'status', connected:bool, device?, rssi?, transport?}
 //     {type:'transport', transport:'wifi'|'cellular'}   (network path changed)
+//     {type:'battery', level:0..1, charging:bool}       (phone power state changed)
 //     {type:'steps', samples:[{uuid,start,end,count}]}  -> {type:'steps_ack', received, added}
 //     {type:'intent', activity}                         -> {type:'intent_ack', activity, surfaced}
-//   daemon -> relayer (arbitration; the band broadcasts to ONE receiver, mac
-//   has priority when its feed is live):
+//   daemon -> relayer (arbitration; the band normally serves ONE receiver, but
+//   accepts a second central when two connects land inside its post-drop
+//   advertising window; the daemon exploits that deliberately, see dual-up):
 //     {type:'standdown'}          drop BLE, keep the socket, wait for resume
 //     {type:'resume'}             start scanning again
 //     {type:'pause', seconds:N}   drop BLE for N seconds so the mac can try a
 //                                 blind reacquire; a standdown or resume follows
+//     {type:'release'}            drop the band NOW but keep hunting it (caps
+//                                 gated; the dual-up race: both receivers'
+//                                 anchors fire into the advertising window)
 //     {type:'plan_updated'}       the workout plan file changed; refetch GET /plan
+//
+// DUAL-UP (deterministic-through-retries dual connection): at home, at rest,
+// phone on wifi + power-eligible, the daemon periodically forces the band
+// free (release to whichever leg holds it) so BOTH pre-armed pending connects
+// race into the advertising window. When both win, the band streams to both:
+// mac is the single WRITER into LiveState, the phone is a hot standby whose
+// frames are shadowed (they keep freshness, never feed the math), and a
+// stale mac promotes the phone with zero gap. A lost leg is re-dualed at the
+// next eligible window. Legacy pause-probes remain for clients without caps.
 
 import { readFileSync, statSync, watch, type FSWatcher } from 'node:fs'
 import { dirname } from 'node:path'
@@ -60,6 +75,10 @@ export interface ArbTiming {
   pauseMs: number // probe window: how long the phone stays quiet
   planDebounceMs: number // collapse editor write bursts into one plan_updated
   phoneSeenThrottleMs: number // meta-write throttle while frames stream
+  dualUpWindowMs: number // how long after a release we wait for both legs
+  dualUpCooldownMs: number // min gap between dual-up attempts
+  dualUpExhaustedMs: number // rest period after maxAttempts strikeout
+  dualUpMaxAttempts: number // attempts per epoch before backing off long
 }
 
 const DEFAULT_TIMING: ArbTiming = {
@@ -69,6 +88,10 @@ const DEFAULT_TIMING: ArbTiming = {
   pauseMs: 25_000,
   planDebounceMs: 750,
   phoneSeenThrottleMs: 60_000,
+  dualUpWindowMs: 15_000,
+  dualUpCooldownMs: 180_000,
+  dualUpExhaustedMs: 1_800_000,
+  dualUpMaxAttempts: 4,
 }
 
 type RelayerMode = 'active' | 'standdown' | 'paused'
@@ -79,6 +102,8 @@ interface RelayerData {
   device: string | null
   mode: RelayerMode
   transport: Transport
+  caps: string[]
+  battery: { level: number; charging: boolean } | null
 }
 
 interface RelayerWs {
@@ -89,8 +114,15 @@ interface RelayerWs {
 export interface LiveFeedStatus {
   relayer_connected: boolean
   relayer_source: string | null
-  relayers: Array<{ source: string; device: string | null; mode: RelayerMode; transport: Transport }>
+  relayers: Array<{
+    source: string
+    device: string | null
+    mode: RelayerMode
+    transport: Transport
+    battery: { level: number; charging: boolean } | null
+  }>
   active_source: string | null
+  dual: boolean
   band_connected: boolean
   band_device: string | null
   last_frame_at: string | null
@@ -115,6 +147,12 @@ export class LiveListener {
   private probing: RelayerWs | null = null
   private probeStartedAt = 0
   private lastProbeAt = 0
+  // Dual-up orchestration: one release-and-race cycle at a time.
+  private dualWindowUntil = 0
+  private dualAttempts = 0
+  private lastDualAttemptAt = 0
+  private dualExhaustedUntil = 0
+  private wasDual = false
   private planWatcher: FSWatcher | null = null
   private planDebounce: ReturnType<typeof setTimeout> | null = null
   private lastPhoneSeenWrite = 0
@@ -146,7 +184,18 @@ export class LiveListener {
           log('rejected stream connection (bad token)')
           return new Response('unauthorized', { status: 401 })
         }
-        if (server.upgrade(req, { data: { source: 'unknown', device: null, mode: 'active', transport: 'unknown' } })) {
+        if (
+          server.upgrade(req, {
+            data: {
+              source: 'unknown',
+              device: null,
+              mode: 'active',
+              transport: 'unknown',
+              caps: [],
+              battery: null,
+            },
+          })
+        ) {
           return undefined as unknown as Response
         }
         return new Response('expected a websocket', { status: 426 })
@@ -175,7 +224,11 @@ export class LiveListener {
           // a departed relayer as the active source. If a same-source relayer
           // is still streaming, its next frame re-stamps the arrival time.
           if (![...self.relayers].some((r) => r.data.source === ws.data.source)) {
+            const wasFresh = self.sourceFresh(ws.data.source)
             self.frameArrival.delete(ws.data.source)
+            // Same walk-out grace as the status:false path: a vanished live
+            // feed must not trigger a release at the surviving holder.
+            if (wasFresh) self.lastDualAttemptAt = Date.now()
           }
           // The departing relayer may have been the one holding the band;
           // a survivor's next hr frame re-asserts connected within a second.
@@ -206,11 +259,49 @@ export class LiveListener {
     return !!expected && token === expected
   }
 
-  // ── Arbitration (mac-priority; the band broadcasts to one receiver) ──
+  // ── Arbitration (mac-priority; dual-up keeps both legs when possible) ──
 
   private sourceFresh(source: string, now = Date.now()): boolean {
     const at = this.frameArrival.get(source)
     return at != null && now - at <= this.timing.macFreshMs
+  }
+
+  /** The one source allowed to WRITE into LiveState. Mac while its feed is
+   *  live (home priority, phone shadows as hot standby); otherwise the
+   *  freshest phone. Stale mac -> the phone's very next frame promotes it,
+   *  which is the zero-gap failover dual-up exists for. */
+  private primarySource(now = Date.now()): string | null {
+    if (this.sourceFresh('mac', now)) return 'mac'
+    let best: string | null = null
+    let bestAt = 0
+    for (const [source, at] of this.frameArrival) {
+      if (source === 'mac') continue
+      if (now - at <= this.timing.macFreshMs && at > bestAt) {
+        best = source
+        bestAt = at
+      }
+    }
+    return best
+  }
+
+  /** Dual = mac and at least one phone feed fresh simultaneously. */
+  private isDual(now = Date.now()): boolean {
+    if (!this.sourceFresh('mac', now)) return false
+    for (const [source, at] of this.frameArrival) {
+      if (source !== 'mac' && now - at <= this.timing.macFreshMs) return true
+    }
+    return false
+  }
+
+  /** Power/transport gate for holding a standby connection: on wifi (home)
+   *  and charging or comfortably charged. Battery report doubles as the
+   *  capability signal: a client that reports power also handles 'release'. */
+  private dualEligible(ws: RelayerWs): boolean {
+    if (ws.data.transport !== 'wifi') return false
+    if (!ws.data.caps.includes('release')) return false
+    const b = ws.data.battery
+    if (!b) return false
+    return b.charging || b.level >= 0.4
   }
 
   private push(ws: RelayerWs, obj: Record<string, unknown>): void {
@@ -223,14 +314,18 @@ export class LiveListener {
 
   /**
    * The state machine, run every arbTickMs:
-   * - mac feed live -> every idle/paused phone stands down (a phone that is
-   *   itself streaming is left alone; physically that means synthetic tests).
+   * - mac feed live -> idle/paused phones stand down; a phone that is ALSO
+   *   fresh is the dual-hold standby and is left connected (its frames are
+   *   shadowed by the single-writer ingest gate).
    * - mac feed dead -> paused phones resume when their window expires,
-   *   standing-down phones resume immediately.
-   * - phone is the active feed + a mac relayer is connected + the user is AT
-   *   REST -> once per probeInterval, pause the phone briefly so the mac can
-   *   blind-reacquire the band (it cannot see the band while the phone holds
-   *   it). Never during a live session: no holes punched in workout data.
+   *   standing-down phones resume immediately (their parked anchor usually
+   *   already fired; the resume is the mode-level confirmation).
+   * - DUAL-UP: at rest, phone on wifi + power-eligible, both legs present but
+   *   only one holding -> release the holder so both pre-armed pending
+   *   connects race into the band's post-drop advertising window. Retry with
+   *   cooldowns until dual sticks; long backoff after a strikeout epoch.
+   * - Legacy pause-probe: for wifi phones WITHOUT dual caps, the old blind
+   *   mac-reacquire probe still runs. Never anything during a live session.
    */
   private arbitrate(now = Date.now()): void {
     const macFresh = this.sourceFresh('mac', now)
@@ -258,21 +353,117 @@ export class LiveListener {
       }
     }
 
-    // Probe initiation: only when the phone owns the feed, a mac relayer is
-    // around to take over, and a 25s gap costs nothing (resting HR).
+    this.dualUpTick(now, macFresh)
+    this.legacyProbeTick(now, macFresh)
+  }
+
+  /** One release-and-race cycle at a time; see the protocol comment up top. */
+  private dualUpTick(now: number, macFresh: boolean): void {
+    const dual = this.isDual(now)
+    if (dual) {
+      if (!this.wasDual) {
+        log('dual-up: both legs live (mac writes, phone shadows)')
+        this.pushRole('standby')
+      }
+      this.wasDual = true
+      this.dualAttempts = 0
+      this.dualWindowUntil = 0
+      // A standby draining on battery is released: a spare BLE connection is
+      // a wall-power luxury. 0.35 vs the 0.4 entry bar = hysteresis, so a
+      // phone hovering at the line doesn't flap. Battery-only on purpose:
+      // transport flips mid-walk-out while dual is still nominally true, and
+      // releasing then would drop the band on the street for nothing.
+      for (const ws of this.relayers) {
+        if (ws.data.source === 'mac' || ws.data.source === 'unknown') continue
+        const b = ws.data.battery
+        if (this.sourceFresh(ws.data.source, now) && b && !b.charging && b.level < 0.35) {
+          this.push(ws, { type: 'release' })
+          log(`dual-up: standby ${ws.data.source} battery low (${Math.round(b.level * 100)}%), released`)
+          break
+        }
+      }
+      return
+    }
+    if (this.wasDual) {
+      log('dual-up: lost a leg (single holder again)')
+      this.wasDual = false
+      this.pushRole('primary')
+      // Grace period before any re-dual attempt. Losing a leg is often the
+      // START of a walk-out (mac BLE drops while home wifi still lingers);
+      // releasing the surviving sole holder in that window would hole the
+      // feed for nothing. By the time the cooldown elapses, a walk-out has
+      // flipped transport to cellular (ineligible) and a home blip is
+      // genuinely ready to re-dual.
+      this.lastDualAttemptAt = now
+    }
+
+    // A window in flight: wait for it to close before judging the attempt.
+    if (this.dualWindowUntil > 0) {
+      if (now < this.dualWindowUntil) return
+      this.dualWindowUntil = 0
+      const holder = this.primarySource(now)
+      log(`dual-up: window closed, single holder (${holder ?? 'none'}); attempt ${this.dualAttempts}/${this.timing.dualUpMaxAttempts}`)
+      return
+    }
+
+    if (this.state.sessionActive() || this.probing) return
+    if (now - this.lastDualAttemptAt < this.timing.dualUpCooldownMs) return
+    // Sticky strikeout backoff: deliberately NOT cleared by hello/transport
+    // churn (a wifi-edge flap or reconnect storm must never re-arm a 3-min
+    // release cadence against the live holder). Natural races and app-opens
+    // still form dual for free during the backoff.
+    if (now < this.dualExhaustedUntil) return
+    if (this.dualAttempts >= this.timing.dualUpMaxAttempts) this.dualAttempts = 0
+
+    const mac = [...this.relayers].find((r) => r.data.source === 'mac')
+    const phone = [...this.relayers].find(
+      (r) => r.data.source !== 'mac' && r.data.source !== 'unknown' && this.dualEligible(r),
+    )
+    if (!mac || !phone) return
+
+    // Who holds the band decides who must let go; the other side's anchor is
+    // standing (phone: pending connect always armed; mac: scanning loop).
+    let released: string | null = null
+    if (macFresh && !this.sourceFresh(phone.data.source, now)) {
+      if (!mac.data.caps.includes('release')) return // old mac relayer build
+      this.push(mac, { type: 'release' })
+      released = 'mac'
+    } else if (!macFresh && this.sourceFresh(phone.data.source, now)) {
+      this.push(phone, { type: 'release' })
+      released = phone.data.source
+    } else {
+      return // nobody fresh: the band is off-wrist/away; nothing to race for
+    }
+    this.dualAttempts++
+    this.lastDualAttemptAt = now
+    this.dualWindowUntil = now + this.timing.dualUpWindowMs
+    if (this.dualAttempts >= this.timing.dualUpMaxAttempts) {
+      this.dualExhaustedUntil = now + this.timing.dualUpExhaustedMs
+      log(`dual-up: attempts exhausted after this one, backing off ${Math.round(this.timing.dualUpExhaustedMs / 60000)}m`)
+    }
+    log(`dual-up: released ${released}, racing both anchors (attempt ${this.dualAttempts}/${this.timing.dualUpMaxAttempts})`)
+  }
+
+  /** Role display truth for the phone UI: standby = the mac holds the pen
+   *  and the phone's stream is the shadowed hot spare. */
+  private pushRole(role: 'standby' | 'primary'): void {
+    for (const ws of this.relayers) {
+      if (ws.data.source === 'mac' || ws.data.source === 'unknown') continue
+      this.push(ws, { type: 'role', role })
+    }
+  }
+
+  /** Legacy blind probe for wifi phones without dual caps. Kept verbatim
+   *  from the pre-dual build; dual-capable phones never reach it. */
+  private legacyProbeTick(now: number, macFresh: boolean): void {
     if (macFresh || this.probing || this.state.sessionActive()) return
     if (now - this.lastProbeAt < this.timing.probeIntervalMs) return
     const macConnected = [...this.relayers].some((r) => r.data.source === 'mac')
     if (!macConnected) return
     for (const ws of this.relayers) {
       if (ws.data.source === 'mac' || ws.data.source === 'unknown') continue
-      // Probe only phones that affirmatively report wifi. The phone carries
-      // the band, so its network IS the band's location: cellular means it is
-      // away from home and the mac cannot possibly win the probe; the pause
-      // would just punch a hole in the live feed. A client that reports no
-      // transport at all predates the pause-survival fix (it suspends with
-      // the radio off and never hears the resume), so it is never probed.
       if (ws.data.transport !== 'wifi') continue
+      if (this.dualEligible(ws)) continue // dual-up owns this phone
       if (ws.data.mode === 'active' && this.sourceFresh(ws.data.source, now)) {
         ws.data.mode = 'paused'
         this.probing = ws
@@ -300,8 +491,13 @@ export class LiveListener {
         ws.data.source = String(msg.source ?? 'unknown')
         ws.data.device = msg.device ? String(msg.device) : null
         ws.data.transport = parseTransport(msg.transport)
+        ws.data.caps = Array.isArray(msg.caps)
+          ? msg.caps.filter((c): c is string => typeof c === 'string').slice(0, 16)
+          : []
+        // A relayer reconnect changes the topology: give dual-up a new epoch.
+        this.dualAttempts = 0
         log(
-          `hello from ${ws.data.source}${ws.data.device ? ` (${ws.data.device})` : ''}${ws.data.transport !== 'unknown' ? ` via ${ws.data.transport}` : ''}`,
+          `hello from ${ws.data.source}${ws.data.device ? ` (${ws.data.device})` : ''}${ws.data.transport !== 'unknown' ? ` via ${ws.data.transport}` : ''}${ws.data.caps.length ? ` caps=[${ws.data.caps.join(',')}]` : ''}`,
         )
         if (ws.data.source !== 'mac' && ws.data.source !== 'unknown') {
           this.phoneSeen(true)
@@ -334,6 +530,15 @@ export class LiveListener {
         this.lastFrameAt = Date.now()
         this.frameArrival.set(ws.data.source, this.lastFrameAt)
         this.bandConnected = true
+        // Single-writer gate: during a dual hold, only the primary source
+        // feeds the live math (a second receiver's interleaved copies would
+        // double the sample rate and poison RR/HRV). Freshness was stamped
+        // above, so a returning mac promotes itself with this very frame,
+        // and a stale mac hands the pen to the phone with zero gap.
+        if (ws.data.source !== this.primarySource()) {
+          if (ws.data.source !== 'mac' && ws.data.source !== 'unknown') this.phoneSeen()
+          return
+        }
         if (ws.data.source !== 'mac' && ws.data.source !== 'unknown') this.phoneSeen()
         this.state.addSample(ts, sample)
         break
@@ -342,6 +547,21 @@ export class LiveListener {
         this.bandConnected = Boolean(msg.connected)
         this.bandDevice = msg.device ? String(msg.device) : this.bandDevice
         if (msg.transport != null) ws.data.transport = parseTransport(msg.transport)
+        // A relayer's own "I dropped the band" clears its freshness NOW
+        // instead of letting it coast on macFreshMs. This is what makes
+        // failover actually zero-gap (the standby's next frame takes the pen
+        // immediately), keeps isDual/role truthful after a release, and
+        // stops a just-released mac from shadowing the phone's real frames.
+        // Unclean deaths (no status) still age out via macFreshMs/close.
+        if (msg.connected === false) {
+          const wasFresh = this.sourceFresh(ws.data.source)
+          this.frameArrival.delete(ws.data.source)
+          // A live feed vanishing may be the START of a walk-out; stamp the
+          // dual-up grace HERE, not only on a tick-observed dual loss (a
+          // short-lived dual can die between arb ticks and would otherwise
+          // release the surviving sole holder into the exit).
+          if (wasFresh) this.lastDualAttemptAt = Date.now()
+        }
         log(
           `band ${this.bandConnected ? 'connected' : 'disconnected'}${this.bandDevice ? ` (${this.bandDevice})` : ''}`,
         )
@@ -349,7 +569,15 @@ export class LiveListener {
       }
       case 'transport': {
         ws.data.transport = parseTransport(msg.transport)
+        this.dualAttempts = 0 // topology change: fresh dual-up epoch
         log(`${ws.data.source} transport: ${ws.data.transport}`)
+        break
+      }
+      case 'battery': {
+        const level = typeof msg.level === 'number' ? msg.level : Number.NaN
+        if (Number.isFinite(level) && level >= 0 && level <= 1) {
+          ws.data.battery = { level, charging: Boolean(msg.charging) }
+        }
         break
       }
       case 'steps': {
@@ -512,14 +740,9 @@ export class LiveListener {
 
   status(): LiveFeedStatus {
     const now = Date.now()
-    let active: string | null = null
-    let activeAt = 0
-    for (const [source, at] of this.frameArrival) {
-      if (now - at <= this.timing.macFreshMs && at > activeAt) {
-        active = source
-        activeAt = at
-      }
-    }
+    // The writer, not merely the freshest: during a dual hold the freshest
+    // source alternates frame-by-frame, but the pen stays with the primary.
+    const active = this.primarySource(now)
     const first = this.relayers.values().next().value as RelayerWs | undefined
     return {
       relayer_connected: this.relayers.size > 0,
@@ -529,8 +752,10 @@ export class LiveListener {
         device: r.data.device,
         mode: r.data.mode,
         transport: r.data.transport,
+        battery: r.data.battery,
       })),
       active_source: active,
+      dual: this.isDual(now),
       band_connected: this.bandConnected,
       band_device: this.bandDevice,
       last_frame_at: this.lastFrameAt ? new Date(this.lastFrameAt).toISOString() : null,

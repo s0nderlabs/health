@@ -39,6 +39,9 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
     @Published var bpm: Int?
     @Published var lastFrameAt: Date?
     @Published var lastAck: String?
+    /// Daemon-assigned dual-hold role: "standby" while the mac writes and
+    /// this phone shadows as the hot spare; nil/"primary" otherwise.
+    @Published var role: String?
 
     /// Set by the app: fired when the daemon pushes plan_updated OR when the
     /// socket reconnects (a push may have been missed while it was down).
@@ -55,6 +58,27 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
     init() {
         socket.delegate = self
         ble.delegate = self
+        // Power state feeds the daemon's dual-up gate: a hot-standby BLE
+        // connection at home is only worth holding on wall power or a
+        // comfortable charge.
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        for name in [UIDevice.batteryLevelDidChangeNotification,
+                     UIDevice.batteryStateDidChangeNotification] {
+            NotificationCenter.default.addObserver(
+                forName: name, object: nil, queue: .main
+            ) { [weak self] _ in self?.sendBattery() }
+        }
+    }
+
+    private func sendBattery() {
+        let level = UIDevice.current.batteryLevel
+        guard level >= 0 else { return } // -1 = unknown (simulator)
+        let state = UIDevice.current.batteryState
+        socket.sendJSON([
+            "type": "battery",
+            "level": Double(level),
+            "charging": state == .charging || state == .full,
+        ])
     }
 
     func start() {
@@ -146,6 +170,7 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
     func socketDidConnect() {
         guard !Demo.active else { return }
         socketConnected = true
+        sendBattery() // hello carries caps; this completes the dual-up gate
         // A plan_updated push only reaches CURRENTLY-connected relayers, so a
         // plan rewritten during a socket blip would be missed while the app
         // stays foregrounded (scenePhase never re-fires). Reconcile on connect.
@@ -173,6 +198,8 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
             pauseSafety?.cancel()
             rlog("daemon: standdown (mac owns the band)")
             applyMode(.standdown)
+            role = nil
+            LiveActivityController.shared.standby = false
             // Home: the mac streams now; the session (if any) is over.
             LiveActivityController.shared.macTookBand()
             SessionProgress.shared.endSession()
@@ -180,6 +207,17 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
             pauseSafety?.cancel()
             rlog("daemon: resume")
             applyMode(.active)
+        case "release":
+            // Dual-up race: let the band go; the anchor re-arms on disconnect
+            // and races the mac into the advertising window. Mode is untouched:
+            // whoever wins (ideally both) settles through frames + arbitration.
+            rlog("daemon: release (dual-up)")
+            ble.release()
+        case "role":
+            let role = (payload["role"] as? String) ?? "primary"
+            rlog("daemon: role \(role)")
+            self.role = role
+            LiveActivityController.shared.standby = role == "standby"
         case "pause":
             let seconds = (payload["seconds"] as? Double) ?? 25
             rlog("daemon: pause \(seconds)s (mac reacquire probe)")

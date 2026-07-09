@@ -194,6 +194,12 @@ const FAST = {
   pauseMs: 200,
   planDebounceMs: 50,
   phoneSeenThrottleMs: 50,
+  dualUpWindowMs: 200,
+  // Generous vs the arb tick so "no release inside the grace window"
+  // assertions survive suite-load event-loop drift.
+  dualUpCooldownMs: 1000,
+  dualUpExhaustedMs: 3000,
+  dualUpMaxAttempts: 2,
 }
 
 function makeArbListener(opts: LiveListenerOpts = {}) {
@@ -216,16 +222,21 @@ async function relayer(
   port: number,
   source: string,
   transport?: string,
+  opts?: { caps?: string[]; battery?: { level: number; charging: boolean } },
 ): Promise<{ ws: WebSocket; msgs: string[]; helloReply: string }> {
   const ws = await connect(port)
   const msgs: string[] = []
   ws.onmessage = (e) => msgs.push(String(e.data))
   const hello: Record<string, unknown> = { type: 'hello', source, device: `${source}-test` }
   if (transport) hello.transport = transport
+  if (opts?.caps) hello.caps = opts.caps
   ws.send(JSON.stringify(hello))
   await waitFor(() => msgs.length >= 1)
+  if (opts?.battery) ws.send(JSON.stringify({ type: 'battery', ...opts.battery }))
   return { ws, msgs, helloReply: msgs[0] }
 }
+
+const DUAL_CAPS = { caps: ['release', 'battery'], battery: { level: 0.9, charging: true } }
 
 async function waitFor(cond: () => boolean, timeoutMs = 3000): Promise<void> {
   const t0 = Date.now()
@@ -369,6 +380,171 @@ describe('arbitration (mac priority)', () => {
     cleanup.push(() => clearInterval(feed))
     await Bun.sleep(FAST.probeIntervalMs * 2 + 100)
     expect(has(phone.msgs, 'pause')).toBe(false)
+    mac.ws.close()
+    phone.ws.close()
+  })
+
+  test('dual-up releases the solo phone holder when both legs are eligible', async () => {
+    const { listener, port } = makeArbListener()
+    cleanup.push(() => listener.stop())
+    const mac = await relayer(port, 'mac', undefined, { caps: ['release'] })
+    const phone = await relayer(port, 'phone', 'wifi', DUAL_CAPS)
+    const feed = setInterval(() => phone.ws.send(hrFrame(Date.now() - 500, 70)), 60)
+    cleanup.push(() => clearInterval(feed))
+    await waitFor(() => has(phone.msgs, 'release'))
+    // No pause probe for a dual-capable phone: release IS the mechanism.
+    expect(has(phone.msgs, 'pause')).toBe(false)
+    mac.ws.close()
+    phone.ws.close()
+  })
+
+  test('dual-up releases the mac when it holds and the phone is parked', async () => {
+    const { listener, port } = makeArbListener()
+    cleanup.push(() => listener.stop())
+    const mac = await relayer(port, 'mac', undefined, { caps: ['release'] })
+    const macFeed = setInterval(() => mac.ws.send(hrFrame(Date.now() - 500, 65)), 60)
+    cleanup.push(() => clearInterval(macFeed))
+    await Bun.sleep(80)
+    const phone = await relayer(port, 'phone', 'wifi', DUAL_CAPS)
+    expect(JSON.parse(phone.helloReply).type).toBe('standdown')
+    await waitFor(() => has(mac.msgs, 'release'))
+    mac.ws.close()
+    phone.ws.close()
+  })
+
+  test('no dual-up release without the caps/battery gate; legacy probe covers it', async () => {
+    const { listener, port } = makeArbListener()
+    cleanup.push(() => listener.stop())
+    const mac = await relayer(port, 'mac', undefined, { caps: ['release'] })
+    const phone = await relayer(port, 'phone', 'wifi', {
+      caps: ['release', 'battery'],
+      battery: { level: 0.2, charging: false }, // low + unplugged: standby too costly
+    })
+    const feed = setInterval(() => phone.ws.send(hrFrame(Date.now() - 500, 70)), 60)
+    cleanup.push(() => clearInterval(feed))
+    await waitFor(() => has(phone.msgs, 'pause'))
+    expect(has(phone.msgs, 'release')).toBe(false)
+    mac.ws.close()
+    phone.ws.close()
+  })
+
+  test('dual hold: mac is the single writer, phone frames are shadowed', async () => {
+    const { listener, state, port } = makeArbListener()
+    cleanup.push(() => listener.stop())
+    const mac = await relayer(port, 'mac', undefined, { caps: ['release'] })
+    const phone = await relayer(port, 'phone', 'wifi', DUAL_CAPS)
+    let t = Date.now() - 5000
+    const feeds = setInterval(() => {
+      t += 1000
+      mac.ws.send(hrFrame(t, 70))
+      phone.ws.send(hrFrame(t + 100, 180)) // interleaved copy from the standby
+    }, 60)
+    cleanup.push(() => clearInterval(feeds))
+    await waitFor(() => listener.status().dual)
+    expect(listener.status().active_source).toBe('mac')
+    const bpm = state.snapshot(Date.now()).bpm as number
+    expect(bpm).toBeLessThan(120) // phone's 180s never reached the math
+    mac.ws.close()
+    phone.ws.close()
+  })
+
+  test('losing a dual leg starts a grace period: the surviving sole holder is not released (walk-out)', async () => {
+    const { listener, port } = makeArbListener()
+    cleanup.push(() => listener.stop())
+    const mac = await relayer(port, 'mac', undefined, { caps: ['release'] })
+    const phone = await relayer(port, 'phone', 'wifi', DUAL_CAPS)
+    let t = Date.now() - 8000
+    const feeds = setInterval(() => {
+      t += 1000
+      mac.ws.send(hrFrame(t, 70))
+      phone.ws.send(hrFrame(t + 100, 72))
+    }, 60)
+    cleanup.push(() => clearInterval(feeds))
+    await waitFor(() => listener.status().dual)
+    // Walk-out: the mac's BLE drops (status admission), phone keeps streaming.
+    clearInterval(feeds)
+    mac.ws.send(JSON.stringify({ type: 'status', connected: false }))
+    const phoneFeed = setInterval(() => {
+      t += 1000
+      phone.ws.send(hrFrame(t, 95))
+    }, 60)
+    cleanup.push(() => clearInterval(phoneFeed))
+    await waitFor(() => !listener.status().dual)
+    // Inside the grace window: no release at the sole holder.
+    await Bun.sleep(FAST.dualUpCooldownMs - 400)
+    expect(has(phone.msgs, 'release')).toBe(false)
+    // Wifi drops as he leaves; now ineligible: still never released.
+    phone.ws.send(JSON.stringify({ type: 'transport', transport: 'cellular' }))
+    await Bun.sleep(FAST.dualUpCooldownMs + 200)
+    expect(has(phone.msgs, 'release')).toBe(false)
+    mac.ws.close()
+    phone.ws.close()
+  })
+
+  test('a status disconnect clears freshness: failover to the standby is immediate, not macFreshMs later', async () => {
+    const { listener, state, port } = makeArbListener()
+    cleanup.push(() => listener.stop())
+    const mac = await relayer(port, 'mac', undefined, { caps: ['release'] })
+    const phone = await relayer(port, 'phone', 'wifi', DUAL_CAPS)
+    let t = Date.now() - 8000
+    for (let i = 0; i < 6; i++) {
+      t += 1000
+      mac.ws.send(hrFrame(t, 70))
+      phone.ws.send(hrFrame(t + 100, 180))
+    }
+    await waitFor(() => listener.status().dual)
+    // Mac admits the drop; the phone's very next frame must take the pen
+    // (no macFreshMs coasting).
+    mac.ws.send(JSON.stringify({ type: 'status', connected: false }))
+    await Bun.sleep(50)
+    t += 1000
+    phone.ws.send(hrFrame(t, 180))
+    await waitFor(() => listener.status().active_source === 'phone', 1000)
+    await waitFor(() => (state.snapshot(Date.now()).bpm as number) > 150, 1000)
+    mac.ws.close()
+    phone.ws.close()
+  })
+
+  test('a standby draining below the battery floor is released mid-dual', async () => {
+    const { listener, port } = makeArbListener()
+    cleanup.push(() => listener.stop())
+    const mac = await relayer(port, 'mac', undefined, { caps: ['release'] })
+    const phone = await relayer(port, 'phone', 'wifi', DUAL_CAPS)
+    let t = Date.now() - 5000
+    const feeds = setInterval(() => {
+      t += 1000
+      mac.ws.send(hrFrame(t, 70))
+      phone.ws.send(hrFrame(t + 100, 72))
+    }, 60)
+    cleanup.push(() => clearInterval(feeds))
+    await waitFor(() => listener.status().dual)
+    expect(has(phone.msgs, 'release')).toBe(false)
+    phone.ws.send(JSON.stringify({ type: 'battery', level: 0.3, charging: false }))
+    await waitFor(() => has(phone.msgs, 'release'))
+    mac.ws.close()
+    phone.ws.close()
+  })
+
+  test('failover: mac goes stale mid-dual and the phone promotes with its next frame', async () => {
+    const { listener, state, port } = makeArbListener()
+    cleanup.push(() => listener.stop())
+    const mac = await relayer(port, 'mac', undefined, { caps: ['release'] })
+    const phone = await relayer(port, 'phone', 'wifi', DUAL_CAPS)
+    let t = Date.now() - 10000
+    for (let i = 0; i < 5; i++) {
+      t += 1000
+      mac.ws.send(hrFrame(t, 70))
+      phone.ws.send(hrFrame(t + 100, 180))
+    }
+    await waitFor(() => listener.status().dual)
+    // Mac dies; the phone keeps streaming.
+    await Bun.sleep(FAST.macFreshMs + 100)
+    for (let i = 0; i < 4; i++) {
+      t += 1000
+      phone.ws.send(hrFrame(t, 180))
+    }
+    await waitFor(() => listener.status().active_source === 'phone')
+    await waitFor(() => (state.snapshot(Date.now()).bpm as number) > 150)
     mac.ws.close()
     phone.ws.close()
   })

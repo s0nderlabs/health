@@ -57,6 +57,8 @@ final class SocketLeg: NSObject, URLSessionWebSocketDelegate {
     private var buffer: [String] = [] // frames queued while down (~10 min cap)
     private let bufferCap = 600
     private var deviceName: String?
+    /// Daemon arbitration commands (today just 'release' for dual-up races).
+    var onCommand: ((String) -> Void)?
 
     init(config: Config) {
         self.config = config
@@ -83,7 +85,10 @@ final class SocketLeg: NSObject, URLSessionWebSocketDelegate {
         connected = true
         backoff = 1
         log("socket up (\(config.url.absoluteString))")
-        sendJSON(["type": "hello", "source": "mac", "device": deviceName ?? "unknown"])
+        sendJSON([
+            "type": "hello", "source": "mac",
+            "device": deviceName ?? "unknown", "caps": ["release"],
+        ])
         flush()
         schedulePing(webSocketTask)
     }
@@ -101,8 +106,14 @@ final class SocketLeg: NSObject, URLSessionWebSocketDelegate {
         t.receive { [weak self] result in
             guard let self = self, self.task === t else { return }
             switch result {
-            case .success:
-                self.receiveLoop(t) // server messages (ok/standdown) need no action on mac
+            case .success(let message):
+                if case .string(let text) = message,
+                   let data = text.data(using: .utf8),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let type = json["type"] as? String {
+                    self.onCommand?(type)
+                }
+                self.receiveLoop(t)
             case .failure(let err):
                 self.dropAndRetry("receive failed: \(err.localizedDescription)")
             }
@@ -231,6 +242,15 @@ final class BleLeg: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.startScan() }
     }
 
+    /// Dual-up: drop the band NOW and rescan; the scan is the mac's standing
+    /// entry in the race for the band's post-drop advertising window (the
+    /// phone races with its pending connect).
+    func release() {
+        guard let p = peripheral, p.state == .connected else { return }
+        log("release: dropping the band for the dual-up race")
+        resetAndRescan(p)
+    }
+
     private func startScan() {
         guard central.state == .poweredOn else { return }
         guard peripheral == nil else { return }
@@ -352,5 +372,8 @@ let config = Config.load()
 let socket = SocketLeg(config: config)
 socket.connect()
 let ble = BleLeg(socket: socket)
+socket.onCommand = { type in
+    if type == "release" { ble.release() }
+}
 log("up (daemon: \(config.url.absoluteString))")
 RunLoop.main.run()

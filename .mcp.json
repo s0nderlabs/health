@@ -1,11 +1,8 @@
 {
   "mcpServers": {
     "health": {
-      "command": "sh",
-      "args": [
-        "-c",
-        "cd \"${CLAUDE_PLUGIN_ROOT:-.}\" && exec bun run --shell=bun --silent start"
-      ]
+      "command": "bun",
+      "args": ["run", "--cwd", "${CLAUDE_PLUGIN_ROOT}", "--shell=bun", "--silent", "start"]
     }
   }
 }

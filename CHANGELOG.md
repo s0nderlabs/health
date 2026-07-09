@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.4.0 - 2026-07-09
+
+### Added
+
+- **Dual connections (hot standby).** The band accepts a second BLE central
+  when two connects land inside its post-drop advertising window; the daemon
+  now maintains that state deliberately. Single-writer ingest: only the
+  primary source (mac at home) feeds the live math while the standby's frames
+  are shadowed, so a doubled stream can never pollute HR/HRV; a disconnect
+  admission from the primary hands the pen to the standby with the very next
+  frame (zero-gap failover). Dual-up orchestration: at rest, on wifi, with the
+  phone power-eligible (charging or >=40%), the daemon releases the current
+  holder so both standing anchors race back in; retries with cooldown, a
+  per-epoch attempt cap, and a sticky strikeout backoff that reconnect or
+  wifi-edge churn cannot re-arm. Losing a dual leg starts a grace period so a
+  walk-out's surviving holder is never released mid-exit. Standbys draining
+  below 35% unplugged are released (a spare connection is a wall-power
+  luxury). The phone reports its role: the app and lock screen show
+  "standby · Mac is live" instead of claiming the band.
+- **`release` arbitration message + capability negotiation.** Relayers
+  advertise caps in hello (mac: release; phone: release + battery); the
+  daemon only orchestrates against clients that opted in. The mac relayer now
+  parses inbound commands. Legacy pause-probes remain for cap-less clients.
+- **`plan_today` in `health__read`**: the /gym-authored session (title, rest
+  flag, lifts) with an `is_today` freshness flag, so the in-chat coach is
+  never schedule-blind on rest days or PR days.
+- **Documented wire format.** The server instructions now spell out the
+  literal channel envelope, per-event-class meta attributes, the plan_today
+  contract, and the dual/active_source semantics (active_source = the
+  WRITER). No skill load is required for any of it.
+- **tmux status segment** (`scripts/tmux-bpm.ts`): zone-colored live BPM off
+  the daemon's IPC socket; prints nothing when there is no live feed.
+
+### Fixed
+
+- iOS pending-connect re-arm inside didDisconnect is now deferred ~50ms
+  (CoreBluetooth can otherwise wedge in a phantom connecting state with no
+  real pending connection).
+- A relayer's `status connected:false` clears its feed freshness immediately
+  instead of coasting on the staleness window, which also keeps the dual flag
+  and the phone's role display truthful after a release.
+- `/health` skill allowed-tools now include the installed plugin-scoped tool
+  IDs (previously only the dev-channel form, which could permission-prompt).
+- Plugin manifest no longer depends on CLAUDE_PLUGIN_ROOT as an environment
+  variable (Claude Code stopped exporting it to plugin MCP spawns, which
+  killed the server at launch with -32000); the path is now substituted as a
+  whole argument, matching attn/inb0x.
+
 ## 0.3.1 - 2026-07-09
 
 ### Fixed

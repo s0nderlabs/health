@@ -231,6 +231,11 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
         workouts_today: store.recentWorkouts(1),
         body: store.db.query('SELECT * FROM body WHERE id = 1').get(),
         steps_today: store.stepsToday(),
+        // Today's programmed session from the /gym-authored plan file, so the
+        // in-chat coach is never schedule-blind (it used to coach "if you
+        // lift today" on programmed rest days). Training data only; is_today
+        // false means the file is stale and should be read as "no plan yet".
+        plan_today: readPlanToday(resolvePlanPath(config())),
       }
     }
     case 'trend': {
@@ -445,3 +450,18 @@ process.on('uncaughtException', (err) => {
   log(`uncaught exception: ${err}`)
   shutdown('uncaught exception')
 })
+
+/** Parse the /gym-authored plan file for health__read's plan_today block.
+ *  Adds is_today (local date match) so a stale file reads as "no plan yet"
+ *  instead of yesterday's session. Never throws: a missing/garbled file is
+ *  simply null (the plan bridge is optional). */
+function readPlanToday(planPath: string): Record<string, unknown> | null {
+  try {
+    const raw = JSON.parse(readFileSync(planPath, 'utf8')) as Record<string, unknown>
+    if (raw == null || typeof raw !== 'object') return null
+    const today = new Date().toLocaleDateString('sv') // YYYY-MM-DD, local tz
+    return { ...raw, is_today: raw.date === today }
+  } catch {
+    return null
+  }
+}

@@ -3,6 +3,14 @@ name: health
 description: WHOOP health read — today's recovery, HRV, RHR, sleep, strain, plus trends, config, daemon status, and the "starting a workout" trigger. Use when the user asks for their recovery, sleep, strain, readiness, health trend, or says they are starting a workout.
 user-invocable: true
 allowed-tools:
+  # Installed-plugin tool IDs (plugin-scoped) + dev-channel IDs; both listed
+  # so /health never permission-prompts on its own tools in either mode.
+  - mcp__plugin_health_health__health__read
+  - mcp__plugin_health_health__health__trend
+  - mcp__plugin_health_health__health__workout_intent
+  - mcp__plugin_health_health__health__config
+  - mcp__plugin_health_health__health__status
+  - mcp__plugin_health_health__health__live
   - mcp__health__health__read
   - mcp__health__health__trend
   - mcp__health__health__workout_intent

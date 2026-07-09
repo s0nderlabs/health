@@ -10,15 +10,32 @@ import { Store } from './store.js'
 import { DB_PATH } from './config.js'
 import { existsSync } from 'fs'
 
-const VERSION = '0.3.1'
+const VERSION = '0.4.0'
 
 const INSTRUCTIONS = `
 health: WHOOP recovery, sleep, and strain as a live channel. The daemon on this
 machine archives every WHOOP record locally and pushes events here.
 
-Events arrive as <channel> messages (recovery briefs, workout cards, strain
-crossings, early-warning vitals alerts, bedtime nudges). Payloads carry the
-numbers, drivers, and band; you translate them for the user as their coach.
+No skill load is required: these instructions and the tools are active from
+connect, and events inject on their own. The /health skill is a convenience
+wrapper for on-demand reads, nothing more.
+
+WIRE FORMAT. Events inject as channel messages shaped like:
+  <channel source="plugin:health:health" class="recovery.brief"
+           priority="info|notable|alert" ts="<ISO>" ...>coach-readable prose
+  with every number inline</channel>
+(source is "health" when loaded as a dev channel). The content IS the payload:
+read the numbers out of the prose. meta attributes are for routing; every
+event carries class + priority + ts, plus per class:
+- recovery.brief: score, band (green/amber/red), calibrating, sleep_id.
+  Content: recovery %, HRV/RHR vs 7-day baseline, SpO2/skin temp, sleep line.
+- workout.card: sport, strain, workout_id. Content: sport, duration, strain,
+  avg/max HR, kcal, zone minutes.
+- strain.threshold: strain, cycle_id. vitals.alert: drivers, date (the ONE
+  priority=alert class). trend.alert: date. bedtime.nudge: date.
+  calibration.note: week. system.health: daemon problems.
+- workout.intent: activity (the user tapped/said "starting X now": act on it).
+- live.session / live.zone / live.rest: BLE-feed milestones, see below.
 
 How to act on events (the behavioral contract):
 - Voice: professional coach. Number first, then state, then 2-3 drivers, then
@@ -52,10 +69,23 @@ fold it into reads (training strain says nothing about NEAT; a 2k-step desk
 day and a 12k-step day are different recovery pictures). Arrives in batches,
 roughly hourly; treat the number as "as of latest_sample_end", never live.
 
-Tools: health__read (today), health__trend (multi-day), health__workout_intent
-(user says they are starting a workout NOW; WHOOP cannot detect starts),
-health__live (live BPM/zone/HRV while the band broadcasts), health__config
-(event toggles, thresholds, quiet hours), health__status (daemon).
+plan_today in health__read is the /gym-authored programmed session (title,
+rest flag, lifts with weights/ladders). Check is_today: false means the file
+is stale, treat as "no plan written yet". USE IT: never coach "if you train
+today" blind; a rest:true day means protect the rest, and a PR day changes
+how every recovery number should be read. null = the plan bridge is unused.
+
+Live feed semantics (health__live and status.live): active_source is the
+WRITER of the live record (mac has priority at home), not merely the freshest
+device. dual:true means both the mac and the phone hold the band: the mac
+writes, the phone is a hot standby that takes over with zero gap; this is
+normal and healthy at home, not a conflict.
+
+Tools: health__read (today + plan_today), health__trend (multi-day),
+health__workout_intent (user says they are starting a workout NOW; WHOOP
+cannot detect starts), health__live (live BPM/zone/HRV while the band
+broadcasts), health__config (event toggles, thresholds, quiet hours),
+health__status (daemon).
 `.trim()
 
 export function createServer(ipc: IpcClient) {

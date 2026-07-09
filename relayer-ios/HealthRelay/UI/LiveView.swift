@@ -193,6 +193,13 @@ struct LiveView: View {
                     .font(.caption)
                     .foregroundStyle(Theme.textTertiary)
                     .padding(.top, 6)
+            } else if relay.role == "standby" {
+                // Dual hold: the mac writes the record; this stream is the
+                // hot spare that takes over the instant the mac goes quiet.
+                Text("standby · Mac is live")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textTertiary)
+                    .padding(.top, 6)
             }
         }
     }
