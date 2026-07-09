@@ -229,6 +229,11 @@ export class LiveState {
     }
   }
 
+  /** Is a workout session currently in progress? (Arbitration probe guard.) */
+  sessionActive(): boolean {
+    return this.session != null
+  }
+
   /** Time-driven transitions; call every ~30s. Ends a session on feed silence. */
   tick(now: number): void {
     if (this.session && this.lastTs && now - this.lastTs >= FEED_DROP_END_S * 1000) {

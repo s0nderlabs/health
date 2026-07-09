@@ -1,6 +1,6 @@
 {
   "name": "health",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "description": "WHOOP channel plugin for Claude Code. Recovery, sleep, and strain stream into Claude as events; Claude becomes your health instructor.",
   "main": "src/index.ts",

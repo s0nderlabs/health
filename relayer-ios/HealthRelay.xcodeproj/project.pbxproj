@@ -1,0 +1,580 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		00F1C40FF8934D43701AC5DC /* EndSessionIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9582FF7521F2BE06326B5A6 /* EndSessionIntent.swift */; };
+		24B428346BA6421CAF5F8E34 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FDFDBDFCD7BFAA2E34B4160 /* Theme.swift */; };
+		25DA4A346C9E88B93115B975 /* HealthRelayWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 3F75F9042D1CE69087E1D44F /* HealthRelayWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		3C802DEEDB74EE65F631BEFB /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DF2D996A0FBD15E16A4F283A /* Assets.xcassets */; };
+		436788EFD07D21B614DCB97F /* EndSessionIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9582FF7521F2BE06326B5A6 /* EndSessionIntent.swift */; };
+		4545C382505B7A2469BA1625 /* LiveView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCEA0F403F414A3D81713AF0 /* LiveView.swift */; };
+		457A2BCAC5D39842C51B55BE /* PlanStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 225726ED5C2B1E6B7E6622FC /* PlanStore.swift */; };
+		558AB8EBDEA37E89C8BFF0DF /* PlanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7047A0E516BF3C61DDBEB905 /* PlanView.swift */; };
+		59CEBCE80094572B77981DA5 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F15C0824BE664359828A19B /* Keychain.swift */; };
+		5E1FFF8CA6502D77E6C0DFAF /* PulseActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7857D126E229CA112B2237A3 /* PulseActivity.swift */; };
+		602238A2BDC3C2A896BC6363 /* SocketLeg.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A24BCDD8CFA18FB513E0089 /* SocketLeg.swift */; };
+		6AEB5D19F301263AD0119C21 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FDFDBDFCD7BFAA2E34B4160 /* Theme.swift */; };
+		775DC092F6664C2AB6082214 /* HealthRelayWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = C29AC53190A143ED4368A8D4 /* HealthRelayWidgets.swift */; };
+		858B13EBBA1D2EB0A5F0DB60 /* RelayController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 860056F69532516604902542 /* RelayController.swift */; };
+		884152E5D1F5FCC35695A1CC /* PulseActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7857D126E229CA112B2237A3 /* PulseActivity.swift */; };
+		8F119B456B2E6C5A6E5BEF56 /* HealthRelayApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD5742C77ED5B0FE27A6C9A4 /* HealthRelayApp.swift */; };
+		922ADEDC379D9A3D28B03DFE /* BleLeg.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33A0B5A8C357C1E29CC3B4DD /* BleLeg.swift */; };
+		A239F28AA97AD2844BF82AFA /* Settings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48C4EF4AB3A7E881A50E208A /* Settings.swift */; };
+		ABC8D64C5466F7F9F993AF41 /* LiveActivityController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54A8187D9DBB0F6A24ECF7FE /* LiveActivityController.swift */; };
+		BB140371ECD3394B5878D0A9 /* StepsCourier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30521B200C323A43A1C00934 /* StepsCourier.swift */; };
+		C1FDDA7C59C5AB9579A1DB2C /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F51C6B23C65BB01F03022C0C /* SettingsView.swift */; };
+		D2B5E64BDA2FFD33874065A6 /* SessionProgress.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6B8F07C72771C974D660880 /* SessionProgress.swift */; };
+		EC55FAC5F3C4618E5EC020A2 /* HrLocal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71E9733BB5C2DA0304E3FBCC /* HrLocal.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		480724F9960B935D09E03F69 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 7DEA56ADCD588FA18D53E0DB /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 50695AB7DD39C8E55C1A0573;
+			remoteInfo = HealthRelayWidgets;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		0BD7B0494E2C8D4A69287FD3 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				25DA4A346C9E88B93115B975 /* HealthRelayWidgets.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		0A24BCDD8CFA18FB513E0089 /* SocketLeg.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SocketLeg.swift; sourceTree = "<group>"; };
+		1684D662AA5DEA9BC7223309 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		225726ED5C2B1E6B7E6622FC /* PlanStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanStore.swift; sourceTree = "<group>"; };
+		2F15C0824BE664359828A19B /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
+		2FDFDBDFCD7BFAA2E34B4160 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		30521B200C323A43A1C00934 /* StepsCourier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StepsCourier.swift; sourceTree = "<group>"; };
+		33A0B5A8C357C1E29CC3B4DD /* BleLeg.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BleLeg.swift; sourceTree = "<group>"; };
+		3A9BCFB6449F3C3BBD6BE8D0 /* HealthRelay.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = HealthRelay.entitlements; sourceTree = "<group>"; };
+		3F75F9042D1CE69087E1D44F /* HealthRelayWidgets.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = HealthRelayWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		48C4EF4AB3A7E881A50E208A /* Settings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Settings.swift; sourceTree = "<group>"; };
+		54A8187D9DBB0F6A24ECF7FE /* LiveActivityController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveActivityController.swift; sourceTree = "<group>"; };
+		7047A0E516BF3C61DDBEB905 /* PlanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanView.swift; sourceTree = "<group>"; };
+		71E9733BB5C2DA0304E3FBCC /* HrLocal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HrLocal.swift; sourceTree = "<group>"; };
+		7857D126E229CA112B2237A3 /* PulseActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PulseActivity.swift; sourceTree = "<group>"; };
+		860056F69532516604902542 /* RelayController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayController.swift; sourceTree = "<group>"; };
+		9D39E0C8BB06E879B66D6E20 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		A4916F51A132071C8CA442D1 /* HealthRelay.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = HealthRelay.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		AD5742C77ED5B0FE27A6C9A4 /* HealthRelayApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthRelayApp.swift; sourceTree = "<group>"; };
+		C29AC53190A143ED4368A8D4 /* HealthRelayWidgets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthRelayWidgets.swift; sourceTree = "<group>"; };
+		DF2D996A0FBD15E16A4F283A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		F51C6B23C65BB01F03022C0C /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		F6B8F07C72771C974D660880 /* SessionProgress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionProgress.swift; sourceTree = "<group>"; };
+		F9582FF7521F2BE06326B5A6 /* EndSessionIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EndSessionIntent.swift; sourceTree = "<group>"; };
+		FCEA0F403F414A3D81713AF0 /* LiveView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveView.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		0BC8C1F3BAA7725598C25348 /* HealthRelayWidgets */ = {
+			isa = PBXGroup;
+			children = (
+				C29AC53190A143ED4368A8D4 /* HealthRelayWidgets.swift */,
+				9D39E0C8BB06E879B66D6E20 /* Info.plist */,
+			);
+			path = HealthRelayWidgets;
+			sourceTree = "<group>";
+		};
+		0CDDC9957290EB0E8FC256BC /* HealthRelay */ = {
+			isa = PBXGroup;
+			children = (
+				DF2D996A0FBD15E16A4F283A /* Assets.xcassets */,
+				3A9BCFB6449F3C3BBD6BE8D0 /* HealthRelay.entitlements */,
+				AD5742C77ED5B0FE27A6C9A4 /* HealthRelayApp.swift */,
+				1684D662AA5DEA9BC7223309 /* Info.plist */,
+				C5E30F9024FC8BD5F851E93C /* LiveActivity */,
+				70A165D100C5377C3156B190 /* Plan */,
+				36603E3B57FED0A1968C2A37 /* Relay */,
+				4041F4246C6911218118AE53 /* Steps */,
+				CF44BA38B6BBCF24DA0F3592 /* Support */,
+				F5703017BEC792CADB72495A /* UI */,
+			);
+			path = HealthRelay;
+			sourceTree = "<group>";
+		};
+		18ADC39836549C4AC418E387 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A4916F51A132071C8CA442D1 /* HealthRelay.app */,
+				3F75F9042D1CE69087E1D44F /* HealthRelayWidgets.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		1A70B10C13FD62A0EEE9A7F3 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				F9582FF7521F2BE06326B5A6 /* EndSessionIntent.swift */,
+				7857D126E229CA112B2237A3 /* PulseActivity.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		36603E3B57FED0A1968C2A37 /* Relay */ = {
+			isa = PBXGroup;
+			children = (
+				33A0B5A8C357C1E29CC3B4DD /* BleLeg.swift */,
+				71E9733BB5C2DA0304E3FBCC /* HrLocal.swift */,
+				860056F69532516604902542 /* RelayController.swift */,
+				0A24BCDD8CFA18FB513E0089 /* SocketLeg.swift */,
+			);
+			path = Relay;
+			sourceTree = "<group>";
+		};
+		4041F4246C6911218118AE53 /* Steps */ = {
+			isa = PBXGroup;
+			children = (
+				30521B200C323A43A1C00934 /* StepsCourier.swift */,
+			);
+			path = Steps;
+			sourceTree = "<group>";
+		};
+		70A165D100C5377C3156B190 /* Plan */ = {
+			isa = PBXGroup;
+			children = (
+				225726ED5C2B1E6B7E6622FC /* PlanStore.swift */,
+				F6B8F07C72771C974D660880 /* SessionProgress.swift */,
+			);
+			path = Plan;
+			sourceTree = "<group>";
+		};
+		B610830CC06773E1B3825A98 = {
+			isa = PBXGroup;
+			children = (
+				0CDDC9957290EB0E8FC256BC /* HealthRelay */,
+				0BC8C1F3BAA7725598C25348 /* HealthRelayWidgets */,
+				1A70B10C13FD62A0EEE9A7F3 /* Shared */,
+				18ADC39836549C4AC418E387 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		C5E30F9024FC8BD5F851E93C /* LiveActivity */ = {
+			isa = PBXGroup;
+			children = (
+				54A8187D9DBB0F6A24ECF7FE /* LiveActivityController.swift */,
+			);
+			path = LiveActivity;
+			sourceTree = "<group>";
+		};
+		CF44BA38B6BBCF24DA0F3592 /* Support */ = {
+			isa = PBXGroup;
+			children = (
+				2F15C0824BE664359828A19B /* Keychain.swift */,
+				48C4EF4AB3A7E881A50E208A /* Settings.swift */,
+			);
+			path = Support;
+			sourceTree = "<group>";
+		};
+		F5703017BEC792CADB72495A /* UI */ = {
+			isa = PBXGroup;
+			children = (
+				FCEA0F403F414A3D81713AF0 /* LiveView.swift */,
+				7047A0E516BF3C61DDBEB905 /* PlanView.swift */,
+				F51C6B23C65BB01F03022C0C /* SettingsView.swift */,
+				2FDFDBDFCD7BFAA2E34B4160 /* Theme.swift */,
+			);
+			path = UI;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		50695AB7DD39C8E55C1A0573 /* HealthRelayWidgets */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CA5680B2B51EF0423E2FB738 /* Build configuration list for PBXNativeTarget "HealthRelayWidgets" */;
+			buildPhases = (
+				23E09645AF6B5DE9E20F74E3 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = HealthRelayWidgets;
+			packageProductDependencies = (
+			);
+			productName = HealthRelayWidgets;
+			productReference = 3F75F9042D1CE69087E1D44F /* HealthRelayWidgets.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		A35B827E6CAEE86538D27BD2 /* HealthRelay */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 92567DF3F95B54AC7BB078D3 /* Build configuration list for PBXNativeTarget "HealthRelay" */;
+			buildPhases = (
+				EBC1951974AEC5A12A1C2E21 /* Sources */,
+				2A8A3E587E77C9731335B8C4 /* Resources */,
+				0BD7B0494E2C8D4A69287FD3 /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				3B53B7A4A3BC406A297A62DF /* PBXTargetDependency */,
+			);
+			name = HealthRelay;
+			packageProductDependencies = (
+			);
+			productName = HealthRelay;
+			productReference = A4916F51A132071C8CA442D1 /* HealthRelay.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		7DEA56ADCD588FA18D53E0DB /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					50695AB7DD39C8E55C1A0573 = {
+						DevelopmentTeam = 4F2SRW2599;
+						ProvisioningStyle = Automatic;
+					};
+					A35B827E6CAEE86538D27BD2 = {
+						DevelopmentTeam = 4F2SRW2599;
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = B6DE4C86A4BF186F115B5209 /* Build configuration list for PBXProject "HealthRelay" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = B610830CC06773E1B3825A98;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 18ADC39836549C4AC418E387 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A35B827E6CAEE86538D27BD2 /* HealthRelay */,
+				50695AB7DD39C8E55C1A0573 /* HealthRelayWidgets */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		2A8A3E587E77C9731335B8C4 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				3C802DEEDB74EE65F631BEFB /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		23E09645AF6B5DE9E20F74E3 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				00F1C40FF8934D43701AC5DC /* EndSessionIntent.swift in Sources */,
+				775DC092F6664C2AB6082214 /* HealthRelayWidgets.swift in Sources */,
+				884152E5D1F5FCC35695A1CC /* PulseActivity.swift in Sources */,
+				24B428346BA6421CAF5F8E34 /* Theme.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		EBC1951974AEC5A12A1C2E21 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				922ADEDC379D9A3D28B03DFE /* BleLeg.swift in Sources */,
+				436788EFD07D21B614DCB97F /* EndSessionIntent.swift in Sources */,
+				8F119B456B2E6C5A6E5BEF56 /* HealthRelayApp.swift in Sources */,
+				EC55FAC5F3C4618E5EC020A2 /* HrLocal.swift in Sources */,
+				59CEBCE80094572B77981DA5 /* Keychain.swift in Sources */,
+				ABC8D64C5466F7F9F993AF41 /* LiveActivityController.swift in Sources */,
+				4545C382505B7A2469BA1625 /* LiveView.swift in Sources */,
+				457A2BCAC5D39842C51B55BE /* PlanStore.swift in Sources */,
+				558AB8EBDEA37E89C8BFF0DF /* PlanView.swift in Sources */,
+				5E1FFF8CA6502D77E6C0DFAF /* PulseActivity.swift in Sources */,
+				858B13EBBA1D2EB0A5F0DB60 /* RelayController.swift in Sources */,
+				D2B5E64BDA2FFD33874065A6 /* SessionProgress.swift in Sources */,
+				A239F28AA97AD2844BF82AFA /* Settings.swift in Sources */,
+				C1FDDA7C59C5AB9579A1DB2C /* SettingsView.swift in Sources */,
+				602238A2BDC3C2A896BC6363 /* SocketLeg.swift in Sources */,
+				BB140371ECD3394B5878D0A9 /* StepsCourier.swift in Sources */,
+				6AEB5D19F301263AD0119C21 /* Theme.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		3B53B7A4A3BC406A297A62DF /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 50695AB7DD39C8E55C1A0573 /* HealthRelayWidgets */;
+			targetProxy = 480724F9960B935D09E03F69 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		506948C6A49693DA8AE39C97 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = HealthRelay/HealthRelay.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 4F2SRW2599;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				INFOPLIST_FILE = HealthRelay/Info.plist;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.3.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.s0nderlabs.HealthRelay;
+				PRODUCT_NAME = HealthRelay;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		6E078EA793FC1E07B1C29470 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 4F2SRW2599;
+				INFOPLIST_FILE = HealthRelayWidgets/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.3.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.s0nderlabs.HealthRelay.widgets;
+				PRODUCT_NAME = HealthRelayWidgets;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		7AB33B6591020A5CA7AB64A6 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = HealthRelay/HealthRelay.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 4F2SRW2599;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				INFOPLIST_FILE = HealthRelay/Info.plist;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.3.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.s0nderlabs.HealthRelay;
+				PRODUCT_NAME = HealthRelay;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		B5D4E57851E688A14508242C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 4F2SRW2599;
+				INFOPLIST_FILE = HealthRelayWidgets/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.3.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.s0nderlabs.HealthRelay.widgets;
+				PRODUCT_NAME = HealthRelayWidgets;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		BC9B72065F97AD4BDBFCBF7B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		FD1D7F0349AFEABF1B715035 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		92567DF3F95B54AC7BB078D3 /* Build configuration list for PBXNativeTarget "HealthRelay" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7AB33B6591020A5CA7AB64A6 /* Debug */,
+				506948C6A49693DA8AE39C97 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		B6DE4C86A4BF186F115B5209 /* Build configuration list for PBXProject "HealthRelay" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BC9B72065F97AD4BDBFCBF7B /* Debug */,
+				FD1D7F0349AFEABF1B715035 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		CA5680B2B51EF0423E2FB738 /* Build configuration list for PBXNativeTarget "HealthRelayWidgets" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B5D4E57851E688A14508242C /* Debug */,
+				6E078EA793FC1E07B1C29470 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 7DEA56ADCD588FA18D53E0DB /* Project object */;
+}

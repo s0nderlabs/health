@@ -92,6 +92,14 @@ CREATE TABLE IF NOT EXISTS live_sessions (
   zone_seconds TEXT NOT NULL,
   recovery_60s_drop INTEGER
 );
+CREATE TABLE IF NOT EXISTS steps_samples (
+  uuid TEXT PRIMARY KEY,
+  start TEXT NOT NULL,
+  end TEXT NOT NULL,
+  count INTEGER NOT NULL,
+  received_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_steps_start ON steps_samples (start);
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT
@@ -363,6 +371,83 @@ export class Store {
       .all(since) as Record<string, unknown>[]
   }
 
+  // ── steps (WHOOP-sourced HealthKit samples, relayed by the phone) ──
+
+  /** Idempotent by HealthKit sample UUID; returns how many were new rows. */
+  upsertStepsSamples(samples: Array<{ uuid: string; start: string; end: string; count: number }>): {
+    added: number
+  } {
+    const now = new Date().toISOString()
+    const existsStmt = this.db.query('SELECT 1 FROM steps_samples WHERE uuid = ?')
+    const insert = this.db.prepare(
+      `INSERT INTO steps_samples (uuid, start, end, count, received_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(uuid) DO UPDATE SET start=excluded.start, end=excluded.end,
+         count=excluded.count, received_at=excluded.received_at`,
+    )
+    // One transaction: a multi-thousand-sample first backfill would otherwise
+    // fsync per row and stall the single-threaded daemon for seconds.
+    const run = this.db.transaction((rows: typeof samples) => {
+      let added = 0
+      for (const s of rows) {
+        if (!existsStmt.get(s.uuid)) added++
+        insert.run(s.uuid, s.start, s.end, s.count, now)
+      }
+      return added
+    })
+    return { added: run(samples) }
+  }
+
+  /**
+   * Remove step samples HealthKit reported as deleted. A source revising a
+   * value deletes the old UUID and inserts a new one, so without this a
+   * re-synced hour would double-count (old value stranded + new value added).
+   */
+  deleteStepsSamples(uuids: string[]): { deleted: number } {
+    if (uuids.length === 0) return { deleted: 0 }
+    const del = this.db.prepare('DELETE FROM steps_samples WHERE uuid = ?')
+    const run = this.db.transaction((ids: string[]) => {
+      let deleted = 0
+      for (const id of ids) deleted += del.run(id).changes
+      return deleted
+    })
+    return { deleted: run(uuids) }
+  }
+
+  /** True when steps_samples exists. A read-only open of a pre-upgrade archive
+   * (daemon down, MCP fallback) never runs the schema, so the table can be
+   * absent; the steps reads must degrade to "no data", not throw. */
+  private hasStepsTable(): boolean {
+    return !!this.db
+      .query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='steps_samples'")
+      .get()
+  }
+
+  /** Today's WHOOP-counted steps (local calendar day). Null until any sample exists. */
+  stepsToday(): { total: number; latest_sample_end: string | null } | null {
+    if (!this.hasStepsTable()) return null
+    const row = this.db
+      .query(
+        `SELECT SUM(count) AS total, MAX(end) AS latest FROM steps_samples
+         WHERE date(start, 'localtime') = date('now', 'localtime')`,
+      )
+      .get() as { total: number | null; latest: string | null }
+    if (row.total == null) return null
+    return { total: row.total, latest_sample_end: row.latest }
+  }
+
+  /** Daily step totals for the trend surface (local calendar days). */
+  stepsByDay(days: number): Array<{ day: string; total: number }> {
+    if (!this.hasStepsTable()) return []
+    const since = new Date(Date.now() - days * 86_400_000).toISOString()
+    return this.db
+      .query(
+        `SELECT date(start, 'localtime') AS day, SUM(count) AS total FROM steps_samples
+         WHERE start >= ? GROUP BY day ORDER BY day ASC`,
+      )
+      .all(since) as Array<{ day: string; total: number }>
+  }
+
   /** Highest heart rate WHOOP has ever scored in a workout; max-HR estimate. */
   maxWorkoutHr(): number | null {
     const row = this.db.query('SELECT MAX(max_heart_rate) AS m FROM workouts').get() as { m: number | null }
@@ -378,6 +463,7 @@ export class Store {
       recoveries: one('recoveries'),
       workouts: one('workouts'),
       events: one('events'),
+      steps_samples: one('steps_samples'),
     }
   }
 

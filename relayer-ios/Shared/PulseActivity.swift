@@ -1,0 +1,44 @@
+// The one Live Activity, two faces. Compiled into BOTH the app and the
+// widget extension: the app starts/updates it, the extension renders it.
+//
+// PULSE face (sessionActive == false): quiet BPM row, any time this phone is
+// the band's receiver. SESSION face (sessionActive == true): plan title, a
+// timer iOS ticks natively, BPM + zone, the plan line, an End button.
+
+import ActivityKit
+import Foundation
+
+struct PulseAttributes: ActivityAttributes {
+    public struct ContentState: Codable, Hashable {
+        var bpm: Int?
+        var zone: Int?
+        var sessionActive: Bool
+        var startedAt: Date?
+        var title: String
+        var planLine: String?
+        var stateLine: String
+        /// Rest countdown between sets: iOS renders the ticking text natively,
+        /// so a locked phone counts your rest with zero updates from us.
+        var restEndsAt: Date?
+        var restLabel: String?
+    }
+}
+
+enum HrZones {
+    /// Mirrors the daemon's default max HR for zone math. The daemon owns the
+    /// real value; this is display-only and synced by hand until the socket
+    /// carries it.
+    static let maxHr = 185.0
+
+    static func zone(for bpm: Int) -> Int {
+        let pct = Double(bpm) / maxHr
+        switch pct {
+        case ..<0.5: return 0
+        case ..<0.6: return 1
+        case ..<0.7: return 2
+        case ..<0.8: return 3
+        case ..<0.9: return 4
+        default: return 5
+        }
+    }
+}

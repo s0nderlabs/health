@@ -6,7 +6,7 @@
 import { readFileSync, writeFileSync, unlinkSync, existsSync } from 'fs'
 import { randomBytes } from 'node:crypto'
 import { AuthBrokenError } from './auth.js'
-import { ensureRuntimeDir, loadConfig, saveConfig, configFileWritable, inQuietHours, PID_PATH, SOCKET_PATH } from './config.js'
+import { ensureRuntimeDir, loadConfig, saveConfig, configFileWritable, inQuietHours, resolvePlanPath, PID_PATH, SOCKET_PATH } from './config.js'
 import { Store } from './store.js'
 import { Engine } from './engine.js'
 import { IpcServer } from './ipc.js'
@@ -121,7 +121,19 @@ const liveState = new LiveState({
     }
   },
 })
-const liveListener = new LiveListener(liveState, () => config().live.token)
+const liveListener = new LiveListener(liveState, () => config().live.token, {
+  // Phone-side surfaces: intent taps ride the same event path as the MCP tool,
+  // steps land in the archive, plan reads come from the /gym-authored file,
+  // and phone liveness persists for the cert-expiry watchdog.
+  onIntent: (activity) => engine.workoutIntent(activity),
+  onSteps: (samples, deletedUuids) => {
+    const { added } = store.upsertStepsSamples(samples)
+    const { deleted } = store.deleteStepsSamples(deletedUuids)
+    return { added, deleted }
+  },
+  getPlanPath: () => resolvePlanPath(config()),
+  onPhoneSeen: (atIso) => store.setMeta('phone_relayer_last_seen', atIso),
+})
 
 // Events only flow once the initial backfill has completed. Until then the
 // archive is still filling: if a partial backfill left tables sparse, a poll
@@ -206,6 +218,9 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
         wake_release_active:
           inQuietHours(config()) && wakeReleaseActive(config(), store.getMeta('wake_detected_at')),
         live: liveListener.status(),
+        // Free-tier sideload certs die silently after 7 days; surface staleness
+        // so an expired phone relayer can never cost a workout unnoticed.
+        phone_relayer_last_seen: store.getMeta('phone_relayer_last_seen'),
       }
     }
     case 'read': {
@@ -215,6 +230,7 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
         cycle: store.latestCycle(),
         workouts_today: store.recentWorkouts(1),
         body: store.db.query('SELECT * FROM body WHERE id = 1').get(),
+        steps_today: store.stepsToday(),
       }
     }
     case 'trend': {
@@ -224,6 +240,7 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
         sleeps: store.recentSleeps(days),
         cycles: store.recentCycles(days),
         workouts: store.recentWorkouts(days),
+        steps_daily: store.stepsByDay(days),
       }
     }
     case 'intent': {
@@ -283,11 +300,18 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
       const webhookChanged =
         patch.webhook != null &&
         (merged.webhook.port !== current.webhook.port || merged.webhook.path !== current.webhook.path)
+      // The plan file watcher captures its directory once at startup, so a
+      // plan_path change keeps GET /plan working (it re-reads the path) but
+      // stops live plan_updated pushes until the daemon is restarted.
+      const planPathChanged = patch.plan_path != null && merged.plan_path !== current.plan_path
+      const restartHint = 'requires a daemon restart: launchctl kickstart -k gui/$UID/com.s0nderlabs.health'
+      const notes = [
+        webhookChanged ? `Webhook port/path change ${restartHint}` : null,
+        planPathChanged ? `plan_path change: live plan push ${restartHint}` : null,
+      ].filter(Boolean)
       return {
         config: redactConfig(merged),
-        ...(webhookChanged
-          ? { note: 'Webhook port/path change requires a daemon restart: launchctl kickstart -k gui/$UID/com.s0nderlabs.health' }
-          : {}),
+        ...(notes.length ? { note: notes.join(' ') } : {}),
       }
     }
     default:

@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.3.0 - 2026-07-09
+
+### Added
+
+- **iPhone relayer + gym companion** (`relayer-ios/`, SwiftUI, sideloaded via
+  `scripts/build-phone.sh install`). The phone is the band's receiver whenever
+  the Mac is out of range: same raw-frame WebSocket protocol over a
+  tailnet-only `tailscale serve` HTTPS endpoint, mac-priority arbitration
+  refereed by the daemon (`standdown` / `resume` / rest-only blind `pause`
+  probes; freshness = frame arrival time), capture-first client so a dead link
+  never costs frames.
+- **HealthKit steps courier**: WHOOP-sourced step samples stream to the daemon
+  with an ack-gated anchored query (batch paging, deletion forwarding so a
+  revised hour can never double-count) into a new `steps_samples` table;
+  `steps_today` joins the `health__read` surface and daily totals join
+  `health__trend`.
+- **Plan pipeline**: the `/gym` skill writes `plan.json` (atomic rename); the
+  daemon watches it (mtime-checked), pushes `plan_updated` to connected
+  relayers, and serves token-authed `GET /plan`. The phone renders every plan
+  shape through ONE session component: ordered lift rows, tap-to-expand
+  ladders (ramp / working / AMRAP / back-off tones, PR rungs in accent,
+  conditional rungs outlined), structured `amrap` + `backoff` fields.
+- **Workout intent**: one tap on the phone (plan-first sheet: today's session
+  title is a single coral button) lands a `workout.intent` event in the live
+  Claude session.
+- **Lock-screen Live Activity**, two faces: a pulse card (live BPM + zone any
+  time the phone holds the band) and a session card (plan title, native
+  elapsed timer, BPM, next-set pointer, End button). Updates are serialized
+  full-state snapshots from the BLE runloop; the pulse card survives Mac
+  handback so BPM can return without a foreground re-arm.
+- **Exercise completion + rest timers**: starting today's session arms the
+  plan; checking a set off starts its prescribed rest (parsed from the plan's
+  own rest strings, ranges resolve to the generous end), mirrored as an in-app
+  countdown pill, a lock-screen countdown, and a "rest over" notification that
+  also presents in-foreground. Hold a lift to bulk-complete it. Completion is
+  keyed to the plan's date + generation so a regenerated plan starts clean.
+- **Liquid-glass UI pass**: app icon (coral pulse mark), glass surfaces +
+  capsule geometry throughout, ambient warm radials, hidden scroll indicators,
+  SF Rounded display voice, true multiplication glyphs in schemes.
+
+### Fixed
+
+- devicectl device-ID extraction in `build-phone.sh` (model names contain
+  spaces; extract the UDID by shape).
+- Adversarial-review fixes shipped in the same pass: Live Activity
+  read-modify-write races (serial snapshot pipeline), same-day plan
+  regeneration remapping positional checkmarks, stale auto-expansion leaking
+  across plans, and the streaming heart animation freezing at its first
+  cadence.
+
 ## 0.2.0 - 2026-07-09
 
 ### Added

@@ -37,7 +37,11 @@ voice. Parse `$ARGUMENTS` to pick the mode.
    - **Recovery**: score % + band (green >= 67, amber 34-66, red <= 33), HRV ms,
      RHR, SpO2, skin temp. If scores exist for prior days, add HRV/RHR vs 7-day.
    - **Sleep**: duration in bed, % of need, stage split (light/SWS/REM), disturbances.
-   - **Today**: day strain so far, workouts today (sport, strain, avg HR).
+   - **Today**: day strain so far, workouts today (sport, strain, avg HR), and
+     steps if `steps_today` is present (WHOOP-counted, relayed from the phone;
+     say "as of HH:MM" from `latest_sample_end`, the number arrives in batches).
+     Steps are the NEAT signal strain misses: a low-strain, low-step day is a
+     sedentary day and worth naming as one.
 3. Close with the one-line verdict: what today should look like and why.
 
 Format tightly. A short table for the numbers is fine; the verdict is prose.
@@ -75,5 +79,10 @@ Format tightly. A short table for the numbers is fine; the verdict is prose.
 ### `status`
 
 Call `health__status` and report: daemon up or down, last poll, last webhook,
-record counts, whether this session receives events, live feed state. If the
-daemon is down: `launchctl kickstart -k gui/$UID/com.s0nderlabs.health`.
+record counts, whether this session receives events, live feed state (which
+relayers are connected and which one owns the band). If the daemon is down:
+`launchctl kickstart -k gui/$UID/com.s0nderlabs.health`.
+
+Watchdog: if `phone_relayer_last_seen` exists and is older than 5 days, warn
+that the phone relayer may be near its 7-day sideload-signature expiry and
+needs a reinstall from Xcode (or an AltStore refresh) before it dies silently.

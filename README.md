@@ -85,8 +85,7 @@ signature against your client secret; everything else is rejected.
 ### Live heart rate (optional)
 
 Enable **Broadcast Heart Rate** in the WHOOP app, then build and install the
-BLE relayer (macOS, near your body; a phone relayer for away-from-desk is
-planned):
+BLE relayer (macOS, near your body):
 
 ```bash
 scripts/build-relayer.sh
@@ -106,6 +105,25 @@ rolling resting rMSSD when you are still enough. macOS quirk: each rebuild of
 the unsigned relayer binary re-triggers the Bluetooth permission check when
 it runs under launchd; re-grant it in System Settings > Privacy & Security >
 Bluetooth if the log stalls before "scanning".
+
+### iPhone relayer + gym companion (optional)
+
+`relayer-ios/` is a SwiftUI app that takes over as the band's receiver
+whenever you are away from the Mac (gym, outside), speaking the same
+raw-frame protocol over a tailnet-only `tailscale serve` HTTPS endpoint. The
+daemon referees which device holds the band (mac-priority arbitration with
+rest-only reacquire probes). The app adds: a Plan tab rendering the training
+plan your main session's coach writes to `plan.json` (tap-to-expand ladders,
+set-by-set completion, rest timers parsed from the plan's own prescriptions),
+a one-tap workout intent that lands in your live Claude session, a
+lock-screen Live Activity (live BPM pulse card; during sessions a timer +
+next-set card with a rest countdown and end button), and a HealthKit courier
+that streams WHOOP-sourced step counts into the daily read. Build and
+sideload with a free Apple ID (7-day re-sign; one-time Xcode signing setup):
+
+```bash
+scripts/build-phone.sh install   # phone paired + on the same Wi-Fi
+```
 
 ## Sessions and routing
 

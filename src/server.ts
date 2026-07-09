@@ -10,7 +10,7 @@ import { Store } from './store.js'
 import { DB_PATH } from './config.js'
 import { existsSync } from 'fs'
 
-const VERSION = '0.2.0'
+const VERSION = '0.3.0'
 
 const INSTRUCTIONS = `
 health: WHOOP recovery, sleep, and strain as a live channel. The daemon on this
@@ -46,6 +46,12 @@ live.zone = a notable-intensity milestone (one line, keep the flow),
 live.rest = session summary with the HR-recovery read (the coaching moment:
 recovery speed reflects fitness and current fatigue).
 
+steps_today in health__read is WHOOP-counted daily movement (relayed from the
+phone; the WHOOP cloud API has no steps). It is CONTEXT, not an interrupt:
+fold it into reads (training strain says nothing about NEAT; a 2k-step desk
+day and a 12k-step day are different recovery pictures). Arrives in batches,
+roughly hourly; treat the number as "as of latest_sample_end", never live.
+
 Tools: health__read (today), health__trend (multi-day), health__workout_intent
 (user says they are starting a workout NOW; WHOOP cannot detect starts),
 health__live (live BPM/zone/HRV while the band broadcasts), health__config
@@ -69,7 +75,7 @@ export function createServer(ipc: IpcClient) {
       {
         name: 'health__read',
         description:
-          "Today's snapshot: recovery (score, HRV, RHR, SpO2, skin temp), last sleep, day strain, workouts today, body measurements. Reads the local archive, no WHOOP call.",
+          "Today's snapshot: recovery (score, HRV, RHR, SpO2, skin temp), last sleep, day strain, workouts today, WHOOP-counted steps (daily movement), body measurements. Reads the local archive, no WHOOP call.",
         inputSchema: { type: 'object' as const, properties: {}, required: [] },
       },
       {
@@ -191,6 +197,7 @@ export function createServer(ipc: IpcClient) {
             sleep: store.latestSleep(),
             cycle: store.latestCycle(),
             workouts_today: store.recentWorkouts(1),
+            steps_today: store.stepsToday(),
           },
           null,
           2,

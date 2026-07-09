@@ -24,3 +24,9 @@ docs/
 test/.mcp.json
 .claude/
 bin/
+
+# xcode build products + user state (relayer-ios; regen project via xcodegen)
+relayer-ios/build/
+relayer-ios/*.xcodeproj/xcuserdata/
+relayer-ios/*.xcodeproj/project.xcworkspace/xcuserdata/
+DerivedData/

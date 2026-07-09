@@ -196,6 +196,9 @@ export interface HealthConfig {
     max_hr: number | null // null = derive from observed workout max HR
     hot_bpm: number | null // null = derive as 45% HR reserve above rest
   }
+  // Workout-plan JSON served to the phone at GET /plan. Written by the /gym
+  // skill in the user's main session; empty = default <runtime dir>/plan.json.
+  plan_path: string
 }
 
 export const DEFAULT_CONFIG: HealthConfig = {
@@ -258,6 +261,7 @@ export const DEFAULT_CONFIG: HealthConfig = {
     max_hr: null,
     hot_bpm: null,
   },
+  plan_path: '',
 }
 
 // ── MCP tool helpers (inb0x convention) ───────────────────────────

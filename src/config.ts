@@ -35,10 +35,16 @@ export function loadConfig(): HealthConfig {
       poll_interval_minutes: parsed.poll_interval_minutes ?? DEFAULT_CONFIG.poll_interval_minutes,
       webhook: { ...DEFAULT_CONFIG.webhook, ...parsed.webhook },
       live: { ...DEFAULT_CONFIG.live, ...parsed.live },
+      plan_path: parsed.plan_path ?? DEFAULT_CONFIG.plan_path,
     }
   } catch {
     return structuredClone(DEFAULT_CONFIG)
   }
+}
+
+/** Where the /gym plan JSON lives; config override or the runtime dir default. */
+export function resolvePlanPath(config: HealthConfig): string {
+  return config.plan_path || join(RUNTIME_DIR, 'plan.json')
 }
 
 export function saveConfig(config: HealthConfig): void {
