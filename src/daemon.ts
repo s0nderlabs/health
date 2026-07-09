@@ -4,14 +4,18 @@
 // to every connected CC session. Exactly one instance runs (launchd + pidfile).
 
 import { readFileSync, writeFileSync, unlinkSync, existsSync } from 'fs'
+import { randomBytes } from 'node:crypto'
 import { AuthBrokenError } from './auth.js'
-import { ensureRuntimeDir, loadConfig, inQuietHours, PID_PATH, SOCKET_PATH } from './config.js'
+import { ensureRuntimeDir, loadConfig, saveConfig, configFileWritable, inQuietHours, PID_PATH, SOCKET_PATH } from './config.js'
 import { Store } from './store.js'
 import { Engine } from './engine.js'
 import { IpcServer } from './ipc.js'
 import { InFlightTracker } from './delivery.js'
 import { backfill, pollOnce, type Fact } from './poller.js'
 import { startWebhookReceiver } from './webhook.js'
+import { isWakeSignal, wakeReleaseActive } from './wake.js'
+import { LiveState } from './livestate.js'
+import { LiveListener } from './live.js'
 
 function log(msg: string): void {
   process.stderr.write(`healthd: ${new Date().toISOString()} ${msg}\n`)
@@ -66,6 +70,59 @@ const scheduleDelivery = (): void => {
 
 const engine = new Engine(store, config, scheduleDelivery)
 
+// ── Live HR feed (BLE relayers stream raw frames in over WS) ──────
+
+// Relayers on this machine authenticate with a token from the config file;
+// generate it once so the file is ready before the first relayer starts.
+// NEVER write when the on-disk file is malformed: loadConfig() would be
+// serving defaults and the write would destroy the user's repairable config.
+if (!config().live.token) {
+  if (configFileWritable()) {
+    const current = loadConfig()
+    saveConfig({ ...current, live: { ...current.live, token: randomBytes(24).toString('hex') } })
+    log('generated live-ingest token')
+  } else {
+    log('config.json is malformed: refusing to write a live token over it (live ingest stays locked until the file is repaired)')
+  }
+}
+
+// These deps are consulted for EVERY 1Hz sample (and 600-frame buffer
+// flushes); a config-file read + SQLite query per sample is waste. 30s TTL
+// keeps config edits near-live without the per-sample cost.
+function cached<T>(fn: () => T, ttlMs = 30_000): () => T {
+  let value: T
+  let at = 0
+  return () => {
+    if (Date.now() - at > ttlMs) {
+      value = fn()
+      at = Date.now()
+    }
+    return value
+  }
+}
+
+const liveState = new LiveState({
+  // Config override, else the highest HR WHOOP ever scored (with a floor:
+  // early data underestimates true max).
+  getMaxHr: cached(() => config().live.max_hr ?? Math.max(store.maxWorkoutHr() ?? 0, 185)),
+  getRestHr: cached(() => {
+    const rhr = store.latestRecovery()?.resting_heart_rate
+    return typeof rhr === 'number' && rhr > 25 ? rhr : 60
+  }),
+  getHotBpm: cached(() => config().live.hot_bpm),
+  emit: (cls, dedupeKey, payload) => {
+    engine.liveEvent(cls, dedupeKey, payload)
+  },
+  onSessionEnd: (summary) => {
+    try {
+      store.insertLiveSession(summary)
+    } catch (err) {
+      log(`live session persist failed: ${err}`)
+    }
+  },
+})
+const liveListener = new LiveListener(liveState, () => config().live.token)
+
 // Events only flow once the initial backfill has completed. Until then the
 // archive is still filling: if a partial backfill left tables sparse, a poll
 // would otherwise replay years of history through the engine as "fresh" facts.
@@ -76,6 +133,20 @@ let ready = !!store.getMeta('backfill_done')
 const onFact = (fact: Fact): void => {
   if (!ready) return
   try {
+    // A freshly-ended scored sleep (or its recovery) arriving inside quiet
+    // hours means the user just woke: lift the hold for this window so the
+    // morning brief lands with the wake, not at the clock boundary.
+    const cfg = config()
+    if (
+      cfg.quiet_hours?.wake_release !== false &&
+      inQuietHours(cfg) &&
+      !wakeReleaseActive(cfg, store.getMeta('wake_detected_at')) &&
+      isWakeSignal(fact, (id) => store.getSleepById(id))
+    ) {
+      store.setMeta('wake_detected_at', new Date().toISOString())
+      log('wake detected: quiet-hours hold lifted for this window')
+      scheduleDelivery()
+    }
     engine.onFact(fact)
   } catch (err) {
     log(`engine error on ${fact.kind}: ${err}`)
@@ -106,9 +177,12 @@ const ipc = new IpcServer(SOCKET_PATH, {
 
 function deliverPending(): void {
   if (!ipc.hasSubscriber()) return
-  const quiet = inQuietHours(config())
+  const cfg = config()
+  const quiet = inQuietHours(cfg) && !wakeReleaseActive(cfg, store.getMeta('wake_detected_at'))
   for (const e of store.undeliveredEvents()) {
-    if (quiet && e.priority !== 'alert') continue // holds until quiet hours end
+    // live.* events prove the user is awake and active RIGHT NOW; holding
+    // them would deliver a stale burst at the quiet-hours boundary instead.
+    if (quiet && e.priority !== 'alert' && !e.class.startsWith('live.')) continue // holds until quiet hours end
     const pushedTo = ipc.pushEvent(e, inFlight.exclusions(e.id))
     inFlight.pushed(e.id, pushedTo) // delivered_at is stamped on ack
   }
@@ -127,6 +201,11 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
         counts: store.counts(),
         subscriber: ipc.hasSubscriber(),
         quiet_hours_now: inQuietHours(config()),
+        // Only meaningful INSIDE quiet hours; gate it so status never claims
+        // an active release while no hold exists.
+        wake_release_active:
+          inQuietHours(config()) && wakeReleaseActive(config(), store.getMeta('wake_detected_at')),
+        live: liveListener.status(),
       }
     }
     case 'read': {
@@ -156,11 +235,23 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
       const changes = await pollOnce(store, onFact)
       return { changes }
     }
+    case 'live': {
+      return {
+        ...liveState.snapshot(Date.now()),
+        ...liveListener.status(),
+        sessions_24h: store.recentLiveSessions(1), // rolling window, not calendar-today
+      }
+    }
     case 'config_get':
-      return config()
+      return redactConfig(config())
     case 'config_set': {
       const current = config()
       const patch = params as Partial<ReturnType<typeof loadConfig>>
+      // The token is redacted in config_get output; a patch echoing that
+      // placeholder back must not overwrite the real secret.
+      if (patch.live && (patch.live as Record<string, unknown>).token === REDACTED) {
+        delete (patch.live as Record<string, unknown>).token
+      }
       const merged = {
         ...current,
         ...patch,
@@ -169,6 +260,20 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
         thresholds: { ...current.thresholds, ...patch.thresholds },
         cooldown_minutes: { ...current.cooldown_minutes, ...patch.cooldown_minutes },
         webhook: { ...current.webhook, ...patch.webhook },
+        // Deep-merge or a partial patch (e.g. {live:{max_hr:190}}) would wipe
+        // the generated live.token and lock every relayer out.
+        live: { ...current.live, ...patch.live },
+        // Same for quiet_hours: a partial patch ({quiet_hours:{start:'22:30'}})
+        // must not drop end or the wake_release flag. null still disables.
+        quiet_hours:
+          patch.quiet_hours === undefined
+            ? current.quiet_hours
+            : patch.quiet_hours === null
+              ? null
+              : { ...current.quiet_hours, ...patch.quiet_hours },
+      }
+      if (merged.quiet_hours && (!merged.quiet_hours.start || !merged.quiet_hours.end)) {
+        throw new Error('quiet_hours needs both start and end (or null to disable)')
       }
       const { saveConfig } = await import('./config.js')
       saveConfig(merged)
@@ -179,7 +284,7 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
         patch.webhook != null &&
         (merged.webhook.port !== current.webhook.port || merged.webhook.path !== current.webhook.path)
       return {
-        config: merged,
+        config: redactConfig(merged),
         ...(webhookChanged
           ? { note: 'Webhook port/path change requires a daemon restart: launchctl kickstart -k gui/$UID/com.s0nderlabs.health' }
           : {}),
@@ -188,6 +293,13 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
     default:
       throw new Error(`unknown rpc method: ${method}`)
   }
+}
+
+// The live-ingest token is a secret; RPC responses land in session transcripts
+// that leave this machine. Relayers read it from the config FILE, never RPC.
+const REDACTED = '<redacted>'
+function redactConfig(cfg: ReturnType<typeof loadConfig>): ReturnType<typeof loadConfig> {
+  return { ...cfg, live: { ...cfg.live, token: cfg.live.token ? REDACTED : '' } }
 }
 
 // ── Startup ───────────────────────────────────────────────────────
@@ -201,6 +313,27 @@ const webhookServer = startWebhookReceiver(
   config().webhook.path,
   onFact,
 )
+
+// Live ingest is OPTIONAL: a bind failure (port taken) must degrade to
+// no-live-feed, never take the poller/webhooks/delivery down with it.
+try {
+  liveListener.start(config().live.port, config().live.bind)
+} catch (err) {
+  log(`live listener failed to start (live HR disabled): ${err}`)
+  engine.systemProblem(
+    `Live HR ingest could not bind ${config().live.bind}:${config().live.port}: ${err}`,
+    `live-bind:${new Date().toISOString().slice(0, 10)}`,
+  )
+}
+
+// Live transitions that need wall-clock time (a dead feed ends a session).
+setInterval(() => {
+  try {
+    liveState.tick(Date.now())
+  } catch (err) {
+    log(`live tick failed: ${err}`)
+  }
+}, 30_000)
 
 let authBroken = false
 
@@ -274,6 +407,7 @@ function shutdown(reason: string): void {
   shuttingDown = true
   log(`shutting down (${reason})`)
   try { webhookServer.stop(true) } catch {}
+  try { liveListener.stop() } catch {}
   try { ipc.stop() } catch {}
   try { store.close() } catch {}
   try { if (existsSync(PID_PATH)) unlinkSync(PID_PATH) } catch {}

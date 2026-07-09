@@ -8,6 +8,7 @@ allowed-tools:
   - mcp__health__health__workout_intent
   - mcp__health__health__config
   - mcp__health__health__status
+  - mcp__health__health__live
 ---
 
 # /health
@@ -60,8 +61,19 @@ Format tightly. A short table for the numbers is fine; the verdict is prose.
 2. If the user described changes, translate to a set call (event toggles,
    thresholds, quiet hours, daily budget) and confirm what changed.
 
+### `live`
+
+1. Call `health__live`.
+2. If `feed` is not "live": say the feed is down and why it might be (band
+   Broadcast HR off in the WHOOP app, relayer not running) in one line.
+3. Otherwise present: current BPM + zone, smoothed BPM, 5-min rMSSD (if
+   present, this is live HRV at rest), and session state (elapsed, avg/max,
+   zone time) if one is active.
+4. The read: at rest, rMSSD vs the morning HRV (stress check); in session,
+   what the zone time says about the work being done.
+
 ### `status`
 
 Call `health__status` and report: daemon up or down, last poll, last webhook,
-record counts, whether this session receives events. If the daemon is down:
-`launchctl kickstart -k gui/$UID/com.s0nderlabs.health`.
+record counts, whether this session receives events, live feed state. If the
+daemon is down: `launchctl kickstart -k gui/$UID/com.s0nderlabs.health`.

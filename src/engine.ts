@@ -47,11 +47,12 @@ export class Engine {
         return false
       }
 
-      // Alerts and user-initiated intents always go through; only automated
-      // info/notable events are subject to the daily budget. Count events
-      // CREATED today (queued or delivered), so a night of offline/quiet-hours
-      // queueing cannot flush past the budget in one burst.
-      const budgetExempt = priority === 'alert' || cls === 'workout.intent'
+      // Alerts and user-initiated intents always go through; live.* events
+      // are throttled by the live state machine itself (per-session, not
+      // per-day). Only automated info/notable events are subject to the daily
+      // budget. Count events CREATED today (queued or delivered), so a night
+      // of offline/quiet-hours queueing cannot flush past the budget in one burst.
+      const budgetExempt = priority === 'alert' || cls === 'workout.intent' || cls.startsWith('live.')
       if (!budgetExempt && this.store.createdToday() >= config.daily_budget) {
         this.log(`budget reached, dropping ${cls} (${dedupeKey})`)
         return false
@@ -210,6 +211,10 @@ export class Engine {
       'vitals.alert': 48,
       'trend.alert': 48,
       'system.health': 24,
+      // Live events are moment-bound: a zone milestone from hours ago is noise.
+      'live.session': 1,
+      'live.zone': 1,
+      'live.rest': 6,
     })
   }
 
@@ -230,6 +235,15 @@ export class Engine {
 
   systemProblem(problem: string, dedupeKey: string): void {
     this.emit('system.health', 'notable', `system.health:${dedupeKey}`, fmt.systemHealth(problem))
+  }
+
+  /** Entry point for the live HR state machine (pre-throttled per-session). */
+  liveEvent(
+    cls: 'live.session' | 'live.zone' | 'live.rest',
+    dedupeKey: string,
+    payload: { content: string; meta: Record<string, string> },
+  ): boolean {
+    return this.emit(cls, 'info', dedupeKey, payload)
   }
 
   /** Manual workout-intent trigger (the only start-detection WHOOP allows). */

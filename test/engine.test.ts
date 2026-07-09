@@ -289,3 +289,18 @@ describe('event queue semantics', () => {
     expect(store.undeliveredEvents().length).toBe(0)
   })
 })
+
+describe('live events through the engine', () => {
+  test('zone escalations seconds apart are not cooldown-blocked', () => {
+    const store = freshStore()
+    const engine = new Engine(store, () => testConfig())
+    expect(engine.liveEvent('live.zone', 'live.zone:s1:z4', { content: 'z4', meta: {} })).toBe(true)
+    expect(engine.liveEvent('live.zone', 'live.zone:s1:z5', { content: 'z5', meta: {} })).toBe(true)
+  })
+
+  test('live events are exempt from the daily budget', () => {
+    const store = freshStore()
+    const engine = new Engine(store, () => testConfig({ daily_budget: 0 }))
+    expect(engine.liveEvent('live.rest', 'live.rest:s1', { content: 'r', meta: {} })).toBe(true)
+  })
+})

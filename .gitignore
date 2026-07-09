@@ -23,3 +23,4 @@ docs/
 # dev-only local mcp config for the test harness
 test/.mcp.json
 .claude/
+bin/

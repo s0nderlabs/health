@@ -26,18 +26,35 @@ const sessionName = process.env.HEALTH_SESSION ?? process.env.ATTN_SESSION ?? 'm
 function sessionHasChannel(): boolean {
   if (process.env.HEALTH_EVENTS === '1') return true
   if (process.env.HEALTH_EVENTS === '0') return false
+  // A session can run BOTH copies at once (installed plugin + local dev
+  // server); each copy answers only to ITS OWN channel flag, so the copies
+  // never both subscribe for the same session.
+  const flagPattern = process.env.CLAUDE_PLUGIN_ROOT
+    ? /--channels[= ]\S*plugin:health@|--dangerously-load-development-channels[= ]\S*plugin:health@/
+    : /--dangerously-load-development-channels[= ]\S*server:health/
+  // A claude BINARY in an argv (path segments like ~/.claude/... never match).
+  const claudeProcess = /(^|[/\s])claude($|\s)/
   try {
-    const ps = Bun.spawnSync(['ps', '-p', String(process.ppid), '-o', 'command='])
-    const cmd = ps.stdout.toString()
-    // A session can run BOTH copies at once (installed plugin + local dev
-    // server); each copy answers only to ITS OWN channel flag, so the copies
-    // never both subscribe for the same session.
-    if (process.env.CLAUDE_PLUGIN_ROOT) {
-      // installed plugin copy: enabled via --channels or the dev plugin form
-      return /--channels[= ]\S*plugin:health@|--dangerously-load-development-channels[= ]\S*plugin:health@/.test(cmd)
+    // The claude process is NOT our direct parent: the manifest's sh -c and
+    // bun-run runner sit in between. Walk the ancestor chain to the NEAREST
+    // claude process and answer from ITS argv alone; walking past it would
+    // match an OUTER session's flags (a nested `claude -p` spawned from a
+    // channel-enabled session would subscribe and ack events into a void).
+    let pid = process.ppid
+    for (let hop = 0; hop < 10 && pid > 1; hop++) {
+      let out = Bun.spawnSync(['ps', '-o', 'ppid=,command=', '-p', String(pid)]).stdout.toString()
+      let match = out.match(/^\s*(\d+)\s+(.*)$/s)
+      if (!match) {
+        // Transient ps hiccup: retry once, then fail open per the policy below.
+        out = Bun.spawnSync(['ps', '-o', 'ppid=,command=', '-p', String(pid)]).stdout.toString()
+        match = out.match(/^\s*(\d+)\s+(.*)$/s)
+        if (!match) return true
+      }
+      if (claudeProcess.test(match[2])) return flagPattern.test(match[2])
+      if (flagPattern.test(match[2])) return true // a wrapper script carrying the flag
+      pid = Number(match[1])
     }
-    // local/project copy: enabled via the dev server form
-    return /--dangerously-load-development-channels[= ]\S*server:health/.test(cmd)
+    return false
   } catch {
     return true // cannot inspect: fail open, a dropped notification beats a lost event
   }

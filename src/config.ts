@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync } from 'fs'
+import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'fs'
 import { join, dirname } from 'path'
 import { homedir } from 'os'
 import type { HealthConfig } from './types.js'
@@ -34,6 +34,7 @@ export function loadConfig(): HealthConfig {
       cooldown_minutes: { ...DEFAULT_CONFIG.cooldown_minutes, ...parsed.cooldown_minutes },
       poll_interval_minutes: parsed.poll_interval_minutes ?? DEFAULT_CONFIG.poll_interval_minutes,
       webhook: { ...DEFAULT_CONFIG.webhook, ...parsed.webhook },
+      live: { ...DEFAULT_CONFIG.live, ...parsed.live },
     }
   } catch {
     return structuredClone(DEFAULT_CONFIG)
@@ -42,11 +43,27 @@ export function loadConfig(): HealthConfig {
 
 export function saveConfig(config: HealthConfig): void {
   mkdirSync(dirname(CONFIG_PATH), { recursive: true })
-  writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n')
+  // Atomic: a crash mid-write must never leave a truncated config behind.
+  writeFileSync(CONFIG_PATH + '.tmp', JSON.stringify(config, null, 2) + '\n')
+  renameSync(CONFIG_PATH + '.tmp', CONFIG_PATH)
+}
+
+/**
+ * Is the on-disk config safe to REWRITE? True when the file is absent (fresh
+ * install) or parses cleanly. False means loadConfig() is serving defaults in
+ * place of a malformed file the user can still repair: writing would destroy it.
+ */
+export function configFileWritable(): boolean {
+  try {
+    JSON.parse(readFileSync(CONFIG_PATH, 'utf8'))
+    return true
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT'
+  }
 }
 
 export function inQuietHours(config: HealthConfig, now = new Date()): boolean {
-  if (!config.quiet_hours) return false
+  if (!config.quiet_hours?.start || !config.quiet_hours.end) return false // malformed = off, never a crash
   const current = now.getHours() * 60 + now.getMinutes()
   const [startH, startM] = config.quiet_hours.start.split(':').map(Number)
   const [endH, endM] = config.quiet_hours.end.split(':').map(Number)

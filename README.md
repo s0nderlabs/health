@@ -14,17 +14,26 @@ WHOOP cloud ──(poll + webhooks)──> healthd (your Mac)
                                      ├─ SQLite archive (yours, forever)
                                      ├─ decision engine (quiet by design)
                                      └─> <channel> events ──> your Claude Code session
+WHOOP band ──(BLE Broadcast HR)──> health-relay ──(WS, raw frames)──^
 ```
 
 ## What you get
 
 - **Morning recovery brief**: score, band, HRV and RHR vs your 7-day baseline,
-  sleep folded in, one actionable read.
+  sleep folded in, one actionable read. Delivered the moment you wake: WHOOP
+  scores your sleep ~2 minutes after you get up, and that event ends quiet
+  hours early (wake release; togglable).
 - **Workout cards** when activities score (strain, HR, zones, calories).
 - **Early-warning vitals alerts**, gated on multi-day patterns (never
   single-day dips; alert fatigue is treated as the #1 failure mode).
 - **Strain crossings, bedtime nudges, trend alerts**: each togglable, all quiet
   by default.
+- **Live heart rate** (optional): turn on the band's Broadcast Heart Rate and
+  the bundled BLE relayer streams it into the daemon in real time. You get
+  `/health live` (current BPM, zone, live resting HRV when still), automatic
+  session detection (WHOOP cannot signal workout starts; a sustained-hot heart
+  rate can), zone milestones during the session, and an end-of-session summary
+  with the HR-recovery read.
 - **`/health`**: today's read on demand. `/health trend` for the long view.
 - **A permanent local archive** of your WHOOP data in one SQLite file.
 
@@ -73,6 +82,31 @@ Register `https://<your-funnel-host>/whoop` as a webhook URL (Model Version
 v2) in your WHOOP dashboard. The receiver verifies every request's HMAC
 signature against your client secret; everything else is rejected.
 
+### Live heart rate (optional)
+
+Enable **Broadcast Heart Rate** in the WHOOP app, then build and install the
+BLE relayer (macOS, near your body; a phone relayer for away-from-desk is
+planned):
+
+```bash
+scripts/build-relayer.sh
+bin/health-relay   # or install it under launchd for always-on
+```
+
+The relayer is a dumb pipe: it subscribes to the band's standard Bluetooth
+Heart Rate service (matching device names against `WHOOP` by default; set
+`HEALTH_RELAY_DEVICE` to override) and forwards every notification raw to the
+daemon's loopback WebSocket (`live.port`, token-authenticated; the token is
+generated into your config on first daemon start and never leaves the
+machine). All parsing, session detection, zone logic, and HRV math happen in
+the daemon. Notes: the band broadcasts to ONE receiver at a time, and
+broadcasting costs band battery, so many people run it only during training.
+If the packets carry RR intervals (WHOOP 5.0 does), `/health live` includes a
+rolling resting rMSSD when you are still enough. macOS quirk: each rebuild of
+the unsigned relayer binary re-triggers the Bluetooth permission check when
+it runs under launchd; re-grant it in System Settings > Privacy & Security >
+Bluetooth if the log stalls before "scanning".
+
 ## Sessions and routing
 
 Sessions started with the health channel receive the event stream; every
@@ -92,7 +126,7 @@ was around to see (a three-day-old bedtime nudge helps no one).
 
 Talk to it (`/health config`) or edit `~/.config/health/config.json`:
 event class toggles, thresholds, quiet hours, daily event budget, poll
-interval, webhook port/path.
+interval, webhook port/path, live-ingest port/max-HR/session threshold.
 
 ## Data + security posture
 

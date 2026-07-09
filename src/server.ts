@@ -10,7 +10,7 @@ import { Store } from './store.js'
 import { DB_PATH } from './config.js'
 import { existsSync } from 'fs'
 
-const VERSION = '0.1.1'
+const VERSION = '0.2.0'
 
 const INSTRUCTIONS = `
 health: WHOOP recovery, sleep, and strain as a live channel. The daemon on this
@@ -40,9 +40,16 @@ How to act on events (the behavioral contract):
   external channel, message, email, or document unless the user explicitly
   directs that specific disclosure.
 
+live.* events come from the live BLE feed: live.session = HR says a workout
+just started (invite the user to name it via health__workout_intent),
+live.zone = a notable-intensity milestone (one line, keep the flow),
+live.rest = session summary with the HR-recovery read (the coaching moment:
+recovery speed reflects fitness and current fatigue).
+
 Tools: health__read (today), health__trend (multi-day), health__workout_intent
 (user says they are starting a workout NOW; WHOOP cannot detect starts),
-health__config (event toggles, thresholds, quiet hours), health__status (daemon).
+health__live (live BPM/zone/HRV while the band broadcasts), health__config
+(event toggles, thresholds, quiet hours), health__status (daemon).
 `.trim()
 
 export function createServer(ipc: IpcClient) {
@@ -114,6 +121,12 @@ export function createServer(ipc: IpcClient) {
         description: 'Daemon health: pid, last poll, last webhook, record counts, subscriber state.',
         inputSchema: { type: 'object' as const, properties: {}, required: [] },
       },
+      {
+        name: 'health__live',
+        description:
+          'Live heart-rate feed snapshot (BLE relayer streaming the band\'s Broadcast HR): current BPM, zone, 5-min HRV (rMSSD), auto-detected session state, feed health. Only meaningful while the band is broadcasting.',
+        inputSchema: { type: 'object' as const, properties: {}, required: [] },
+      },
     ],
   }))
 
@@ -148,6 +161,8 @@ export function createServer(ipc: IpcClient) {
             JSON.stringify({ ...status, this_session_receives_events: ipc.eventsEnabled }, null, 2),
           )
         }
+        case 'health__live':
+          return toolResult(JSON.stringify(await ipc.rpc('live'), null, 2))
         default:
           return toolError(`Unknown tool: ${req.params.name}`)
       }

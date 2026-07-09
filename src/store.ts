@@ -82,6 +82,16 @@ CREATE INDEX IF NOT EXISTS idx_events_undelivered ON events (created_at) WHERE d
 CREATE INDEX IF NOT EXISTS idx_cycles_start ON cycles (start);
 CREATE INDEX IF NOT EXISTS idx_sleeps_end ON sleeps (end);
 CREATE INDEX IF NOT EXISTS idx_workouts_start ON workouts (start);
+CREATE TABLE IF NOT EXISTS live_sessions (
+  started_at TEXT PRIMARY KEY,
+  ended_at TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  duration_s INTEGER NOT NULL,
+  avg_bpm INTEGER NOT NULL,
+  max_bpm INTEGER NOT NULL,
+  zone_seconds TEXT NOT NULL,
+  recovery_60s_drop INTEGER
+);
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT
@@ -324,6 +334,41 @@ export class Store {
     return this.db.query('SELECT * FROM sleeps WHERE id = ?').get(id) as Record<string, unknown> | null
   }
 
+  // ── live sessions (relayer-detected, distinct from WHOOP workouts) ──
+
+  insertLiveSession(s: {
+    started_at: string
+    ended_at: string
+    reason: string
+    duration_s: number
+    avg_bpm: number
+    max_bpm: number
+    zone_seconds: number[]
+    recovery_60s_drop: number | null
+  }): void {
+    this.db.run(
+      `INSERT INTO live_sessions (started_at, ended_at, reason, duration_s, avg_bpm, max_bpm, zone_seconds, recovery_60s_drop)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(started_at) DO UPDATE SET ended_at=excluded.ended_at, reason=excluded.reason,
+         duration_s=excluded.duration_s, avg_bpm=excluded.avg_bpm, max_bpm=excluded.max_bpm,
+         zone_seconds=excluded.zone_seconds, recovery_60s_drop=excluded.recovery_60s_drop`,
+      [s.started_at, s.ended_at, s.reason, s.duration_s, s.avg_bpm, s.max_bpm, JSON.stringify(s.zone_seconds), s.recovery_60s_drop],
+    )
+  }
+
+  recentLiveSessions(days: number): Record<string, unknown>[] {
+    const since = new Date(Date.now() - days * 86_400_000).toISOString()
+    return this.db
+      .query('SELECT * FROM live_sessions WHERE started_at >= ? ORDER BY started_at ASC')
+      .all(since) as Record<string, unknown>[]
+  }
+
+  /** Highest heart rate WHOOP has ever scored in a workout; max-HR estimate. */
+  maxWorkoutHr(): number | null {
+    const row = this.db.query('SELECT MAX(max_heart_rate) AS m FROM workouts').get() as { m: number | null }
+    return row.m
+  }
+
   counts(): Record<string, number> {
     const one = (table: string) =>
       (this.db.query(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n
@@ -396,12 +441,20 @@ export class Store {
    * is offline or during quiet hours still count. Otherwise a night's worth of
    * queued events would all flush at once, blowing past the budget.
    */
+  /**
+   * How many budget-SUBJECT events were created today. Budget-exempt classes
+   * (alerts, user-initiated intents, live.*) are excluded from the count too:
+   * a training day full of live events must not starve the recovery brief.
+   */
   createdToday(): number {
     const dayStart = new Date()
     dayStart.setHours(0, 0, 0, 0)
     return (
       this.db
-        .query('SELECT COUNT(*) AS n FROM events WHERE created_at >= ? AND expired_at IS NULL')
+        .query(
+          `SELECT COUNT(*) AS n FROM events WHERE created_at >= ? AND expired_at IS NULL
+           AND priority != 'alert' AND class != 'workout.intent' AND class NOT LIKE 'live.%'`,
+        )
         .get(dayStart.toISOString()) as { n: number }
     ).n
   }
