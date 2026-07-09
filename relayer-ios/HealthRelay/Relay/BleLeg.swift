@@ -2,8 +2,12 @@
 // hands raw notification bytes up. Ported from the mac relayer with the iOS
 // additions: background mode (service-filtered scans keep working with the
 // screen locked), state restoration (iOS relaunches the app on BLE events
-// after a jetsam kill), and an on/off switch driven by the daemon's
-// arbitration (standdown = radio fully off so the mac can own the band).
+// after a jetsam kill), and a radio switch driven by the daemon's
+// arbitration. The load-bearing iOS trick is the PENDING CONNECT: once the
+// band is known, `central.connect` with no timeout is a standing order that
+// survives app suspension and wakes the app the moment the band advertises.
+// It is how a locked phone reacquires after a drop, and how a parked phone
+// silently takes over when the user walks out of the mac's range.
 
 import CoreBluetooth
 import Foundation
@@ -26,6 +30,12 @@ final class BleLeg: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         case streaming(String)
     }
 
+    /// What the controller wants from the radio:
+    /// on  = hold the band whenever it is obtainable (pending connect + scan)
+    /// off = radio silent NOW, but REMEMBER the band so the next `on` can
+    ///       re-arm a direct connect without a scan (pause probes)
+    enum RadioMode { case off, on }
+
     weak var delegate: BleLegDelegate?
 
     private var central: CBCentralManager!
@@ -36,7 +46,8 @@ final class BleLeg: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     // earlier attempt must never cancel a fresh in-progress connection.
     private var connectGeneration = 0
     private var lastNotifyAt = Date.distantPast
-    private var enabled = false
+    private var radioMode: RadioMode = .off
+    private var anchorArmedAt = Date.distantPast
 
     override init() {
         super.init()
@@ -50,7 +61,7 @@ final class BleLeg: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         // Subscribed-but-silent watchdog: a wedged notify stream (discovery
         // half-failed, band rebooted) recovers by rescanning.
         Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            guard let self = self, self.enabled,
+            guard let self = self, self.radioMode == .on,
                   let p = self.peripheral, p.state == .connected else { return }
             if Date().timeIntervalSince(self.lastNotifyAt) > 60 {
                 rlog("no HR notifications for 60s while connected, resetting BLE")
@@ -59,30 +70,81 @@ final class BleLeg: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         }
     }
 
-    /// Arbitration switch. Off = stop scanning AND release the band, so the
-    /// mac relayer can take the broadcast slot.
-    func setEnabled(_ on: Bool) {
-        guard on != enabled else { return }
-        enabled = on
-        if on {
-            startScan()
-        } else {
-            pickTimer?.cancel()
-            connectGeneration += 1
+    /// Arbitration switch. Off silences the radio NOW (releases the band, no
+    /// scan, so the mac can take the broadcast slot) but keeps the band
+    /// reference for the next `on`. Idempotent.
+    func apply(_ mode: RadioMode) {
+        radioMode = mode
+        pickTimer?.cancel()
+        connectGeneration += 1
+        guard central.state == .poweredOn else {
+            if mode == .off { delegate?.blePhase(.off) }
+            return // centralManagerDidUpdateState engages when the radio is up
+        }
+        switch mode {
+        case .off:
             central.stopScan()
-            if let p = peripheral {
+            if let p = peripheral, p.state != .disconnected {
                 central.cancelPeripheralConnection(p)
-                peripheral = nil
-                delegate?.bleStatus(connected: false, device: nil)
             }
             delegate?.blePhase(.off)
+        case .on:
+            engage()
         }
+    }
+
+    /// Full teardown including the remembered band (settings changed; the
+    /// device filter may now name a different band).
+    func reset() {
+        apply(.off)
+        peripheral = nil
+        discovered.removeAll()
+    }
+
+    /// Get the band. A remembered reference gets a DIRECT pending connect: it
+    /// never times out, survives app suspension, and wakes the app the moment
+    /// the band advertises (= the mac lost it, or we walked out of the mac's
+    /// range carrying it). That pending connect is the background lifeline;
+    /// scanning is only for first contact.
+    private func engage() {
+        guard radioMode == .on, central.state == .poweredOn else { return }
+        if let p = peripheral {
+            guard matchesFilter(p.name) else {
+                peripheral = nil
+                startScan()
+                return
+            }
+            switch p.state {
+            case .connected:
+                return // already streaming (or discovery is in flight)
+            case .connecting:
+                delegate?.blePhase(.connecting(p.name ?? "band"))
+                return // pending connect already armed
+            default:
+                rlog("arming pending connect to \(p.name ?? "unnamed")")
+                anchorArmedAt = Date()
+                central.connect(p)
+                delegate?.blePhase(.connecting(p.name ?? "band"))
+                return
+            }
+        }
+        startScan()
+    }
+
+    /// Foreground nudge: a pending connect that has sat unanswered for a long
+    /// time may point at a rotated identifier; trade it for a fresh scan
+    /// (which would also find the band if it were simply out of range).
+    func kick() {
+        guard radioMode == .on, let p = peripheral, p.state == .connecting,
+              Date().timeIntervalSince(anchorArmedAt) > 60 else { return }
+        rlog("pending connect stale after \(Int(Date().timeIntervalSince(anchorArmedAt)))s, rescanning")
+        resetAndRescan(p)
     }
 
     func centralManagerDidUpdateState(_ c: CBCentralManager) {
         switch c.state {
         case .poweredOn:
-            if enabled { startScan() }
+            if radioMode == .on { engage() }
         case .unauthorized:
             rlog("bluetooth permission DENIED: grant it in Settings > Privacy > Bluetooth")
             delegate?.blePhase(.waitingBluetooth)
@@ -99,18 +161,23 @@ final class BleLeg: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         }
     }
 
-    /// iOS relaunch path: re-adopt what the system preserved for us.
+    /// iOS relaunch path: re-adopt what the system preserved for us. A
+    /// restored .connecting peripheral is a pending-connect anchor that
+    /// survived the jetsam; leave it armed.
     func centralManager(_ c: CBCentralManager, willRestoreState dict: [String: Any]) {
         let restored = (dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral]) ?? []
         guard let p = restored.first(where: { matchesFilter($0.name) }) else { return }
-        rlog("restored \(p.name ?? "unnamed") from system state")
-        enabled = true
+        rlog("restored \(p.name ?? "unnamed") from system state (\(p.state.rawValue))")
+        radioMode = .on
         peripheral = p
         p.delegate = self
+        anchorArmedAt = Date()
         if p.state == .connected {
             delegate?.bleStatus(connected: true, device: p.name)
             delegate?.blePhase(.streaming(p.name ?? "band"))
             p.discoverServices([HR_SERVICE]) // re-arm notify if needed
+        } else if p.state == .connecting {
+            delegate?.blePhase(.connecting(p.name ?? "band"))
         }
         // Any other state resolves through centralManagerDidUpdateState.
     }
@@ -127,7 +194,7 @@ final class BleLeg: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 
     private func startScan() {
-        guard enabled, central.state == .poweredOn, peripheral == nil else { return }
+        guard radioMode == .on, central.state == .poweredOn, peripheral == nil else { return }
         rlog("scanning for \(Settings.shared.deviceFilter) (is Broadcast HR on in the WHOOP app?)")
         delegate?.blePhase(.scanning)
         discovered.removeAll()
@@ -141,7 +208,7 @@ final class BleLeg: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 
     private func pickAndConnect() {
-        guard enabled, peripheral == nil else { return }
+        guard radioMode == .on, peripheral == nil else { return }
         let matches = discovered.filter { matchesFilter($0.name) }
         guard let pick = matches.first else {
             if !discovered.isEmpty {
@@ -181,6 +248,7 @@ final class BleLeg: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
     func centralManager(_ c: CBCentralManager, didConnect p: CBPeripheral) {
         rlog("connected to \(p.name ?? "unnamed")")
+        central.stopScan()
         delegate?.bleStatus(connected: true, device: p.name)
         p.discoverServices([HR_SERVICE])
     }
@@ -189,16 +257,26 @@ final class BleLeg: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         rlog("connect failed: \(error?.localizedDescription ?? "unknown")")
         connectGeneration += 1 // invalidate the pending connect-timeout
         peripheral = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.startScan() }
+        // Scan immediately: in the background this callback IS the wake
+        // window, and a delayed timer may never fire before suspension.
+        startScan()
     }
 
     func centralManager(_ c: CBCentralManager, didDisconnectPeripheral p: CBPeripheral, error: Error?) {
         rlog("band disconnected\(error != nil ? " (\(error!.localizedDescription))" : "")")
         connectGeneration += 1
         delegate?.bleStatus(connected: false, device: nil)
-        peripheral = nil
-        guard enabled else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.startScan() }
+        // Keep the reference. If the radio should be on, re-arm a pending
+        // connect RIGHT NOW, inside the disconnect wake window: it persists
+        // through suspension and fires when the band is back in range. The
+        // old rescan path needed live timers the suspended app doesn't get.
+        // Identifier check: resetAndRescan drops a wedged band on purpose
+        // (peripheral = nil before the cancel lands); never resurrect it.
+        guard radioMode == .on, peripheral?.identifier == p.identifier else { return }
+        rlog("re-arming pending connect to \(p.name ?? "unnamed")")
+        anchorArmedAt = Date()
+        central.connect(p)
+        delegate?.blePhase(.connecting(p.name ?? "band"))
     }
 
     // Discovery/subscription failures after a successful connect must never

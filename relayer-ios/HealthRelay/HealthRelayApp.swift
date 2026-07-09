@@ -21,6 +21,7 @@ struct HealthRelayApp: App {
                     if phase == .active {
                         plan.refresh()
                         steps.syncNow()
+                        relay.kick() // trade a long-stale pending connect for a scan
                         // Foreground is the only moment iOS lets us arm the
                         // lock-screen pulse card; every open re-arms it.
                         LiveActivityController.shared.ensurePulse()

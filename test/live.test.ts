@@ -215,11 +215,14 @@ function makeArbListener(opts: LiveListenerOpts = {}) {
 async function relayer(
   port: number,
   source: string,
+  transport?: string,
 ): Promise<{ ws: WebSocket; msgs: string[]; helloReply: string }> {
   const ws = await connect(port)
   const msgs: string[] = []
   ws.onmessage = (e) => msgs.push(String(e.data))
-  ws.send(JSON.stringify({ type: 'hello', source, device: `${source}-test` }))
+  const hello: Record<string, unknown> = { type: 'hello', source, device: `${source}-test` }
+  if (transport) hello.transport = transport
+  ws.send(JSON.stringify(hello))
   await waitFor(() => msgs.length >= 1)
   return { ws, msgs, helloReply: msgs[0] }
 }
@@ -281,7 +284,7 @@ describe('arbitration (mac priority)', () => {
     const { listener, port } = makeArbListener()
     cleanup.push(() => listener.stop())
     const mac = await relayer(port, 'mac') // connected but silent (band out of its range)
-    const phone = await relayer(port, 'phone')
+    const phone = await relayer(port, 'phone', 'wifi')
     expect(JSON.parse(phone.helloReply).type).toBe('ok')
     // Phone is the active feed.
     const feed = setInterval(() => phone.ws.send(hrFrame(Date.now() - 500, 70)), 60)
@@ -300,7 +303,7 @@ describe('arbitration (mac priority)', () => {
     const { listener, port } = makeArbListener()
     cleanup.push(() => listener.stop())
     const mac = await relayer(port, 'mac')
-    const phone = await relayer(port, 'phone')
+    const phone = await relayer(port, 'phone', 'wifi')
     const feed = setInterval(() => phone.ws.send(hrFrame(Date.now() - 500, 70)), 60)
     cleanup.push(() => clearInterval(feed))
 
@@ -330,7 +333,7 @@ describe('arbitration (mac priority)', () => {
     const { listener, state, port } = makeArbListener()
     cleanup.push(() => listener.stop())
     const mac = await relayer(port, 'mac')
-    const phone = await relayer(port, 'phone')
+    const phone = await relayer(port, 'phone', 'wifi')
     // Drive the state machine into a session through the phone feed.
     const t0 = Date.now() - 300_000
     for (let i = 0; i < 120; i++) phone.ws.send(hrFrame(t0 + i * 1000, 150))
@@ -340,6 +343,49 @@ describe('arbitration (mac priority)', () => {
     cleanup.push(() => clearInterval(feed))
     await Bun.sleep(FAST.probeIntervalMs * 2 + 100)
     expect(has(phone.msgs, 'pause')).toBe(false)
+    mac.ws.close()
+    phone.ws.close()
+  })
+
+  test('no probe while the phone is on cellular (mac cannot win, hole for nothing)', async () => {
+    const { listener, port } = makeArbListener()
+    cleanup.push(() => listener.stop())
+    const mac = await relayer(port, 'mac')
+    const phone = await relayer(port, 'phone', 'cellular')
+    const feed = setInterval(() => phone.ws.send(hrFrame(Date.now() - 500, 70)), 60)
+    cleanup.push(() => clearInterval(feed))
+    await Bun.sleep(FAST.probeIntervalMs * 2 + 100)
+    expect(has(phone.msgs, 'pause')).toBe(false)
+    mac.ws.close()
+    phone.ws.close()
+  })
+
+  test('no probe when the phone never reported a transport (pre-fix client)', async () => {
+    const { listener, port } = makeArbListener()
+    cleanup.push(() => listener.stop())
+    const mac = await relayer(port, 'mac')
+    const phone = await relayer(port, 'phone')
+    const feed = setInterval(() => phone.ws.send(hrFrame(Date.now() - 500, 70)), 60)
+    cleanup.push(() => clearInterval(feed))
+    await Bun.sleep(FAST.probeIntervalMs * 2 + 100)
+    expect(has(phone.msgs, 'pause')).toBe(false)
+    mac.ws.close()
+    phone.ws.close()
+  })
+
+  test('a transport message flips probe eligibility mid-connection', async () => {
+    const { listener, port } = makeArbListener()
+    cleanup.push(() => listener.stop())
+    const mac = await relayer(port, 'mac')
+    const phone = await relayer(port, 'phone', 'cellular')
+    const feed = setInterval(() => phone.ws.send(hrFrame(Date.now() - 500, 70)), 60)
+    cleanup.push(() => clearInterval(feed))
+    await Bun.sleep(FAST.probeIntervalMs + 100)
+    expect(has(phone.msgs, 'pause')).toBe(false)
+    // Arriving home: the phone joins wifi and reports it.
+    phone.ws.send(JSON.stringify({ type: 'transport', transport: 'wifi' }))
+    await waitFor(() => has(phone.msgs, 'pause'))
+    expect(listener.status().relayers.find((r) => r.source === 'phone')?.transport).toBe('wifi')
     mac.ws.close()
     phone.ws.close()
   })

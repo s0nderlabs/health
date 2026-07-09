@@ -4,14 +4,22 @@
 // plan-updated pushes).
 //
 // Arbitration contract (daemon -> phone):
-//   standdown        radio off, keep the socket, wait
-//   resume           scan again
-//   pause {seconds}  radio off for a probe window; a standdown or resume
-//                    verdict follows. If neither arrives (socket died mid-
-//                    probe), a safety timer resumes scanning.
+//   standdown        release the band but stay ARMED: a pending connect to
+//                    the remembered band waits silently (the band only
+//                    advertises when the mac loses it), so walking out of the
+//                    mac's range hands the feed over without opening the app
+//   resume           take the band back (direct reconnect, no scan needed)
+//   pause {seconds}  radio truly silent for a probe window; a standdown or
+//                    resume verdict follows. The whole window runs inside a
+//                    UIKit background task: without it, iOS suspends the
+//                    radio-silent app in seconds and the verdict never
+//                    arrives (no BLE wake source), orphaning the feed until
+//                    the next foreground. If the window expires with no
+//                    verdict, we self-resume before suspension.
 
 import Foundation
 import Combine
+import UIKit
 
 // Not @MainActor: both legs are pinned to the main queue by construction
 // (CBCentralManager queue .main, URLSession delegateQueue .main), so every
@@ -41,6 +49,7 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
     private let socket = SocketLeg()
     private let ble = BleLeg()
     private var pauseSafety: DispatchWorkItem?
+    private var pauseTask: UIBackgroundTaskIdentifier = .invalid
     private var frames = 0
 
     init() {
@@ -60,9 +69,16 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
 
     func restart() {
         pauseSafety?.cancel()
+        endPauseTask()
         socket.stop()
-        ble.setEnabled(false)
+        ble.reset() // settings may now name a different band
         start()
+    }
+
+    /// Foreground nudge (scenePhase active): give a long-stale pending
+    /// connect a chance to trade itself for a fresh scan.
+    func kick() {
+        ble.kick()
     }
 
     func sendIntent(_ activity: String) {
@@ -75,8 +91,51 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
     }
 
     private func applyMode(_ newMode: ServerMode) {
+        if mode == .paused && newMode != .paused { endPauseTask() }
         mode = newMode
-        ble.setEnabled(newMode == .active && Settings.shared.configured)
+        guard Settings.shared.configured else {
+            ble.apply(.off)
+            return
+        }
+        switch newMode {
+        case .active:
+            ble.apply(.on)
+        case .standdown:
+            // Parked, not dead: BleLeg keeps a pending connect armed on the
+            // remembered band. While the mac holds it the band never
+            // advertises, so this sits silent; the moment the band frees
+            // (walked out of range, mac relayer died) the connect fires,
+            // wakes the app, and capture resumes without a foreground.
+            ble.apply(.on)
+        case .paused:
+            // Truly silent: the probe window is the mac's exclusive shot at
+            // the band, so no pending connect either (it would win the race
+            // instantly, since the freed band is right on our wrist).
+            ble.apply(.off)
+        }
+    }
+
+    // A pause with the screen locked is lethal without this: radio off means
+    // no BLE wake source, iOS suspends us in seconds, and the daemon's
+    // resume verdict lands on a socket nobody is reading.
+    private func beginPauseTask() {
+        endPauseTask()
+        pauseTask = UIApplication.shared.beginBackgroundTask(withName: "band-pause-probe") { [weak self] in
+            guard let self = self else { return }
+            if self.mode == .paused {
+                rlog("background window expiring mid-pause; self-resuming capture")
+                self.pauseSafety?.cancel()
+                self.applyMode(.active) // also ends the task
+            } else {
+                self.endPauseTask()
+            }
+        }
+    }
+
+    private func endPauseTask() {
+        guard pauseTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(pauseTask)
+        pauseTask = .invalid
     }
 
     // ── SocketLegDelegate ────────────────────────────────────────────
@@ -124,8 +183,12 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
         case "pause":
             let seconds = (payload["seconds"] as? Double) ?? 25
             rlog("daemon: pause \(seconds)s (mac reacquire probe)")
+            beginPauseTask() // keep us runnable for the whole probe window
             applyMode(.paused)
-            // Safety: if the verdict never lands, scanning must come back.
+            // Safety: if the verdict never lands, capture must come back.
+            // Kept inside the ~30s background grant (the daemon's verdict is
+            // due at seconds + one arb tick); the task's expiration handler
+            // is the harder backstop.
             pauseSafety?.cancel()
             let work = DispatchWorkItem { [weak self] in
                 guard let self = self, self.mode == .paused else { return }
@@ -133,7 +196,7 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
                 self.applyMode(.active)
             }
             pauseSafety = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + seconds + 20, execute: work)
+            DispatchQueue.main.asyncAfter(deadline: .now() + seconds + 8, execute: work)
         case "plan_updated":
             rlog("daemon: plan updated")
             onPlanUpdated?()
@@ -154,6 +217,13 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
     // ── BleLegDelegate ───────────────────────────────────────────────
 
     func bleFrame(_ raw: Data) {
+        // A frame while parked means the standdown anchor fired: the band
+        // left the mac and this phone caught it. Promote locally, capture-
+        // first; the daemon confirms with a resume on its next tick.
+        if mode == .standdown {
+            rlog("parked anchor fired; capture resumed")
+            mode = .active
+        }
         socket.sendJSON([
             "type": "hr",
             "ts": Int(Date().timeIntervalSince1970 * 1000),

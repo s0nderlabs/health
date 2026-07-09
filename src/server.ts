@@ -10,7 +10,7 @@ import { Store } from './store.js'
 import { DB_PATH } from './config.js'
 import { existsSync } from 'fs'
 
-const VERSION = '0.3.0'
+const VERSION = '0.3.1'
 
 const INSTRUCTIONS = `
 health: WHOOP recovery, sleep, and strain as a live channel. The daemon on this

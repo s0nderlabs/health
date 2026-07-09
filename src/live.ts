@@ -6,9 +6,10 @@
 //
 // Protocol (JSON per message):
 //   relayer -> daemon:
-//     {type:'hello', source:'mac'|'phone', device?}  -> {type:'ok'} | {type:'standdown'}
+//     {type:'hello', source:'mac'|'phone', device?, transport?}  -> {type:'ok'} | {type:'standdown'}
 //     {type:'hr', ts:<ISO|epoch-ms>, raw:<base64>}      (buffered frames replay with original ts)
-//     {type:'status', connected:bool, device?, rssi?}
+//     {type:'status', connected:bool, device?, rssi?, transport?}
+//     {type:'transport', transport:'wifi'|'cellular'}   (network path changed)
 //     {type:'steps', samples:[{uuid,start,end,count}]}  -> {type:'steps_ack', received, added}
 //     {type:'intent', activity}                         -> {type:'intent_ack', activity, surfaced}
 //   daemon -> relayer (arbitration; the band broadcasts to ONE receiver, mac
@@ -26,6 +27,10 @@ import { parseBase64Frame } from './hrparse.js'
 
 function log(msg: string): void {
   process.stderr.write(`healthd live: ${msg}\n`)
+}
+
+function parseTransport(v: unknown): 'wifi' | 'cellular' | 'unknown' {
+  return v === 'wifi' || v === 'cellular' ? v : 'unknown'
 }
 
 export interface StepsSample {
@@ -67,11 +72,13 @@ const DEFAULT_TIMING: ArbTiming = {
 }
 
 type RelayerMode = 'active' | 'standdown' | 'paused'
+type Transport = 'wifi' | 'cellular' | 'unknown'
 
 interface RelayerData {
   source: string
   device: string | null
   mode: RelayerMode
+  transport: Transport
 }
 
 interface RelayerWs {
@@ -82,7 +89,7 @@ interface RelayerWs {
 export interface LiveFeedStatus {
   relayer_connected: boolean
   relayer_source: string | null
-  relayers: Array<{ source: string; device: string | null; mode: RelayerMode }>
+  relayers: Array<{ source: string; device: string | null; mode: RelayerMode; transport: Transport }>
   active_source: string | null
   band_connected: boolean
   band_device: string | null
@@ -139,7 +146,7 @@ export class LiveListener {
           log('rejected stream connection (bad token)')
           return new Response('unauthorized', { status: 401 })
         }
-        if (server.upgrade(req, { data: { source: 'unknown', device: null, mode: 'active' } })) {
+        if (server.upgrade(req, { data: { source: 'unknown', device: null, mode: 'active', transport: 'unknown' } })) {
           return undefined as unknown as Response
         }
         return new Response('expected a websocket', { status: 426 })
@@ -259,6 +266,13 @@ export class LiveListener {
     if (!macConnected) return
     for (const ws of this.relayers) {
       if (ws.data.source === 'mac' || ws.data.source === 'unknown') continue
+      // Probe only phones that affirmatively report wifi. The phone carries
+      // the band, so its network IS the band's location: cellular means it is
+      // away from home and the mac cannot possibly win the probe; the pause
+      // would just punch a hole in the live feed. A client that reports no
+      // transport at all predates the pause-survival fix (it suspends with
+      // the radio off and never hears the resume), so it is never probed.
+      if (ws.data.transport !== 'wifi') continue
       if (ws.data.mode === 'active' && this.sourceFresh(ws.data.source, now)) {
         ws.data.mode = 'paused'
         this.probing = ws
@@ -285,7 +299,10 @@ export class LiveListener {
       case 'hello': {
         ws.data.source = String(msg.source ?? 'unknown')
         ws.data.device = msg.device ? String(msg.device) : null
-        log(`hello from ${ws.data.source}${ws.data.device ? ` (${ws.data.device})` : ''}`)
+        ws.data.transport = parseTransport(msg.transport)
+        log(
+          `hello from ${ws.data.source}${ws.data.device ? ` (${ws.data.device})` : ''}${ws.data.transport !== 'unknown' ? ` via ${ws.data.transport}` : ''}`,
+        )
         if (ws.data.source !== 'mac' && ws.data.source !== 'unknown') {
           this.phoneSeen(true)
           if (this.sourceFresh('mac')) {
@@ -324,9 +341,15 @@ export class LiveListener {
       case 'status': {
         this.bandConnected = Boolean(msg.connected)
         this.bandDevice = msg.device ? String(msg.device) : this.bandDevice
+        if (msg.transport != null) ws.data.transport = parseTransport(msg.transport)
         log(
           `band ${this.bandConnected ? 'connected' : 'disconnected'}${this.bandDevice ? ` (${this.bandDevice})` : ''}`,
         )
+        break
+      }
+      case 'transport': {
+        ws.data.transport = parseTransport(msg.transport)
+        log(`${ws.data.source} transport: ${ws.data.transport}`)
         break
       }
       case 'steps': {
@@ -505,6 +528,7 @@ export class LiveListener {
         source: r.data.source,
         device: r.data.device,
         mode: r.data.mode,
+        transport: r.data.transport,
       })),
       active_source: active,
       band_connected: this.bandConnected,

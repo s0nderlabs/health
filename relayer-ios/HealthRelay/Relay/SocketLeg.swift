@@ -5,6 +5,7 @@
 // reconnect; backoff 1 -> 30s.
 
 import Foundation
+import Network
 
 func rlog(_ msg: String) {
     let ts = ISO8601DateFormatter().string(from: Date())
@@ -34,6 +35,35 @@ final class SocketLeg: NSObject, URLSessionWebSocketDelegate {
     // connect() a second time, overwriting session/task and LEAKING the live
     // session (never invalidated) plus its zombie WebSocket.
     private var reconnectWork: DispatchWorkItem?
+
+    // The daemon's reacquire probes key on this: wifi ~ "home, the mac might
+    // be in range, a probe can win"; cellular ~ "out, a pause would punch a
+    // hole in the feed for nothing". Reported in hello + on every change.
+    private let pathMonitor = NWPathMonitor()
+    private var transport = "unknown"
+
+    override init() {
+        super.init()
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            let t: String
+            if path.usesInterfaceType(.wifi) || path.usesInterfaceType(.wiredEthernet) {
+                t = "wifi"
+            } else if path.usesInterfaceType(.cellular) {
+                t = "cellular"
+            } else {
+                t = "unknown"
+            }
+            DispatchQueue.main.async {
+                guard let self = self, t != self.transport else { return }
+                self.transport = t
+                rlog("network path: \(t)")
+                if self.connected {
+                    self.sendJSON(["type": "transport", "transport": t])
+                }
+            }
+        }
+        pathMonitor.start(queue: .main)
+    }
 
     /// Start (or restart after a settings change) the connect loop.
     func start() {
@@ -79,7 +109,10 @@ final class SocketLeg: NSObject, URLSessionWebSocketDelegate {
         connected = true
         backoff = 1
         rlog("socket up")
-        sendJSON(["type": "hello", "source": "phone", "device": deviceName ?? "iphone"])
+        sendJSON([
+            "type": "hello", "source": "phone",
+            "device": deviceName ?? "iphone", "transport": transport,
+        ])
         flush()
         schedulePing(webSocketTask)
         delegate?.socketDidConnect()

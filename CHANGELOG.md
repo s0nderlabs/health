@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.1 - 2026-07-09
+
+### Fixed
+
+- **Locked-phone feed loss from reacquire probes.** The daemon's blind
+  mac-reacquire probe told the phone to go radio-silent for 25 s; with the
+  screen locked, iOS suspended the radio-silent app in seconds and the
+  `resume` verdict landed on a socket nobody was reading, killing the live
+  feed until the next foreground. Three-part fix: the phone now runs the
+  whole pause window inside a UIKit background task and self-resumes before
+  suspension if no verdict arrives; every reconnect path uses a no-timeout
+  pending `connect()` to the remembered band (survives suspension and wakes
+  the app the moment the band advertises) instead of a timer-driven rescan;
+  and the daemon only probes phones that affirmatively report being on
+  wifi (the phone reports its network path in `hello` and on every change),
+  since a phone on cellular is away from home and the mac cannot win the
+  probe anyway.
+- **Silent walk-out handover.** Standdown now parks with the pending
+  connect armed instead of turning the radio fully off, so leaving the
+  mac's range hands the band to the phone in the background; previously the
+  phone had to be foregrounded once after walking out.
+
 ## 0.3.0 - 2026-07-09
 
 ### Added
