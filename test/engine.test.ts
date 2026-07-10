@@ -378,3 +378,47 @@ describe('workout intent stapling', () => {
     expect(cards.length).toBeGreaterThan(0)
   })
 })
+
+describe('workout intent retry dedupe', () => {
+  let store: Store
+  let engine: Engine
+
+  beforeEach(() => {
+    store = freshStore()
+    engine = new Engine(store, () => testConfig())
+  })
+
+  test('a same-activity re-press within the window is absorbed: one event, one log entry', () => {
+    // Jul 10: the app UI failed to arm, he pressed start twice 14s apart,
+    // and both intents were delivered as a double notif.
+    expect(engine.workoutIntent('Deadlift 1RM Test', { label: 'Deadlift 1RM Test', pr: true })).toBe(true)
+    expect(engine.workoutIntent('Deadlift 1RM Test', { label: 'Deadlift 1RM Test', pr: true })).toBe(true)
+    expect(store.undeliveredEvents().filter((e) => e.class === 'workout.intent').length).toBe(1)
+    const log = JSON.parse(store.getMeta('intent_log') ?? '[]') as unknown[]
+    expect(log.length).toBe(1)
+  })
+
+  test('a different activity inside the window is a real second intent', () => {
+    engine.workoutIntent('Deadlift 1RM Test')
+    engine.workoutIntent('Walk')
+    expect(store.undeliveredEvents().filter((e) => e.class === 'workout.intent').length).toBe(2)
+  })
+
+  test('the same activity past the window is a real new intent', () => {
+    store.setMeta('intent_log', JSON.stringify([
+      { ts: new Date(Date.now() - 4 * 60_000).toISOString(), activity: 'Lifting', label: 'Lifting', pr: false, claimed: false },
+    ]))
+    engine.workoutIntent('Lifting')
+    expect(store.undeliveredEvents().filter((e) => e.class === 'workout.intent').length).toBe(1)
+    const log = JSON.parse(store.getMeta('intent_log') ?? '[]') as unknown[]
+    expect(log.length).toBe(2)
+  })
+
+  test('a claimed same-activity entry does not absorb a new press (back-to-back sessions)', () => {
+    store.setMeta('intent_log', JSON.stringify([
+      { ts: new Date(Date.now() - 60_000).toISOString(), activity: 'Lifting', label: 'Lifting', pr: false, claimed: true, workout_id: 'w-1' },
+    ]))
+    engine.workoutIntent('Lifting')
+    expect(store.undeliveredEvents().filter((e) => e.class === 'workout.intent').length).toBe(1)
+  })
+})

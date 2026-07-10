@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.5.1 - 2026-07-10
+
+### Fixed
+
+- **Dual-up no longer attacks the live feed away from home.** The
+  release-and-race orchestrator gated "am I home" on the phone reporting
+  wifi, and gym wifi passes that test: the daemon repeatedly released the
+  SOLE holder of the band mid-warmup to race a Mac that was kilometers away.
+  A new long-memory reachability gate (when did each leg last deliver a band
+  frame, surviving disconnects) now blocks any release unless the other leg
+  demonstrably had the band within the last 10 minutes. Home blips still
+  re-dual; away, the holder is never touched. `health__status` exposes the
+  signal per relayer as `band_seen_ago_s`.
+- **Dead lock-screen cards are reaped instead of adopted.** iOS hard-ends
+  every Live Activity at its ~8h cap and the corpse lingers, silently
+  swallowing updates: the pulse card froze, the session face never appeared,
+  and the corpse's stale state force-disarmed a genuinely armed session on
+  every app foreground (the plan kept reverting to a document mid-PR-day).
+  The controller now only treats a live activity as current, ends corpses on
+  foreground and session start, re-arms a fresh card (wearing the session
+  face if a session is armed), and the card can no longer arm or disarm the
+  session machine in either direction; the End button keeps its explicit path.
+- **Start-button retries no longer double-notify.** A same-activity intent
+  within 3 minutes is absorbed as a retry (one log entry, one event, normal
+  ack), and the intent dedupe key now includes the activity so same-instant
+  intents for different activities can never supersede each other.
+
 ## 0.5.0 - 2026-07-09
 
 ### Added

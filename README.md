@@ -98,8 +98,10 @@ Heart Rate service (matching device names against `WHOOP` by default; set
 daemon's loopback WebSocket (`live.port`, token-authenticated; the token is
 generated into your config on first daemon start and never leaves the
 machine). All parsing, session detection, zone logic, and HRV math happen in
-the daemon. Notes: the band broadcasts to ONE receiver at a time, and
-broadcasting costs band battery, so many people run it only during training.
+the daemon. Notes: the band normally streams to one receiver (a second can
+only join by racing the brief post-drop advertising window; the daemon
+orchestrates that at home), and broadcasting costs band battery, so many
+people run it only during training.
 If the packets carry RR intervals (WHOOP 5.0 does), `/health live` includes a
 rolling resting rMSSD when you are still enough. macOS quirk: each rebuild of
 the unsigned relayer binary re-triggers the Bluetooth permission check when
@@ -115,7 +117,10 @@ home the daemon deliberately holds the band on BOTH receivers when it can
 (the band accepts a second central when two connects race its advertising
 window): the Mac writes the live record, the phone rides along as a hot
 standby and takes over with zero gap if the Mac drops. Away, the phone is
-the sole holder; a phone on cellular or low battery is never interrupted.
+the sole holder and is never interrupted: the daemon only orchestrates the
+dual hold when both receivers have recently proven they can reach the band
+(wifi alone is not trusted as a home signal), and never on cellular or low
+battery.
 Handover is silent in both directions: a parked phone keeps a pending BLE
 connect armed, so walking out of the Mac's range hands it the band without
 opening the app. The app adds: a Plan tab rendering the training

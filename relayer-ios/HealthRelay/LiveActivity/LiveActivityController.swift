@@ -11,8 +11,10 @@
 // same-turn mutators (setPlanLine + startRest on a set check-off) captured
 // the same base state and the late apply clobbered the early one, dropping
 // the rest countdown. The lock-screen End button runs in-process but outside
-// this class; it posts .hrSessionEnded, and foreground sync re-adopts the
-// activity's truth whenever the app comes back.
+// this class; it posts .hrSessionEnded, which is the ONLY path that may end a
+// session from the card side. Foreground sync adopts the card's state only
+// while the session machine is cold: the card is a display, not an authority,
+// and a dead or lagging card must never disarm a live session.
 
 import ActivityKit
 import Foundation
@@ -40,8 +42,23 @@ final class LiveActivityController {
         }
     }
 
+    /// Only a LIVE card counts. iOS hard-ends every Live Activity at the ~8h
+    /// system cap, and the corpse lingers in .activities (and on the lock
+    /// screen for hours) silently swallowing updates. Treating a corpse as
+    /// "the card" froze the lock screen at the gym AND let its stale
+    /// sessionActive=false veto a real session (Jul 10).
     private var current: Activity<PulseAttributes>? {
-        Activity<PulseAttributes>.activities.first
+        Activity<PulseAttributes>.activities.first { $0.activityState == .active }
+    }
+
+    /// Dismiss anything the system already ended so a fresh card can take
+    /// the slot. Ending an ended activity is a safe no-op server-side; the
+    /// point is clearing it off the lock screen and out of .activities.
+    private func reapDeadActivities() {
+        for activity in Activity<PulseAttributes>.activities
+        where activity.activityState != .active {
+            Task { await activity.end(nil, dismissalPolicy: .immediate) }
+        }
     }
 
     /// Serialize full-snapshot applies so the last mutation always wins.
@@ -55,21 +72,31 @@ final class LiveActivityController {
         }
     }
 
-    /// Arm the pulse card. Called on every app-foreground; a no-op when an
-    /// activity is already up or activities are disabled in Settings.
+    /// Arm the pulse card. Called on every app-foreground; a no-op when a
+    /// LIVE activity is already up or activities are disabled in Settings.
     func ensurePulse() {
         guard !Demo.active, Settings.shared.configured else { return }
         guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
+        reapDeadActivities()
         if let activity = current {
-            // Adopt the activity's truth (the End button may have demoted it
-            // while we weren't looking) before pushing anything new.
-            state = activity.content.state
+            // Adopt the live card's truth (the End button may have demoted
+            // it while we weren't looking) UNLESS this process owns a live
+            // session: then our snapshot is the authority and the card only
+            // lags it (an in-flight update must never clobber the machine).
+            if !SessionProgress.shared.sessionActive {
+                state = activity.content.state
+            }
             return
         }
-        state = PulseAttributes.ContentState(
-            bpm: nil, zone: nil, sessionActive: false, startedAt: nil,
-            title: "Live", planLine: nil, stateLine: "waiting for the band",
-            restEndsAt: nil, restLabel: nil)
+        // No live card. If a session is armed, re-request wearing the
+        // session face (the 8h cap can kill the card mid-workout); else
+        // start from the quiet pulse default.
+        if !SessionProgress.shared.sessionActive {
+            state = PulseAttributes.ContentState(
+                bpm: nil, zone: nil, sessionActive: false, startedAt: nil,
+                title: "Live", planLine: nil, stateLine: "waiting for the band",
+                restEndsAt: nil, restLabel: nil)
+        }
         _ = try? Activity.request(
             attributes: PulseAttributes(),
             content: .init(state: state, staleDate: nil))
@@ -78,6 +105,7 @@ final class LiveActivityController {
     /// Intent tap: the card grows into the session face.
     func startSession(title: String, planLine: String?) {
         guard !Demo.active else { return }
+        reapDeadActivities()
         state.sessionActive = true
         state.startedAt = Date()
         state.title = title
@@ -184,13 +212,18 @@ final class LiveActivityController {
         SessionProgress.shared.endSession()
     }
 
-    /// Foreground reconciliation: adopt whatever the activity says now.
+    /// Foreground reconciliation. The card is a DISPLAY of the session
+    /// machine, never an authority over it, in EITHER direction: it must not
+    /// disarm a session this process armed (the gym revert bug), and it must
+    /// not arm one either. The intent sheet builds a session-face card for a
+    /// Run without arming the plan, so card-face + cold machine does NOT
+    /// imply a lost gym session. Adopt for display continuity only while the
+    /// machine is cold; the End button has its own explicit path.
     func syncSessionState() {
         guard !Demo.active else { return }
         guard let activity = current else { return }
-        state = activity.content.state
-        if !state.sessionActive && SessionProgress.shared.sessionActive {
-            SessionProgress.shared.endSession()
+        if !SessionProgress.shared.sessionActive {
+            state = activity.content.state
         }
     }
 }

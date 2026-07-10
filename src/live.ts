@@ -79,6 +79,7 @@ export interface ArbTiming {
   dualUpCooldownMs: number // min gap between dual-up attempts
   dualUpExhaustedMs: number // rest period after maxAttempts strikeout
   dualUpMaxAttempts: number // attempts per epoch before backing off long
+  dualUpPeerRecentMs: number // the other leg must have seen band frames this recently before we release a holder
 }
 
 const DEFAULT_TIMING: ArbTiming = {
@@ -92,6 +93,7 @@ const DEFAULT_TIMING: ArbTiming = {
   dualUpCooldownMs: 180_000,
   dualUpExhaustedMs: 1_800_000,
   dualUpMaxAttempts: 4,
+  dualUpPeerRecentMs: 600_000,
 }
 
 type RelayerMode = 'active' | 'standdown' | 'paused'
@@ -120,6 +122,7 @@ export interface LiveFeedStatus {
     mode: RelayerMode
     transport: Transport
     battery: { level: number; charging: boolean } | null
+    band_seen_ago_s: number | null
   }>
   active_source: string | null
   dual: boolean
@@ -143,6 +146,13 @@ export class LiveListener {
   // Frame ARRIVAL times per source (wall clock, not frame ts: a buffer flush
   // replays old timestamps but proves the feed is alive right now).
   private frameArrival = new Map<string, number>()
+  // Long-memory sibling of frameArrival: when did each source LAST deliver a
+  // band frame, surviving disconnects and status:false (which wipe
+  // frameArrival for zero-gap failover). This is the only signal that can
+  // answer "is the band plausibly near that leg" for the dual-up gate: gym
+  // wifi passes dualEligible, but a mac that has not seen the band in half
+  // an hour must never cost the sole holder its connection.
+  private bandSeen = new Map<string, number>()
   private arbTimer: ReturnType<typeof setInterval> | null = null
   private probing: RelayerWs | null = null
   private probeStartedAt = 0
@@ -421,14 +431,26 @@ export class LiveListener {
     )
     if (!mac || !phone) return
 
+    // Reachability gate: a release only pays off if the OTHER leg can
+    // actually reach the band, and transport is a lying proxy for that (gym
+    // wifi reads exactly like home wifi). bandSeen is the ground truth:
+    // unless the non-holding leg delivered band frames recently, releasing
+    // the holder just punches a hole in the live feed and hands the band
+    // back to the same leg seconds later. This is what let the daemon
+    // release the sole phone holder mid-warmup at the gym, four times.
+    const bandNear = (source: string) =>
+      now - (this.bandSeen.get(source) ?? 0) <= this.timing.dualUpPeerRecentMs
+
     // Who holds the band decides who must let go; the other side's anchor is
     // standing (phone: pending connect always armed; mac: scanning loop).
     let released: string | null = null
     if (macFresh && !this.sourceFresh(phone.data.source, now)) {
       if (!mac.data.caps.includes('release')) return // old mac relayer build
+      if (!bandNear(phone.data.source)) return // band demonstrably not with the phone
       this.push(mac, { type: 'release' })
       released = 'mac'
     } else if (!macFresh && this.sourceFresh(phone.data.source, now)) {
+      if (!bandNear('mac')) return // not home: the mac has not seen the band lately
       this.push(phone, { type: 'release' })
       released = phone.data.source
     } else {
@@ -529,6 +551,7 @@ export class LiveListener {
         this.frames++
         this.lastFrameAt = Date.now()
         this.frameArrival.set(ws.data.source, this.lastFrameAt)
+        this.bandSeen.set(ws.data.source, this.lastFrameAt)
         this.bandConnected = true
         // Single-writer gate: during a dual hold, only the primary source
         // feeds the live math (a second receiver's interleaved copies would
@@ -753,6 +776,11 @@ export class LiveListener {
         mode: r.data.mode,
         transport: r.data.transport,
         battery: r.data.battery,
+        // How long since this leg last delivered a band frame (long memory,
+        // survives reconnects): the dual-up reachability gate made visible.
+        band_seen_ago_s: this.bandSeen.has(r.data.source)
+          ? Math.round((now - (this.bandSeen.get(r.data.source) as number)) / 1000)
+          : null,
       })),
       active_source: active,
       dual: this.isDual(now),

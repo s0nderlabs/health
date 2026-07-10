@@ -270,6 +270,11 @@ export class Engine {
     return this.emit(cls, 'info', dedupeKey, payload)
   }
 
+  /** A same-activity re-press inside this window is a retry, not a second
+   *  workout: log once, notify once (Jul 10: two presses 14s apart because
+   *  the app's session UI failed to arm, delivered as a double notif). */
+  private static readonly INTENT_RETRY_MS = 3 * 60_000
+
   /** Manual workout-intent trigger (the only start-detection WHOOP allows). */
   workoutIntent(activity: string, enrich?: { label?: string; pr?: boolean }): boolean {
     const ts = new Date().toISOString()
@@ -280,12 +285,21 @@ export class Engine {
     // earlier session's label. Each intent is claimed once by the workout it
     // best matches (see onWorkout), keeping the durable archive honest.
     const log = this.intentLog()
+    // Retry dedupe: keep the FIRST entry (closest to the true start), emit
+    // no duplicate event, but still report success so the app acks normally.
+    const retryCutoff = Date.now() - Engine.INTENT_RETRY_MS
+    if (log.some((i) => !i.claimed && i.activity === activity && Date.parse(i.ts) >= retryCutoff)) {
+      this.log(`intent retry absorbed: ${activity}`)
+      return true
+    }
     log.push({ ts, activity, label, pr, claimed: false })
     // Prune to 24h + a hard cap so the meta value stays bounded.
     const cutoff = Date.now() - 24 * 3_600_000
     const pruned = log.filter((i) => Date.parse(i.ts) >= cutoff).slice(-16)
     this.store.setMeta('intent_log', JSON.stringify(pruned))
-    return this.emit('workout.intent', 'info', `workout.intent:${ts}`, {
+    // Activity in the key: same-instant intents for DIFFERENT activities must
+    // never supersede each other (ts alone collides at millisecond speed).
+    return this.emit('workout.intent', 'info', `workout.intent:${ts}:${activity}`, {
       content: `Starting now: ${label}.${pr ? ' This is a PR attempt.' : ''} Logged as intent at ${ts}; WHOOP will score it after completion.`,
       meta: {
         class: 'workout.intent',

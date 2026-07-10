@@ -200,6 +200,9 @@ const FAST = {
   dualUpCooldownMs: 1000,
   dualUpExhaustedMs: 3000,
   dualUpMaxAttempts: 2,
+  // Long enough that recency never trips in fast tests EXCEPT the one test
+  // that overrides it to prove staleness blocks the release.
+  dualUpPeerRecentMs: 60_000,
 }
 
 function makeArbListener(opts: LiveListenerOpts = {}) {
@@ -384,21 +387,71 @@ describe('arbitration (mac priority)', () => {
     phone.ws.close()
   })
 
-  test('dual-up releases the solo phone holder when both legs are eligible', async () => {
+  test('gym: the sole phone holder is never released when the mac has not seen the band', async () => {
+    // The Jul 10 incident: gym wifi passes dualEligible, the mac relayer is
+    // connected (at home) but the band has never been near it. Releasing the
+    // phone here punches a hole in the live feed for nothing.
     const { listener, port } = makeArbListener()
     cleanup.push(() => listener.stop())
     const mac = await relayer(port, 'mac', undefined, { caps: ['release'] })
     const phone = await relayer(port, 'phone', 'wifi', DUAL_CAPS)
     const feed = setInterval(() => phone.ws.send(hrFrame(Date.now() - 500, 70)), 60)
     cleanup.push(() => clearInterval(feed))
-    await waitFor(() => has(phone.msgs, 'release'))
-    // No pause probe for a dual-capable phone: release IS the mechanism.
+    await Bun.sleep(FAST.dualUpCooldownMs + 500)
+    expect(has(phone.msgs, 'release')).toBe(false)
+    // No pause probe either: dual-capable phones never reach the legacy path.
     expect(has(phone.msgs, 'pause')).toBe(false)
     mac.ws.close()
     phone.ws.close()
   })
 
-  test('dual-up releases the mac when it holds and the phone is parked', async () => {
+  test('home blip: band recency survives status:false, the phone is released to re-dual', async () => {
+    const { listener, port } = makeArbListener()
+    cleanup.push(() => listener.stop())
+    const mac = await relayer(port, 'mac', undefined, { caps: ['release'] })
+    mac.ws.send(hrFrame(Date.now() - 500, 65)) // the mac held the band moments ago
+    await Bun.sleep(50)
+    mac.ws.send(JSON.stringify({ type: 'status', connected: false })) // blip wipes freshness
+    const phone = await relayer(port, 'phone', 'wifi', DUAL_CAPS)
+    const feed = setInterval(() => phone.ws.send(hrFrame(Date.now() - 500, 70)), 60)
+    cleanup.push(() => clearInterval(feed))
+    await waitFor(() => has(phone.msgs, 'release'))
+    mac.ws.close()
+    phone.ws.close()
+  })
+
+  test('stale recency blocks the release: a mac that held the band too long ago reads as away', async () => {
+    const { listener, port } = makeArbListener({ timing: { ...FAST, dualUpPeerRecentMs: 400 } })
+    cleanup.push(() => listener.stop())
+    const mac = await relayer(port, 'mac', undefined, { caps: ['release'] })
+    mac.ws.send(hrFrame(Date.now() - 500, 65))
+    await Bun.sleep(700) // recency window (400ms) expires
+    const phone = await relayer(port, 'phone', 'wifi', DUAL_CAPS)
+    const feed = setInterval(() => phone.ws.send(hrFrame(Date.now() - 500, 70)), 60)
+    cleanup.push(() => clearInterval(feed))
+    await Bun.sleep(FAST.dualUpCooldownMs + 500)
+    expect(has(phone.msgs, 'release')).toBe(false)
+    mac.ws.close()
+    phone.ws.close()
+  })
+
+  test('dual-up releases the mac when the walked-home phone parks (it held the band minutes ago)', async () => {
+    const { listener, port } = makeArbListener()
+    cleanup.push(() => listener.stop())
+    const mac = await relayer(port, 'mac', undefined, { caps: ['release'] })
+    const phone = await relayer(port, 'phone', 'wifi', DUAL_CAPS)
+    phone.ws.send(hrFrame(Date.now() - 500, 70)) // walked in still holding the band
+    await Bun.sleep(50)
+    phone.ws.send(JSON.stringify({ type: 'status', connected: false })) // mac wrestles it away
+    const macFeed = setInterval(() => mac.ws.send(hrFrame(Date.now() - 500, 65)), 60)
+    cleanup.push(() => clearInterval(macFeed))
+    await waitFor(() => has(phone.msgs, 'standdown'))
+    await waitFor(() => has(mac.msgs, 'release'))
+    mac.ws.close()
+    phone.ws.close()
+  })
+
+  test('a parked phone that never held the band does not cost the mac its hold', async () => {
     const { listener, port } = makeArbListener()
     cleanup.push(() => listener.stop())
     const mac = await relayer(port, 'mac', undefined, { caps: ['release'] })
@@ -407,7 +460,8 @@ describe('arbitration (mac priority)', () => {
     await Bun.sleep(80)
     const phone = await relayer(port, 'phone', 'wifi', DUAL_CAPS)
     expect(JSON.parse(phone.helloReply).type).toBe('standdown')
-    await waitFor(() => has(mac.msgs, 'release'))
+    await Bun.sleep(FAST.dualUpCooldownMs + 500)
+    expect(has(mac.msgs, 'release')).toBe(false)
     mac.ws.close()
     phone.ws.close()
   })
