@@ -7,6 +7,7 @@ import SwiftUI
 struct LiveView: View {
     @ObservedObject var relay: RelayController
     @ObservedObject var plan: PlanStore
+    @ObservedObject private var la = LiveActivityController.shared
     var onSettings: () -> Void = {}
     @State private var showIntent = false
 
@@ -32,21 +33,15 @@ struct LiveView: View {
                     .transition(.opacity)
             }
 
-            Button {
-                showIntent = true
-            } label: {
-                HStack(spacing: 9) {
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 13, weight: .semibold))
-                    Text("Start a session")
-                        .font(.system(.headline, design: .rounded))
+            Group {
+                if la.sessionUp {
+                    sessionBar
+                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+                } else {
+                    startButton
+                        .transition(.opacity)
                 }
-                .frame(maxWidth: .infinity)
-                .frame(height: 56)
             }
-            // Matte accent plane: no gradient, no glow, one confident fill.
-            .background(Theme.accent, in: Capsule())
-            .foregroundStyle(Theme.accentInk)
             .padding(.horizontal, 24)
             .padding(.bottom, 12)
         }
@@ -55,11 +50,90 @@ struct LiveView: View {
             IntentSheet(relay: relay, plan: plan)
         }
         .animation(.easeOut(duration: 0.3), value: relay.lastAck)
+        .animation(.easeOut(duration: 0.35), value: la.sessionUp)
         .onAppear {
             // Screenshot hook: HR_DEMO_SHEET=1 opens the intent sheet.
             if Demo.active, ProcessInfo.processInfo.environment["HR_DEMO_SHEET"] != nil {
                 showIntent = true
             }
+        }
+    }
+
+    // ── The bottom slot: CTA at rest, instrument while a session runs ─
+
+    private var startButton: some View {
+        Button {
+            showIntent = true
+        } label: {
+            HStack(spacing: 9) {
+                Image(systemName: "play.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("Start a session")
+                    .font(.system(.headline, design: .rounded))
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 56)
+        }
+        // Matte accent plane: no gradient, no glow, one confident fill.
+        .background(Theme.accent, in: Capsule())
+        .foregroundStyle(Theme.accentInk)
+    }
+
+    /// While a session runs the CTA's job is done: the same slot becomes the
+    /// session instrument (what's running, for how long, one quiet exit),
+    /// mirroring the lock screen's session face. The accent stays on the live
+    /// signal (the dot); End never wears it.
+    private var sessionBar: some View {
+        HStack(spacing: 10) {
+            SessionDot()
+            VStack(alignment: .leading, spacing: 1) {
+                Text("SESSION")
+                    .font(.system(size: 9, weight: .bold))
+                    .kerning(1.1)
+                    .foregroundStyle(Theme.textTertiary)
+                Text(la.sessionTitle ?? "Session")
+                    .font(Theme.rounded(15, .semibold))
+                    .foregroundStyle(Theme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer(minLength: 8)
+            if let started = la.sessionStartedAt {
+                Text(started, style: .timer)
+                    .font(Theme.rounded(15, .semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.textPrimary)
+            }
+            Button(action: { LiveActivityController.shared.endSession() }) {
+                HStack(spacing: 5) {
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 9, weight: .bold))
+                    Text("End")
+                        .font(Theme.rounded(12.5, .semibold))
+                }
+                .padding(.horizontal, 13)
+                .frame(height: 28)
+            }
+            .background(Color.white.opacity(0.055), in: Capsule())
+            .overlay(Capsule().strokeBorder(Theme.hairline, lineWidth: 1))
+            .foregroundStyle(Theme.textSecondary)
+        }
+        .padding(.leading, 18)
+        .padding(.trailing, 14)
+        .frame(height: 56)
+        .glassCapsule()
+    }
+
+    /// The live dot: quiet proof the session clock is running.
+    private struct SessionDot: View {
+        @State private var pulse = false
+        var body: some View {
+            Circle()
+                .fill(Theme.accent)
+                .frame(width: 7, height: 7)
+                .opacity(pulse ? 1.0 : 0.35)
+                .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: pulse)
+                .onAppear { pulse = true }
         }
     }
 

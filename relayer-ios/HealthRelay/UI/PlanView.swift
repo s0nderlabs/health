@@ -12,14 +12,18 @@ struct PlanView: View {
     @ObservedObject private var progress = SessionProgress.shared
     /// Fired by the header's Start capsule: same cascade as the intent sheet.
     var onStartSession: () -> Void = {}
+    /// Fired by the header's End capsule while armed: mirrors the lock
+    /// screen's End button, so a session never traps you on the lock screen.
+    var onEndSession: () -> Void = {}
     @State private var expanded: Set<Int>
     @State private var seededExpansion = false
 
     private var armed: Bool { progress.sessionActive }
 
-    init(store: PlanStore, onStartSession: @escaping () -> Void = {}) {
+    init(store: PlanStore, onStartSession: @escaping () -> Void = {}, onEndSession: @escaping () -> Void = {}) {
         self.store = store
         self.onStartSession = onStartSession
+        self.onEndSession = onEndSession
         // Screenshot hook: HR_DEMO_EXPAND=<index> opens one lift for audits.
         var initial: Set<Int> = []
         if Demo.active,
@@ -172,6 +176,23 @@ struct PlanView: View {
                     }
                     .background(Theme.accent, in: Capsule())
                     .foregroundStyle(Theme.accentInk)
+                } else if armed {
+                    // The quiet exit: ending is a demotion, not the hero
+                    // action, so it wears the app's hairline control language
+                    // rather than the accent.
+                    Button(action: onEndSession) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "stop.fill")
+                                .font(.system(size: 9, weight: .bold))
+                            Text("End")
+                                .font(Theme.rounded(12.5, .semibold))
+                        }
+                        .padding(.horizontal, 13)
+                        .frame(height: 28)
+                    }
+                    .background(Color.white.opacity(0.055), in: Capsule())
+                    .overlay(Capsule().strokeBorder(Theme.hairline, lineWidth: 1))
+                    .foregroundStyle(Theme.textSecondary)
                 }
             }
             .padding(.bottom, 4)

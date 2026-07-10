@@ -23,8 +23,30 @@ extension Notification.Name {
     static let hrSessionEnded = Notification.Name("hr.session.ended")
 }
 
-final class LiveActivityController {
+final class LiveActivityController: ObservableObject {
     static let shared = LiveActivityController()
+
+    // Observable mirror of the card's session face, for in-app UI (the Live
+    // tab's bottom control transforms while a session runs). Display truth
+    // only: the session MACHINE stays SessionProgress; every mutator below
+    // runs on main by construction.
+    @Published private(set) var sessionUp = false
+    @Published private(set) var sessionTitle: String?
+    @Published private(set) var sessionStartedAt: Date?
+
+    private func mirrorSession() {
+        sessionUp = state.sessionActive
+        sessionTitle = state.sessionActive ? state.title : nil
+        sessionStartedAt = state.sessionActive ? state.startedAt : nil
+    }
+
+    /// Simulator-only screenshot hook: drive the session mirror directly.
+    func demoSession(title: String, startedAt: Date) {
+        guard Demo.active else { return }
+        sessionUp = true
+        sessionTitle = title
+        sessionStartedAt = startedAt
+    }
 
     private var state = PulseAttributes.ContentState(
         bpm: nil, zone: nil, sessionActive: false, startedAt: nil,
@@ -85,6 +107,7 @@ final class LiveActivityController {
             // lags it (an in-flight update must never clobber the machine).
             if !SessionProgress.shared.sessionActive {
                 state = activity.content.state
+                mirrorSession()
             }
             return
         }
@@ -100,6 +123,7 @@ final class LiveActivityController {
         _ = try? Activity.request(
             attributes: PulseAttributes(),
             content: .init(state: state, staleDate: nil))
+        mirrorSession()
     }
 
     /// Intent tap: the card grows into the session face.
@@ -114,13 +138,17 @@ final class LiveActivityController {
         state.restLabel = nil
         if current != nil {
             push()
-        } else {
-            guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
+        } else if ActivityAuthorizationInfo().areActivitiesEnabled {
             state.stateLine = "phone has the band"
             _ = try? Activity.request(
                 attributes: PulseAttributes(),
                 content: .init(state: state, staleDate: nil))
         }
+        // Unconditional: the in-app session UI (Live bar + Plan End) must
+        // track the machine even when Live Activities are disabled and no
+        // card can exist; an early return here left the two tabs
+        // contradicting each other for the whole session.
+        mirrorSession()
     }
 
     /// Daemon-assigned role while streaming: standby = the mac is the writer
@@ -185,6 +213,9 @@ final class LiveActivityController {
             state.startedAt = nil
             state.title = "Live"
             state.planLine = nil
+            // Mirror BEFORE the card guard: a corpse mid-session must not
+            // strand the in-app session bar on a machine that already ended.
+            mirrorSession()
             guard let activity = current else { return }
             let snapshot = state
             let previous = pipeline
@@ -197,6 +228,23 @@ final class LiveActivityController {
         } else {
             push()
         }
+        mirrorSession()
+    }
+
+    /// In-app End: the same demotion as the lock-screen End button, but we
+    /// own the card update here (the intent path updates the activity itself).
+    /// The card drops to the pulse face; checkmarks stay as the day's record.
+    func endSession() {
+        guard !Demo.active else { return }
+        state.sessionActive = false
+        state.startedAt = nil
+        state.title = "Live"
+        state.planLine = nil
+        state.restEndsAt = nil
+        state.restLabel = nil
+        push()
+        SessionProgress.shared.endSession()
+        mirrorSession()
     }
 
     /// The lock screen's End button demoted the activity in its own flow;
@@ -210,6 +258,7 @@ final class LiveActivityController {
         state.restEndsAt = nil
         state.restLabel = nil
         SessionProgress.shared.endSession()
+        mirrorSession()
     }
 
     /// Foreground reconciliation. The card is a DISPLAY of the session
@@ -224,6 +273,7 @@ final class LiveActivityController {
         guard let activity = current else { return }
         if !SessionProgress.shared.sessionActive {
             state = activity.content.state
+            mirrorSession()
         }
     }
 }

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.0 - 2026-07-10
+
+### Added
+
+- **In-app session controls.** Ending a session no longer requires the lock
+  screen: while a session is armed, the Plan tab's header shows a quiet End
+  capsule exactly where Start was, and the Live tab's bottom slot transforms
+  from the "Start a session" CTA into a session instrument: pulsing live dot,
+  session title, running elapsed timer, and the same quiet End. The controls
+  mirror the lock-screen session face in both directions and work even when
+  iOS Live Activities are disabled (the in-app session UI tracks the session
+  machine, not the card).
+
 ## 0.5.1 - 2026-07-10
 
 ### Fixed

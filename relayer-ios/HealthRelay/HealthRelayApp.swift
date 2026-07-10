@@ -61,7 +61,7 @@ struct RootView: View {
             LiveView(relay: relay, plan: plan, onSettings: { showSettings = true })
                 .tabItem { Label("Live", systemImage: "waveform.path.ecg") }
                 .tag(0)
-            PlanView(store: plan, onStartSession: startTodaySession)
+            PlanView(store: plan, onStartSession: startTodaySession, onEndSession: endTodaySession)
                 .tabItem { Label("Plan", systemImage: "list.bullet.rectangle") }
                 .tag(1)
         }
@@ -93,6 +93,11 @@ struct RootView: View {
         LiveActivityController.shared.startSession(
             title: title, planLine: PlanLines.firstLine(today))
         SessionProgress.shared.beginSession()
+    }
+
+    /// In-app End: mirror of the lock screen's End button.
+    private func endTodaySession() {
+        LiveActivityController.shared.endSession()
     }
 }
 
@@ -223,6 +228,13 @@ final class DemoDriver {
         if let data = sample.data(using: .utf8),
            let decoded = try? JSONDecoder().decode(Plan.self, from: data) {
             plan.plan = decoded
+        }
+        // HR_DEMO_SESSION=1: the Live tab's running-session face (the bottom
+        // slot transformed into the session instrument).
+        if ProcessInfo.processInfo.environment["HR_DEMO_SESSION"] != nil {
+            LiveActivityController.shared.demoSession(
+                title: "Day 1 · Full Body 8s",
+                startedAt: Date().addingTimeInterval(-1543))
         }
         // HR_DEMO_PROGRESS=1: a mid-session snapshot for screenshots: squat
         // ramp checked off, rest running toward the working sets.

@@ -126,7 +126,9 @@ connect armed, so walking out of the Mac's range hands it the band without
 opening the app. The app adds: a Plan tab rendering the training
 plan your main session's coach writes to `plan.json` (tap-to-expand ladders,
 set-by-set completion, rest timers parsed from the plan's own prescriptions),
-a one-tap workout intent that lands in your live Claude session, a
+a one-tap workout intent that lands in your live Claude session (while a
+session runs, the start button becomes a live session bar with an elapsed
+timer and an in-app End, mirrored in the Plan header), a
 lock-screen Live Activity (live BPM pulse card; during sessions a timer +
 next-set card with a rest countdown and end button), and a HealthKit courier
 that streams WHOOP-sourced step counts into the daily read. Build and
