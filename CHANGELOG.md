@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.6.1 - 2026-07-12
+
+### Fixed
+
+- **Live HR artifact gates.** The Jul 12 ride's live summary reported a peak
+  of 223 bpm: a physiologically impossible optical double-count (2x a ~111
+  true HR) that the band broadcast as a well-formed frame and the pipeline
+  accepted raw. Two gates now sit between parse and state: a physiological
+  ceiling (reject above max HR + 15, absolute bound 250) and a doubling gate
+  (reject a >=1.6x, >=45 bpm step against an accepted sample under 2.5s old;
+  held plausible levels are accepted once the window passes, so the gate is a
+  quarantine, not a wall). Rejected samples never touch the ring, EMA, zones,
+  session max, or streaks, and recover automatically on the next clean frame.
+- **Rejection observability.** `rejected_samples` joins the live snapshot and
+  feed status; the most recent rejection (bpm, reason, timestamp) is surfaced
+  for the ring-buffer horizon; the daemon logs each rejection with the raw
+  frame bytes (rate-limited), so the next artifact is forensically pinned
+  instead of silently eaten.
+- **Artifact storms no longer split a workout.** Rejected frames now count as
+  feed-liveness evidence in the session-end tick, so a mid-ride storm cannot
+  end the session as a feed drop while the band is still talking; a
+  garbage-only stream is bounded at twice the drop window so it can never
+  hold a session open indefinitely.
+
 ## 0.6.0 - 2026-07-10
 
 ### Added

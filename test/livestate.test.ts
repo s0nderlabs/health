@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { LiveState, RING_CAP } from '../src/livestate.js'
 import type { SessionSummary } from '../src/livestate.js'
+import { parseBase64Frame } from '../src/hrparse.js'
 
 const T0 = Date.parse('2026-07-09T10:00:00.000Z')
 
@@ -48,7 +49,10 @@ describe('session detection', () => {
   test('90s sustained above threshold starts a session', () => {
     const { state, events } = harness()
     feed(state, 0, 60, 70)
-    feed(state, 60, 95, 125)
+    // Ramp like a real heart: a 70->125 step between adjacent samples is
+    // exactly what the doubling gate exists to reject.
+    feed(state, 60, 3, (i) => 90 + i * 15)
+    feed(state, 63, 95, 125)
     const starts = events.filter((e) => e.cls === 'live.session')
     expect(starts).toHaveLength(1)
     expect(starts[0].key).toContain('live.session:')
@@ -274,6 +278,146 @@ describe('input hygiene', () => {
     const { state } = harness()
     feed(state, 0, RING_CAP + 500, 62)
     expect(state.snapshot(T0 + (RING_CAP + 500) * 1000).samples_buffered).toBe(RING_CAP)
+  })
+})
+
+describe('artifact gates', () => {
+  // elpabl0's real numbers: maxHr 187 -> ceiling 202. The Jul 12 ride
+  // broadcast a phantom 223 (2x a ~111 true HR) that became the session max.
+  test('phantom 223 is rejected by the physiological ceiling', () => {
+    const { state } = harness({ maxHr: 187 })
+    feed(state, 0, 30, 110)
+    expect(state.addSample(T0 + 30_000, { bpm: 223, rr_ms: [], contact: null })).toBe('ceiling')
+    const snap = state.snapshot(T0 + 31_000) as Record<string, any>
+    expect(snap.rejected_samples).toBe(1)
+    expect(snap.last_rejected).toEqual({
+      rejected_at: new Date(T0 + 30_000).toISOString(),
+      bpm: 223,
+      reason: 'ceiling',
+    })
+    expect(snap.samples_buffered).toBe(30) // never entered the ring
+  })
+
+  test('doubling gate rejects 90 -> 180 between adjacent samples', () => {
+    const { state } = harness({ maxHr: 187 })
+    state.addSample(T0, { bpm: 90, rr_ms: [], contact: null })
+    expect(state.addSample(T0 + 2_000, { bpm: 180, rr_ms: [], contact: null })).toBe('double')
+    expect(state.rejectedSamples()).toBe(1)
+  })
+
+  test('a hard 180 is accepted when the last accepted sample is older than the window', () => {
+    const { state } = harness({ maxHr: 187 })
+    state.addSample(T0, { bpm: 90, rr_ms: [], contact: null })
+    expect(state.addSample(T0 + 8_000, { bpm: 180, rr_ms: [], contact: null })).toBeNull()
+    expect(state.rejectedSamples()).toBe(0)
+  })
+
+  test('a real ramp to 180 is never rejected', () => {
+    const { state } = harness({ maxHr: 187 })
+    feed(state, 0, 10, (i) => 90 + i * 10) // 90 -> 180 over 10s
+    expect(state.rejectedSamples()).toBe(0)
+    expect(state.snapshot(T0 + 10_000).samples_buffered).toBe(10)
+  })
+
+  test('normal warmup ramp 60 -> 110 -> 158 is fully accepted', () => {
+    const { state } = harness({ maxHr: 187 })
+    feed(state, 0, 50, (i) => 60 + i) // 60 -> 109
+    feed(state, 50, 48, (i) => 110 + i) // 110 -> 157
+    state.addSample(T0 + 98_000, { bpm: 158, rr_ms: [], contact: null })
+    expect(state.rejectedSamples()).toBe(0)
+    expect(state.snapshot(T0 + 99_000).samples_buffered).toBe(99)
+  })
+
+  test('orthostatic stand-up spike (62 -> 95 in 2s) is accepted: absolute-jump floor', () => {
+    const { state } = harness({ maxHr: 187 })
+    state.addSample(T0, { bpm: 62, rr_ms: [], contact: null })
+    // 1.53x and +33: under both bars; a real stand-up does this.
+    expect(state.addSample(T0 + 2_000, { bpm: 95, rr_ms: [], contact: null })).toBeNull()
+    expect(state.rejectedSamples()).toBe(0)
+  })
+
+  test('rejected samples touch nothing and recovery is automatic', () => {
+    const { state } = harness({ maxHr: 187 })
+    // Build a live session: ramp to hot (hot = 115 at maxHr 187 / rest 56).
+    feed(state, 0, 10, (i) => 100 + i * 5) // 100 -> 145
+    feed(state, 10, 100, 150)
+    const before = state.snapshot(T0 + 110_000) as Record<string, any>
+    expect(before.session).not.toBeNull()
+    expect(before.session.max_bpm).toBe(150)
+
+    expect(state.addSample(T0 + 110_500, { bpm: 223, rr_ms: [], contact: null })).toBe('ceiling')
+    const after = state.snapshot(T0 + 111_000) as Record<string, any>
+    expect(after.session.max_bpm).toBe(150) // max unchanged
+    expect(after.session.zone_seconds[5]).toBe(0) // no phantom Z5 credit
+    expect(after.samples_buffered).toBe(before.samples_buffered) // no ring entry
+    expect(after.bpm_smoothed).toBe(before.bpm_smoothed) // no EMA movement
+    expect(after.rejected_samples).toBe(1)
+
+    // Next clean sample sails through: the gate compares against the last
+    // ACCEPTED sample, which the artifact never became.
+    expect(state.addSample(T0 + 111_000, { bpm: 151, rr_ms: [], contact: null })).toBeNull()
+    expect(state.rejectedSamples()).toBe(1)
+  })
+
+  test('a sustained plausible level is accepted once the window passes (quarantine, not a wall)', () => {
+    const { state } = harness({ maxHr: 187 })
+    feed(state, 0, 10, 90)
+    // Step to 180 and HOLD: onset burst rejected while the reference sample
+    // is inside the window, accepted once it ages past it.
+    const results: (string | null)[] = []
+    for (let i = 0; i < 10; i++) {
+      results.push(state.addSample(T0 + (10 + i) * 1000, { bpm: 180, rr_ms: [], contact: null }))
+    }
+    expect(results.slice(0, 2)).toEqual(['double', 'double'])
+    expect(results[2]).toBeNull()
+  })
+
+  test('a rejection storm defers feed_drop (feed is alive), but garbage cannot hold a session forever', () => {
+    const { state, events, summaries } = harness()
+    feed(state, 0, 95, 125) // session starts
+    feed(state, 95, 800, 223) // ceiling storm: every frame rejected, lastTs frozen
+    // Old behavior would have ended here (now - lastTs > 720s), but rejected
+    // frames are liveness evidence: the workout must not split.
+    state.tick(T0 + 900_000)
+    expect(events.filter((e) => e.cls === 'live.rest')).toHaveLength(0)
+    // Past the garbage bound with no accepted sample: end anyway.
+    state.tick(T0 + (94 + 1440) * 1000)
+    expect(events.filter((e) => e.cls === 'live.rest')).toHaveLength(1)
+    expect(summaries[0].reason).toBe('feed_drop')
+  })
+
+  test('last_rejected ages out of the snapshot; the counter is cumulative', () => {
+    const { state } = harness({ maxHr: 187 })
+    feed(state, 0, 10, 110)
+    state.addSample(T0 + 10_000, { bpm: 223, rr_ms: [], contact: null })
+    const fresh = state.snapshot(T0 + 11_000) as Record<string, any>
+    expect(fresh.last_rejected?.bpm).toBe(223)
+    const later = state.snapshot(T0 + 10_000 + (RING_CAP + 10) * 1000) as Record<string, any>
+    expect(later.last_rejected).toBeNull()
+    expect(later.rejected_samples).toBe(1)
+  })
+
+  test('end-to-end: the 223 wire frame is parsed then rejected, and the snapshot says so', () => {
+    const { state } = harness({ maxHr: 187 })
+    feed(state, 0, 10, 111)
+    // The SIG encodings of a 223 bpm broadcast frame: u8, u8+RR (the band's
+    // usual shape), and u16.
+    const frames = [
+      Buffer.from([0x00, 223]).toString('base64'),
+      Buffer.from([0x10, 223, 0x1c, 0x01]).toString('base64'),
+      Buffer.from([0x01, 223, 0x00]).toString('base64'),
+    ]
+    frames.forEach((b64, i) => {
+      const sample = parseBase64Frame(b64)
+      expect(sample).not.toBeNull()
+      expect(sample!.bpm).toBe(223)
+      expect(state.addSample(T0 + (20 + i) * 1000, sample!)).toBe('ceiling')
+    })
+    const snap = state.snapshot(T0 + 30_000) as Record<string, any>
+    expect(snap.rejected_samples).toBe(3)
+    expect(snap.last_rejected.bpm).toBe(223)
+    expect(snap.last_rejected.reason).toBe('ceiling')
+    expect(snap.samples_buffered).toBe(10)
   })
 })
 

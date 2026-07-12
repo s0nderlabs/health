@@ -18,6 +18,26 @@ const COOL_SUSTAIN_S = 300 // sustained-cool before a session ends
 const FEED_DROP_END_S = 720
 const RMSSD_WINDOW_S = 300
 const RMSSD_MIN_INTERVALS = 30
+// Artifact gates. Optical wrist HR under vibration/grip pressure emits
+// physiologically impossible values (a harmonic lock doubles the true rate:
+// the Jul 12 ride broadcast 223 = 2x a ~111 true HR, and WHOOP's own cleaned
+// scoring of the same window topped at 174). Broadcast is the raw path, so
+// the sanity pass lives here, between parse and state.
+const CEILING_MARGIN = 15 // bpm above max HR before a sample is impossible
+// The doubling gate's reference window. Tight on purpose: clearing both bars
+// across 2.5s implies >= 18 bpm/s, double the max real cardiac slew, so a
+// genuine rise seen across a short feed gap is never eaten; still wide
+// enough to catch the onset step on a slow ~1Hz feed.
+const DOUBLE_WINDOW_MS = 2500
+const DOUBLE_RATIO = 1.6 // HR cannot jump 1.6x between adjacent samples...
+const DOUBLE_MIN_JUMP = 45 // ...but an orthostatic stand-up spike can be 1.6x
+// of a low resting rate, so a small absolute jump is never rejected.
+// A garbage-only stream (every frame rejected) proves the feed is alive but
+// cannot hold a session open forever: past this bound with no ACCEPTED
+// sample, the session ends anyway.
+const GARBAGE_END_S = FEED_DROP_END_S * 2
+
+export type RejectReason = 'ceiling' | 'double'
 
 export interface LiveDeps {
   /** Resolved max HR (config override or observed-workout-derived). */
@@ -74,6 +94,8 @@ export class LiveState {
   private hotSince: number | null = null
   private coolSince: number | null = null
   private session: Session | null = null
+  private rejected = 0
+  private lastRejected: { ts: number; bpm: number; reason: RejectReason } | null = null
 
   constructor(private deps: LiveDeps) {}
 
@@ -101,11 +123,34 @@ export class LiveState {
     return Math.round(rest + 0.25 * (this.deps.getMaxHr() - rest))
   }
 
-  addSample(ts: number, s: HrSample): void {
-    if (s.bpm <= 0 || s.bpm > 250) return // junk guard
+  /** Returns the artifact-gate reject reason, or null when the sample was accepted. */
+  addSample(ts: number, s: HrSample): RejectReason | null {
+    if (s.bpm <= 0) return null // no reading
     // A band reporting no skin contact is measuring air: no ring, no state.
-    if (s.contact === false) return
-    if (ts <= this.lastTs) return // replays/out-of-order from a buffer flush
+    if (s.contact === false) return null
+    if (ts <= this.lastTs) return null // replays/out-of-order from a buffer flush
+
+    // Artifact gates: a rejected sample must not touch ring, EMA, zones, max,
+    // or streaks. The ceiling kills impossible values outright; the doubling
+    // gate kills the onset step of a sub-ceiling harmonic lock (readings that
+    // then HOLD a plausible value longer than the window get accepted, which
+    // is the safe side: a sustained plausible level is indistinguishable from
+    // a real effort).
+    const ceiling = Math.min(250, this.deps.getMaxHr() + CEILING_MARGIN)
+    if (s.bpm > ceiling) return this.reject(ts, s.bpm, 'ceiling')
+    // The ring tail is by construction the last ACCEPTED sample (rejects
+    // never enter it), so a transient artifact burst self-heals: the next
+    // clean sample is compared against real HR, not the artifact.
+    const la = this.ring[this.ring.length - 1]
+    if (
+      la &&
+      ts - la.ts <= DOUBLE_WINDOW_MS &&
+      s.bpm >= la.bpm * DOUBLE_RATIO &&
+      s.bpm - la.bpm >= DOUBLE_MIN_JUMP
+    ) {
+      return this.reject(ts, s.bpm, 'double')
+    }
+
     const dt = this.lastTs ? Math.min((ts - this.lastTs) / 1000, 2) : 1
     const gap = this.lastTs ? (ts - this.lastTs) / 1000 : 0
     this.lastTs = ts
@@ -148,6 +193,18 @@ export class LiveState {
     }
 
     if (this.session) this.updateSession(ts, s.bpm, dt)
+    return null
+  }
+
+  private reject(ts: number, bpm: number, reason: RejectReason): RejectReason {
+    this.rejected++
+    this.lastRejected = { ts, bpm, reason }
+    return reason
+  }
+
+  /** Cumulative artifact-gate rejections (for status/observability). */
+  rejectedSamples(): number {
+    return this.rejected
   }
 
   private startSession(startTs: number): void {
@@ -236,9 +293,17 @@ export class LiveState {
 
   /** Time-driven transitions; call every ~30s. Ends a session on feed silence. */
   tick(now: number): void {
-    if (this.session && this.lastTs && now - this.lastTs >= FEED_DROP_END_S * 1000) {
-      this.endSession(this.lastTs, 'feed_drop')
-    }
+    if (!this.session || !this.lastTs) return
+    // Rejected frames prove the feed is ALIVE (the band is talking, the data
+    // is untrustworthy), so they defer a feed_drop end: a mid-ride artifact
+    // storm must not split one workout into two. But garbage cannot hold a
+    // session open forever (cooldown needs accepted samples to fire), so past
+    // GARBAGE_END_S with no accepted sample the session ends anyway, anchored
+    // at the last trustworthy sample.
+    const lastEvidence = Math.max(this.lastTs, this.lastRejected?.ts ?? 0)
+    const silent = now - lastEvidence >= FEED_DROP_END_S * 1000
+    const garbage = now - this.lastTs >= GARBAGE_END_S * 1000
+    if (silent || garbage) this.endSession(this.lastTs, 'feed_drop')
   }
 
   private endSession(endTs: number, reason: 'cooldown' | 'feed_drop'): void {
@@ -343,6 +408,17 @@ export class LiveState {
       session_threshold_bpm: this.hotBpm(),
       rmssd_5min: this.rmssd(),
       rr_pairs_5min: this.restRrPairs().length,
+      rejected_samples: this.rejected,
+      // Scoped to the ring horizon: a days-old artifact must not read as a
+      // statement about the current feed's health.
+      last_rejected:
+        this.lastRejected && now - this.lastRejected.ts <= RING_CAP * 1000
+          ? {
+              rejected_at: new Date(this.lastRejected.ts).toISOString(),
+              bpm: this.lastRejected.bpm,
+              reason: this.lastRejected.reason,
+            }
+          : null,
       session: s
         ? {
             started_at: new Date(s.startTs).toISOString(),

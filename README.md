@@ -98,7 +98,10 @@ Heart Rate service (matching device names against `WHOOP` by default; set
 daemon's loopback WebSocket (`live.port`, token-authenticated; the token is
 generated into your config on first daemon start and never leaves the
 machine). All parsing, session detection, zone logic, and HRV math happen in
-the daemon. Notes: the band normally streams to one receiver (a second can
+the daemon, behind physiological artifact gates: optical wrist HR under
+vibration can broadcast an impossible value (a double-count reads as ~2x your
+true rate), and those frames are rejected before they can touch session
+stats, counted in the live status, and logged with their raw bytes. Notes: the band normally streams to one receiver (a second can
 only join by racing the brief post-drop advertising window; the daemon
 orchestrates that at home), and broadcasting costs band battery, so many
 people run it only during training.

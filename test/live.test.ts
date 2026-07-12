@@ -102,6 +102,27 @@ describe('LiveListener', () => {
     ws.close()
   })
 
+  test('a phantom 223 frame is rejected on the production WS path and surfaced in status', async () => {
+    const { listener, state, port } = makeListener()
+    cleanup.push(() => listener.stop())
+    const ws = await connect(port)
+    const t0 = Date.now() - 60_000
+    // Steady ~111 bpm, then the Jul 12 artifact: a well-formed frame whose
+    // payload says 223 (2x the true rate), RR attached like the band sends.
+    for (let i = 0; i < 10; i++) ws.send(hrFrame(t0 + i * 1000, 111))
+    ws.send(hrFrame(t0 + 10_000, 223, 550))
+    ws.send(hrFrame(t0 + 11_000, 112))
+    await Bun.sleep(200)
+    const snap = state.snapshot(t0 + 12_000) as Record<string, any>
+    expect(snap.bpm).toBe(112) // clean sample after the artifact was accepted
+    expect(snap.samples_buffered).toBe(11) // 223 never entered the ring
+    expect(snap.rejected_samples).toBe(1)
+    expect(snap.last_rejected.bpm).toBe(223)
+    expect(listener.status().rejected_samples).toBe(1)
+    expect(listener.status().frames).toBe(12) // received, counted, then gated
+    ws.close()
+  })
+
   test('a full synthetic workout drives session events end to end', async () => {
     const { listener, events, port } = makeListener()
     cleanup.push(() => listener.stop())
@@ -544,7 +565,9 @@ describe('arbitration (mac priority)', () => {
     for (let i = 0; i < 6; i++) {
       t += 1000
       mac.ws.send(hrFrame(t, 70))
-      phone.ws.send(hrFrame(t + 100, 180))
+      // Distinct marker value, but a physiological step: the artifact gate
+      // must not eat the promotion frame.
+      phone.ws.send(hrFrame(t + 100, 100))
     }
     await waitFor(() => listener.status().dual)
     // Mac admits the drop; the phone's very next frame must take the pen
@@ -552,9 +575,9 @@ describe('arbitration (mac priority)', () => {
     mac.ws.send(JSON.stringify({ type: 'status', connected: false }))
     await Bun.sleep(50)
     t += 1000
-    phone.ws.send(hrFrame(t, 180))
+    phone.ws.send(hrFrame(t, 100))
     await waitFor(() => listener.status().active_source === 'phone', 1000)
-    await waitFor(() => (state.snapshot(Date.now()).bpm as number) > 150, 1000)
+    await waitFor(() => (state.snapshot(Date.now()).bpm as number) > 90, 1000)
     mac.ws.close()
     phone.ws.close()
   })
@@ -588,17 +611,19 @@ describe('arbitration (mac priority)', () => {
     for (let i = 0; i < 5; i++) {
       t += 1000
       mac.ws.send(hrFrame(t, 70))
-      phone.ws.send(hrFrame(t + 100, 180))
+      // Distinct marker value, but a physiological step: the artifact gate
+      // must not eat the promotion frames.
+      phone.ws.send(hrFrame(t + 100, 100))
     }
     await waitFor(() => listener.status().dual)
     // Mac dies; the phone keeps streaming.
     await Bun.sleep(FAST.macFreshMs + 100)
     for (let i = 0; i < 4; i++) {
       t += 1000
-      phone.ws.send(hrFrame(t, 180))
+      phone.ws.send(hrFrame(t, 100))
     }
     await waitFor(() => listener.status().active_source === 'phone')
-    await waitFor(() => (state.snapshot(Date.now()).bpm as number) > 150)
+    await waitFor(() => (state.snapshot(Date.now()).bpm as number) > 90)
     mac.ws.close()
     phone.ws.close()
   })

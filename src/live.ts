@@ -37,7 +37,7 @@
 
 import { readFileSync, statSync, watch, type FSWatcher } from 'node:fs'
 import { dirname } from 'node:path'
-import type { LiveState } from './livestate.js'
+import type { LiveState, RejectReason } from './livestate.js'
 import { parseBase64Frame } from './hrparse.js'
 
 function log(msg: string): void {
@@ -131,6 +131,7 @@ export interface LiveFeedStatus {
   last_frame_at: string | null
   frames: number
   parse_errors: number
+  rejected_samples: number
 }
 
 export class LiveListener {
@@ -142,6 +143,7 @@ export class LiveListener {
   private frames = 0
   private parseErrors = 0
   private lastParseErrorLog = 0
+  private lastRejectLog = 0
   private timing: ArbTiming
   // Frame ARRIVAL times per source (wall clock, not frame ts: a buffer flush
   // replays old timestamps but proves the feed is alive right now).
@@ -563,7 +565,8 @@ export class LiveListener {
           return
         }
         if (ws.data.source !== 'mac' && ws.data.source !== 'unknown') this.phoneSeen()
-        this.state.addSample(ts, sample)
+        const rejected = this.state.addSample(ts, sample)
+        if (rejected) this.logRejected(rejected, sample.bpm, String(msg.raw))
         break
       }
       case 'status': {
@@ -761,6 +764,16 @@ export class LiveListener {
     }
   }
 
+  // Artifact-gate rejections are counted in LiveState; this surfaces them in
+  // the log with the raw frame bytes, so the next phantom spike is
+  // forensically pinned without per-sample persistence. Rate-limited: a
+  // sustained harmonic lock must not flood the log.
+  private logRejected(reason: RejectReason, bpm: number, raw: string): void {
+    if (Date.now() - this.lastRejectLog < 60_000) return
+    this.lastRejectLog = Date.now()
+    log(`rejected hr sample: ${reason} bpm=${bpm} raw=${raw} (${this.state.rejectedSamples()} total)`)
+  }
+
   status(): LiveFeedStatus {
     const now = Date.now()
     // The writer, not merely the freshest: during a dual hold the freshest
@@ -789,6 +802,7 @@ export class LiveListener {
       last_frame_at: this.lastFrameAt ? new Date(this.lastFrameAt).toISOString() : null,
       frames: this.frames,
       parse_errors: this.parseErrors,
+      rejected_samples: this.state.rejectedSamples(),
     }
   }
 
