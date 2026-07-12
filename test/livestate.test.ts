@@ -93,8 +93,12 @@ describe('session detection', () => {
 })
 
 describe('zone milestones', () => {
+  // Milestones obey the confidence contract (low = silent), so these tests
+  // declare an intent up front: the session is high-confidence throughout
+  // and the zone logic itself is what's under test.
   test('sustained Z4 announces only the highest zone reached', () => {
     const { state, events } = harness()
+    state.noteIntent(T0)
     feed(state, 0, 95, 125) // session starts (Z2 at 125/190=66%)
     feed(state, 95, 30, 160) // Z4 (84%)
     const zones = events.filter((e) => e.cls === 'live.zone')
@@ -104,6 +108,7 @@ describe('zone milestones', () => {
 
   test('gradual ramp announces each zone as it is earned', () => {
     const { state, events } = harness()
+    state.noteIntent(T0)
     feed(state, 0, 95, 125)
     feed(state, 95, 60, 140) // Z3 (74%)
     feed(state, 155, 60, 160) // Z4
@@ -114,6 +119,7 @@ describe('zone milestones', () => {
 
   test('a zone is announced once per session', () => {
     const { state, events } = harness()
+    state.noteIntent(T0)
     feed(state, 0, 95, 125)
     feed(state, 95, 30, 160) // Z4
     feed(state, 125, 60, 125) // back down
@@ -123,6 +129,7 @@ describe('zone milestones', () => {
 
   test('a 10s zone touch does not announce', () => {
     const { state, events } = harness()
+    state.noteIntent(T0)
     feed(state, 0, 95, 125)
     feed(state, 95, 10, 160)
     feed(state, 105, 60, 125)
@@ -282,8 +289,8 @@ describe('input hygiene', () => {
 })
 
 describe('artifact gates', () => {
-  // elpabl0's real numbers: maxHr 187 -> ceiling 202. The Jul 12 ride
-  // broadcast a phantom 223 (2x a ~111 true HR) that became the session max.
+  // Field numbers: maxHr 187 -> ceiling 202. A harmonic lock can broadcast
+  // a phantom 223 (2x a ~111 true HR) that would become the session max.
   test('phantom 223 is rejected by the physiological ceiling', () => {
     const { state } = harness({ maxHr: 187 })
     feed(state, 0, 30, 110)
@@ -418,6 +425,354 @@ describe('artifact gates', () => {
     expect(snap.last_rejected.bpm).toBe(223)
     expect(snap.last_rejected.reason).toBe('ceiling')
     expect(snap.samples_buffered).toBe(10)
+  })
+})
+
+describe('session confidence + demotion', () => {
+  // Harness defaults: hot 116, cool 90; zones at maxHr 190: Z3 133, Z4 152.
+  const confirms = (events: Emitted[]) => events.filter((e) => e.meta.kind === 'confirm')
+  const starts = (events: Emitted[]) => events.filter((e) => e.cls === 'live.session' && e.meta.kind !== 'confirm')
+  const rests = (events: Emitted[]) => events.filter((e) => e.cls === 'live.rest')
+
+  test('a passive elevation (smooth shallow plateau) stays low and is demoted', () => {
+    const { state, events, summaries } = harness()
+    feed(state, 0, 60, 70)
+    feed(state, 60, 4, (i) => 85 + i * 10) // physiological ramp 85 -> 115
+    feed(state, 64, 570, 122) // ~9.5 min smooth Z2 plateau, one hot streak
+    expect(starts(events)).toHaveLength(1)
+    expect(starts(events)[0].meta.confidence).toBe('low')
+    expect(starts(events)[0].content).toContain('Unconfirmed')
+    expect(starts(events)[0].content).not.toContain('log it')
+    expect(confirms(events)).toHaveLength(0)
+    feed(state, 634, 310, 75) // cooldown end
+    expect(rests(events)).toHaveLength(1)
+    expect(rests(events)[0].meta.demoted).toBe('true')
+    expect(rests(events)[0].meta.confidence).toBe('low')
+    expect(rests(events)[0].content).toContain('Elevation ended')
+    expect(rests(events)[0].content).toContain('ignore for training load')
+    expect(summaries[0].demoted).toBe(true)
+    expect(summaries[0].confidence).toBe('low')
+    expect(summaries[0].intent_matched).toBe(false)
+  })
+
+  test('duration alone is not evidence: a 16-min smooth plateau never confirms and demotes', () => {
+    const { state, events } = harness()
+    feed(state, 0, 30, 80)
+    feed(state, 30, 4, (i) => 88 + i * 10)
+    feed(state, 34, 960, 124) // 16 min, structureless, Z2
+    expect(confirms(events)).toHaveLength(0)
+    expect(starts(events)).toHaveLength(1)
+    feed(state, 994, 310, 70)
+    expect(rests(events)[0].meta.demoted).toBe('true')
+    expect(rests(events)[0].meta.confidence).toBe('low')
+  })
+
+  test('set/rest oscillation earns effort_cycles and confirms (lifting pattern)', () => {
+    const { state, events, summaries } = harness()
+    feed(state, 0, 95, 125) // hot streak 1 starts the session
+    for (let c = 0; c < 3; c++) {
+      feed(state, 95 + c * 180, 90, 100) // inter-set rest: sub-hot, above cool
+      feed(state, 185 + c * 180, 90, 130) // next set: hot streak 2..4
+    }
+    expect(confirms(events)).toHaveLength(1)
+    expect(confirms(events)[0].meta.confidence).toBe('medium') // < 12 min at 4th streak
+    expect(confirms(events)[0].meta.confidence_reasons).toContain('effort_cycles')
+    expect(confirms(events)[0].content).toContain('log it') // undeclared: invite rides the confirm
+    feed(state, 635, 200, 130) // keep working past the 12-min bar
+    feed(state, 835, 310, 70) // cooldown end
+    expect(rests(events)[0].meta.confidence).toBe('high') // evidence + duration
+    expect(rests(events)[0].meta.demoted).toBeUndefined()
+    expect(rests(events)[0].content).toContain('Session over')
+    expect(summaries[0].demoted).toBe(false)
+    expect(summaries[0].confidence).toBe('high')
+    // No RR in this feed: absence is neutral, never a verdict.
+    expect(summaries[0].rr_consistency).toBeNull()
+    expect(summaries[0].rr_presence).toBe(0)
+  })
+
+  test('sustained Z3 earns depth evidence and confirms (steady cardio)', () => {
+    const { state, events } = harness()
+    feed(state, 0, 95, 125)
+    feed(state, 95, 301, 140) // Z3 held past 5 min
+    expect(confirms(events)).toHaveLength(1)
+    expect(confirms(events)[0].meta.confidence).toBe('medium')
+    expect(confirms(events)[0].meta.confidence_reasons).toContain('sustained_z3')
+  })
+
+  test('one continuous Z4 minute is evidence on its own', () => {
+    const { state, events } = harness()
+    feed(state, 0, 95, 125)
+    feed(state, 95, 30, 140)
+    feed(state, 125, 61, 155) // Z4 for 61s
+    expect(confirms(events)).toHaveLength(1)
+    expect(confirms(events)[0].meta.confidence_reasons).toContain('z4')
+  })
+
+  test('evidence without duration ends medium and is not demoted', () => {
+    const { state, events, summaries } = harness()
+    feed(state, 0, 95, 125)
+    feed(state, 95, 301, 140)
+    feed(state, 396, 310, 70) // ends at ~6.6 min of work
+    expect(rests(events)[0].meta.confidence).toBe('medium')
+    expect(rests(events)[0].meta.demoted).toBeUndefined()
+    expect(rests(events)[0].content).toContain('Session over')
+    expect(summaries[0].demoted).toBe(false)
+  })
+
+  test('the cooldown tail cannot buy the duration upgrade', () => {
+    const { state, summaries } = harness()
+    feed(state, 0, 95, 125)
+    feed(state, 95, 500, 140) // deep evidence; WORK ends at 595s (< 720)
+    feed(state, 595, 310, 70) // tail crosses the 12-min mark in wall time
+    expect(summaries[0].confidence).toBe('medium') // frozen at cooling onset
+  })
+
+  test('a declared intent makes the start high-confidence with no separate confirm', () => {
+    const { state, events } = harness()
+    state.noteIntent(T0 + 10_000)
+    feed(state, 20, 95, 125)
+    expect(starts(events)).toHaveLength(1)
+    expect(starts(events)[0].meta.confidence).toBe('high')
+    expect(starts(events)[0].meta.confidence_reasons).toContain('intent')
+    expect(starts(events)[0].content).toContain('declared intent')
+    expect(confirms(events)).toHaveLength(0)
+  })
+
+  test('a tap during an unevidenced session defers, then claims at first evidence', () => {
+    // Review find: stapling a tap to whatever elevation is open would mark a
+    // lingering shower "high" and strand the real workout unmatched. A tap
+    // during a LOW session arms the window instead; the session claims it
+    // the moment it develops an exercise signature.
+    const { state, events } = harness()
+    feed(state, 0, 200, 122) // low-confidence session running
+    state.noteIntent(T0 + 200_000)
+    expect(confirms(events)).toHaveLength(0) // not stapled blindly
+    feed(state, 200, 301, 140) // sustained Z3: evidence arrives, claim lands
+    expect(confirms(events)).toHaveLength(1)
+    expect(confirms(events)[0].meta.confidence).toBe('high')
+    expect(confirms(events)[0].meta.confidence_reasons).toContain('intent')
+    expect(confirms(events)[0].content).not.toContain('log it')
+  })
+
+  test('a tap during an EVIDENCED session claims it immediately', () => {
+    const { state, events } = harness()
+    feed(state, 0, 95, 125)
+    feed(state, 95, 301, 140) // sustained_z3: medium confirm fires
+    expect(confirms(events)).toHaveLength(1)
+    expect(confirms(events)[0].meta.confidence).toBe('medium')
+    state.noteIntent(T0 + 400_000) // tap lands on the evidenced session
+    feed(state, 396, 310, 70) // end
+    expect(rests(events)[0].meta.intent_matched).toBe('true')
+    expect(rests(events)[0].meta.confidence).toBe('high')
+  })
+
+  test('a tap during an open phantom stays armed for the real session after it', () => {
+    const { state, events } = harness()
+    feed(state, 0, 200, 122) // passive elevation, low, still open
+    state.noteIntent(T0 + 200_000) // tapped on the way to the gym
+    feed(state, 200, 310, 70) // the elevation cools off, session ends
+    expect(rests(events)[0].meta.demoted).toBe('true') // not stapled to the phantom
+    feed(state, 510, 95, 125) // the real session starts
+    expect(starts(events)[1].meta.confidence).toBe('high') // claims the tap
+  })
+
+  test('an intent elevates exactly one session: the post-workout shower stays low', () => {
+    const { state, events } = harness()
+    state.noteIntent(T0)
+    feed(state, 10, 95, 125) // session 1 claims the intent
+    feed(state, 105, 310, 70) // cooldown end
+    feed(state, 425, 95, 125) // second start, still inside 30 min of the tap
+    expect(starts(events)).toHaveLength(2)
+    expect(starts(events)[0].meta.confidence).toBe('high')
+    expect(starts(events)[1].meta.confidence).toBe('low')
+  })
+
+  test('a stale intent (>30 min old) does not match a new start', () => {
+    const { state, events } = harness()
+    state.noteIntent(T0)
+    feed(state, 31 * 60, 95, 125) // starts 31 min after the tap
+    expect(starts(events)[0].meta.confidence).toBe('low')
+  })
+
+  test('majority RR mismatch caps confidence at low even with effort structure (cadence lock)', () => {
+    const { state, events, summaries } = harness()
+    // bpm ~125-130 while RR says ~850ms (a ~70 bpm true pulse): the lock signature.
+    feed(state, 0, 95, 125, [850])
+    for (let c = 0; c < 3; c++) {
+      feed(state, 95 + c * 180, 90, 100, [850])
+      feed(state, 185 + c * 180, 90, 130, [850])
+    }
+    expect(confirms(events)).toHaveLength(0)
+    expect(starts(events)[0].meta.confidence).toBe('low')
+    expect(starts(events)[0].meta.confidence_reasons).toBe('rr_suspect')
+    feed(state, 635, 310, 70, [850])
+    expect(rests(events)[0].meta.demoted).toBe('true')
+    expect(summaries[0].rr_consistency).not.toBeNull()
+    expect(summaries[0].rr_consistency!).toBeLessThan(0.5)
+  })
+
+  test('consistent RR never blocks and lands in the summary', () => {
+    const { state, events, summaries } = harness()
+    feed(state, 0, 95, 125, [480]) // 60000/480 = 125: matches
+    feed(state, 95, 301, 140, [430]) // ~139.5: matches
+    expect(confirms(events)).toHaveLength(1)
+    feed(state, 396, 310, 70, [860]) // ~69.8: matches
+    expect(summaries[0].rr_consistency).toBe(1)
+    expect(summaries[0].rr_presence).toBe(1)
+    expect(rests(events)[0].meta.rr_consistency).toBe('1')
+  })
+
+  test('snapshot exposes live confidence while a session runs', () => {
+    const { state } = harness()
+    feed(state, 0, 95, 125)
+    const snap = state.snapshot(T0 + 95_000) as Record<string, any>
+    expect(snap.session.confidence).toBe('low')
+    expect(snap.session.intent_matched).toBe(false)
+  })
+
+  test('feed gaps on a structureless plateau cannot fabricate effort cycles', () => {
+    // Edge-hunt find: gap resets used to re-count the hot streak. A fever/
+    // sauna plateau with three BLE reconnect gaps must stay low and demote.
+    const { state, events } = harness()
+    feed(state, 0, 95, 125)
+    feed(state, 95, 120, 125)
+    feed(state, 246, 120, 125) // 31s gap
+    feed(state, 397, 120, 125) // 31s gap
+    feed(state, 548, 120, 125) // 31s gap
+    expect(confirms(events)).toHaveLength(0)
+    feed(state, 668, 310, 70)
+    expect(rests(events)[0].meta.demoted).toBe('true')
+  })
+
+  test('optical noise hugging the hot line cannot fabricate effort cycles', () => {
+    // Edge-hunt find: dips of a few bpm below hot (116) never reach the
+    // re-arm line (108), so threshold noise is not set/interval structure.
+    const { state, events } = harness()
+    feed(state, 0, 95, 122)
+    feed(state, 95, 600, (i) => 116 + (i % 4 < 2 ? 2 : -2)) // 118/114 flapping
+    expect(confirms(events)).toHaveLength(0)
+    feed(state, 695, 310, 70)
+    expect(rests(events)[0].meta.demoted).toBe('true')
+  })
+
+  test('junk RR intervals are filtered, never flag a real workout as suspect', () => {
+    // Edge-hunt find: 150ms junk (the rMSSD tests model the same value) used
+    // to count as mismatched RR and demote a genuine sustained-Z3 ride.
+    const { state, events, summaries } = harness()
+    feed(state, 0, 95, 125, [150])
+    feed(state, 95, 301, 140, [150]) // deep evidence with junk-only RR
+    expect(confirms(events)).toHaveLength(1)
+    expect(confirms(events)[0].meta.confidence_reasons).toContain('sustained_z3')
+    feed(state, 396, 310, 70, [150])
+    expect(rests(events)[0].meta.demoted).toBeUndefined()
+    expect(summaries[0].rr_consistency).toBeNull() // junk never became samples
+    expect(summaries[0].rr_presence).toBe(0)
+  })
+
+  test('a declared intent outranks the rr_suspect cap (cadence-locked treadmill run)', () => {
+    // Edge-hunt find: the artifact gate used to override intent and emit
+    // "could be non-exercise" prose for a session the user declared.
+    const { state, events } = harness()
+    state.noteIntent(T0)
+    feed(state, 10, 95, 125, [850]) // RR says ~70: lock signature
+    expect(starts(events)[0].meta.confidence).toBe('high')
+    expect(starts(events)[0].meta.confidence_reasons).toBe('intent')
+    expect(starts(events)[0].content).toContain('declared intent')
+  })
+
+  test('a redundant tap during a matched session cannot leak onto the next session', () => {
+    // Edge-hunt find: a second mid-session tap used to linger in
+    // lastIntentTs and staple onto the post-workout shower.
+    const { state, events } = harness()
+    state.noteIntent(T0)
+    feed(state, 10, 95, 125) // session 1 claims the tap
+    state.noteIntent(T0 + 200_000) // re-tap mid-session (already matched)
+    feed(state, 200, 310, 70) // session 1 ends
+    feed(state, 520, 95, 125) // shower 5 min later, inside any naive window
+    expect(starts(events)).toHaveLength(2)
+    expect(starts(events)[1].meta.confidence).toBe('low')
+  })
+
+  test('an unclaimed intent matches the next session within 30 min (intended: the tap says so)', () => {
+    const { state, events } = harness()
+    state.noteIntent(T0)
+    feed(state, 25 * 60, 95, 125) // first detected session, 25 min after the tap
+    expect(starts(events)[0].meta.confidence).toBe('high')
+  })
+
+  test('an emit failure retries the confirm on the next sample instead of losing it', () => {
+    const events: Emitted[] = []
+    let failures = 1
+    const state = new LiveState({
+      getMaxHr: () => 190,
+      getRestHr: () => 56,
+      getHotBpm: () => null,
+      emit: (cls, key, payload) => {
+        if (cls === 'live.confirm' && failures > 0) {
+          failures--
+          throw new Error('store hiccup')
+        }
+        events.push({ cls, key, ...payload })
+      },
+    })
+    feed(state, 0, 95, 125)
+    feed(state, 95, 301, 140) // earns sustained_z3: first confirm emit throws
+    feed(state, 396, 5, 140) // next samples retry
+    const confirms = events.filter((e) => e.cls === 'live.confirm')
+    expect(confirms).toHaveLength(1)
+  })
+
+  test('a low session grazing Z3 stays silent; the milestone fires once confidence arrives', () => {
+    // Review find: zone milestones used to bypass the confidence contract
+    // (a passive elevation's 15s Z3 graze pinged the coach).
+    const { state, events } = harness()
+    feed(state, 0, 95, 125)
+    feed(state, 95, 100, 135) // Z3 sustained, but still low: 100s < 5min
+    expect(events.filter((e) => e.cls === 'live.zone')).toHaveLength(0)
+    feed(state, 195, 210, 135) // crosses the 5-min sustained-Z3 evidence bar
+    const zones = events.filter((e) => e.cls === 'live.zone')
+    expect(zones).toHaveLength(1)
+    expect(zones[0].meta.confidence).toBe('medium')
+  })
+
+  test('a feed_drop mid-cooldown judges the work window, not the tail', () => {
+    // Review find: feed_drop ends used to measure duration/confidence to the
+    // last sample, letting the cooldown tail buy the 12-min duration bar.
+    const { state, summaries } = harness()
+    feed(state, 0, 95, 125)
+    feed(state, 95, 500, 140) // deep evidence; work ends at 595s (< 720)
+    feed(state, 595, 200, 70) // cooling when the band leaves range
+    state.tick(T0 + (795 + 720) * 1000) // feed_drop
+    expect(summaries[0].reason).toBe('feed_drop')
+    expect(summaries[0].confidence).toBe('medium') // not bought by the tail
+    expect(summaries[0].duration_s).toBe(595)
+  })
+
+  test('a confirmed session is never demoted by late RR degradation', () => {
+    // Review find: contradictory events (confirm then "probably not a
+    // workout") when mismatched RR accumulates after the confirm fired.
+    const { state, events, summaries } = harness()
+    feed(state, 0, 95, 125) // no RR yet
+    feed(state, 95, 301, 140) // sustained_z3: confirm fires (rr unknown)
+    expect(confirms(events)).toHaveLength(1)
+    feed(state, 396, 100, 140, [850]) // majority-mismatch RR arrives late
+    feed(state, 496, 310, 70)
+    expect(summaries[0].demoted).toBe(false)
+    expect(rests(events)[0].meta.demoted).toBeUndefined()
+    expect(summaries[0].confidence).toBe('low') // forensics stay honest
+  })
+
+  test('RR consistency of exactly 0.5 is not suspect (strict bound)', () => {
+    const { state, events, summaries } = harness()
+    feed(state, 0, 95, 125) // start, no RR
+    feed(state, 95, 250, 140) // deep evidence building
+    feed(state, 345, 5, 140, [430]) // 5 consistent (~139.5)
+    feed(state, 350, 5, 140, [1000]) // 5 in-range mismatches (60 implied)
+    feed(state, 355, 60, 140)
+    expect(confirms(events)).toHaveLength(1) // sustained_z3 landed despite the mix
+    feed(state, 415, 310, 70)
+    expect(summaries[0].rr_consistency).toBe(0.5)
+    expect(summaries[0].confidence).not.toBe('low')
   })
 })
 

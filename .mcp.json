@@ -1,8 +1,12 @@
 {
   "mcpServers": {
     "health": {
-      "command": "bun",
-      "args": ["run", "--cwd", "${CLAUDE_PLUGIN_ROOT}", "--shell=bun", "--silent", "start"]
+      "command": "sh",
+      "args": [
+        "-c",
+        "case \"$0\" in /*) cd \"$0\" || exit 1;; *CLAUDE_PLUGIN_ROOT*) ;; *) echo \"health mcp: unexpected plugin root: $0\" >&2; exit 1;; esac; exec bun run --shell=bun --silent start",
+        "${CLAUDE_PLUGIN_ROOT}"
+      ]
     }
   }
 }

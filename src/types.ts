@@ -143,6 +143,7 @@ export type EventClass =
   | 'system.health'
   | 'workout.intent'
   | 'live.session' // live HR feed detected a workout starting
+  | 'live.confirm' // the elevation developed an exercise signature (once per session)
   | 'live.zone' // first entry into a notable HR zone this session
   | 'live.rest' // session ended: summary + HR-recovery read
 
@@ -218,6 +219,7 @@ export const DEFAULT_CONFIG: HealthConfig = {
     'system.health': true,
     'workout.intent': true,
     'live.session': true,
+    'live.confirm': true,
     'live.zone': true,
     'live.rest': true,
   },

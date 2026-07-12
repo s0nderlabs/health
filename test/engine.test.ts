@@ -303,6 +303,90 @@ describe('live events through the engine', () => {
     const engine = new Engine(store, () => testConfig({ daily_budget: 0 }))
     expect(engine.liveEvent('live.rest', 'live.rest:s1', { content: 'r', meta: {} })).toBe(true)
   })
+
+  test('the confirm passes inside the live.session cooldown; a plain second start does not', () => {
+    const store = freshStore()
+    const engine = new Engine(store, () => testConfig()) // live.session cooldown: 10 min
+    expect(engine.liveEvent('live.session', 'live.session:s1', { content: 'start', meta: {} })).toBe(true)
+    // A different-key start inside the cooldown is blocked (anti-flap)...
+    expect(engine.liveEvent('live.session', 'live.session:s2', { content: 'flap', meta: {} })).toBe(false)
+    // ...unless it is a declared/evidenced start, which livestate emits with
+    // the bypass so a phantom's earlier start can never anchor it away.
+    expect(
+      engine.liveEvent('live.session', 'live.session:s3', { content: 'declared', meta: {} }, { bypassCooldown: true }),
+    ).toBe(true)
+    // ...but the once-per-session confirm (own class, self-throttled, bypass) passes.
+    expect(
+      engine.liveEvent(
+        'live.confirm',
+        'live.confirm:s1',
+        { content: 'confirmed', meta: { kind: 'confirm' } },
+        { bypassCooldown: true },
+      ),
+    ).toBe(true)
+  })
+
+  test('a confirm never re-anchors the live.session cooldown against the next session', () => {
+    const store = freshStore()
+    const engine = new Engine(store, () => testConfig())
+    engine.liveEvent('live.session', 'live.session:sA', { content: 'a', meta: {} })
+    // Age session A's start past the 10-min cooldown, then land A's confirm NOW.
+    store.db.run(`UPDATE events SET created_at = ? WHERE dedupe_key = 'live.session:sA'`, [
+      new Date(Date.now() - 11 * 60_000).toISOString(),
+    ])
+    expect(
+      engine.liveEvent('live.confirm', 'live.confirm:sA', { content: 'c', meta: { kind: 'confirm' } }, { bypassCooldown: true }),
+    ).toBe(true)
+    // Session B's start must anchor on A's START (11 min ago), not A's confirm
+    // (just now): a fresh confirm must never swallow the next real session.
+    expect(engine.liveEvent('live.session', 'live.session:sB', { content: 'b', meta: {} })).toBe(true)
+  })
+})
+
+describe('live session corroboration', () => {
+  test('a scored workout stamps corroborated on overlapping live sessions, demoted included', () => {
+    const store = freshStore()
+    const engine = new Engine(store, () => testConfig())
+    const w = workout('w-corr') // window: [now-1h, now]
+    const inWindow = new Date(Date.now() - 30 * 60_000).toISOString()
+    const before = new Date(Date.now() - 3 * 3_600_000).toISOString()
+    store.insertLiveSession({
+      started_at: inWindow,
+      ended_at: new Date(Date.now() - 20 * 60_000).toISOString(),
+      reason: 'cooldown', duration_s: 600, avg_bpm: 120, max_bpm: 140,
+      zone_seconds: [0, 0, 600, 0, 0, 0], recovery_60s_drop: null,
+      confidence: 'low', demoted: true,
+    })
+    store.insertLiveSession({
+      started_at: before,
+      ended_at: new Date(Date.now() - 2.9 * 3_600_000).toISOString(),
+      reason: 'cooldown', duration_s: 600, avg_bpm: 120, max_bpm: 140,
+      zone_seconds: [0, 0, 600, 0, 0, 0], recovery_60s_drop: null,
+    })
+    engine.onFact(fact('workout', w))
+    const rows = store.recentLiveSessions(2) as Array<Record<string, unknown>>
+    expect(rows.find((r) => r.started_at === inWindow)?.corroborated).toBe(1)
+    expect(rows.find((r) => r.started_at === before)?.corroborated).toBeNull()
+  })
+
+  test('corroboration runs even when the card emit is suppressed (score revision)', () => {
+    const store = freshStore()
+    const engine = new Engine(store, () => testConfig())
+    engine.onFact(fact('workout', workout('w-rev'))) // first card queued
+    // Insert the live session AFTER the first pass, then re-fire the same
+    // workout (a revision): the card is deduped away, the stamp must not be.
+    const inWindow = new Date(Date.now() - 30 * 60_000).toISOString()
+    store.insertLiveSession({
+      started_at: inWindow,
+      ended_at: new Date(Date.now() - 20 * 60_000).toISOString(),
+      reason: 'feed_drop', duration_s: 600, avg_bpm: 121, max_bpm: 142,
+      zone_seconds: [0, 120, 360, 120, 0, 0], recovery_60s_drop: null,
+      confidence: 'low', demoted: true,
+    })
+    engine.onFact(fact('workout', workout('w-rev')))
+    const rows = store.recentLiveSessions(1) as Array<Record<string, unknown>>
+    expect(rows.find((r) => r.started_at === inWindow)?.corroborated).toBe(1)
+  })
 })
 
 describe('workout intent stapling', () => {

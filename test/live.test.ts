@@ -131,13 +131,15 @@ describe('LiveListener', () => {
     let t = 0
     // 2 min warm (session threshold 116 with maxHr 190/rest 56)
     for (let i = 0; i < 120; i++) ws.send(hrFrame(t0 + t++ * 1000, 125))
-    // 1 min hard in Z4
-    for (let i = 0; i < 60; i++) ws.send(hrFrame(t0 + t++ * 1000, 160))
+    // 90s hard in Z4: crosses the 60s z4 evidence latch, so the session
+    // confirms and its milestone clears the confidence gate.
+    for (let i = 0; i < 90; i++) ws.send(hrFrame(t0 + t++ * 1000, 160))
     // 6 min cooldown below 90
     for (let i = 0; i < 360; i++) ws.send(hrFrame(t0 + t++ * 1000, 80))
     await Bun.sleep(400)
     const classes = events.map((e) => e.cls)
     expect(classes).toContain('live.session')
+    expect(classes).toContain('live.confirm')
     expect(classes).toContain('live.zone')
     expect(classes).toContain('live.rest')
     ws.close()
@@ -582,7 +584,11 @@ describe('arbitration (mac priority)', () => {
     phone.ws.close()
   })
 
-  test('a standby draining below the battery floor is released mid-dual', async () => {
+  test('a standby draining below the battery floor is tolerated, never release-churned', async () => {
+    // Jul 12 field bug: releasing the low-battery standby is pointless (its
+    // pending-connect anchor re-grabs the band within a minute) and churned
+    // 111 release/reconnect holes in 2h. The daemon now keeps the dual hold
+    // and never pushes a battery release.
     const { listener, port } = makeArbListener()
     cleanup.push(() => listener.stop())
     const mac = await relayer(port, 'mac', undefined, { caps: ['release'] })
@@ -595,9 +601,15 @@ describe('arbitration (mac priority)', () => {
     }, 60)
     cleanup.push(() => clearInterval(feeds))
     await waitFor(() => listener.status().dual)
-    expect(has(phone.msgs, 'release')).toBe(false)
     phone.ws.send(JSON.stringify({ type: 'battery', level: 0.3, charging: false }))
-    await waitFor(() => has(phone.msgs, 'release'))
+    // Many arb ticks pass; the standby stays held and unmolested.
+    await Bun.sleep(FAST.arbTickMs * 6)
+    expect(has(phone.msgs, 'release')).toBe(false)
+    expect(listener.status().dual).toBe(true)
+    // Recovery (>= 0.4) closes the episode; still no release traffic.
+    phone.ws.send(JSON.stringify({ type: 'battery', level: 0.8, charging: true }))
+    await Bun.sleep(FAST.arbTickMs * 2)
+    expect(has(phone.msgs, 'release')).toBe(false)
     mac.ws.close()
     phone.ws.close()
   })

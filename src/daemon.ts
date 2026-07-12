@@ -120,22 +120,44 @@ const liveState = new LiveState({
     return typeof rhr === 'number' && rhr > 25 ? rhr : 60
   }),
   getHotBpm: cached(() => config().live.hot_bpm),
-  emit: (cls, dedupeKey, payload) => {
-    engine.liveEvent(cls, dedupeKey, payload)
+  emit: (cls, dedupeKey, payload, opts) => {
+    engine.liveEvent(cls, dedupeKey, payload, opts)
   },
   onSessionEnd: (summary) => {
+    // Reverse corroboration at insert: a workout can SCORE while the live
+    // session is still running (no row to stamp yet) and never re-scores,
+    // so check the archive now; the forward pass in engine.onWorkout covers
+    // scoring that lands after this row exists. 60s slack, matching the
+    // forward pass: adjacency is not overlap. The lookup gets its own guard:
+    // a corroboration failure must never cost the archive row itself.
+    let corroborated = false
     try {
-      store.insertLiveSession(summary)
+      corroborated = store.hasScoredWorkoutOverlapping(
+        new Date(Date.parse(summary.started_at) - 60_000).toISOString(),
+        new Date(Date.parse(summary.ended_at) + 60_000).toISOString(),
+      )
+    } catch (err) {
+      log(`live session corroboration lookup failed: ${err}`)
+    }
+    try {
+      store.insertLiveSession({ ...summary, corroborated })
     } catch (err) {
       log(`live session persist failed: ${err}`)
     }
   },
 })
+// Every intent path (phone tap, MCP tool) also informs the live state machine:
+// a declared intent is the highest-confidence session signal there is.
+function declareIntent(activity: string): boolean {
+  liveState.noteIntent(Date.now())
+  return engine.workoutIntent(activity, intentEnrichment(activity))
+}
+
 const liveListener = new LiveListener(liveState, () => config().live.token, {
   // Phone-side surfaces: intent taps ride the same event path as the MCP tool,
   // steps land in the archive, plan reads come from the /gym-authored file,
   // and phone liveness persists for the cert-expiry watchdog.
-  onIntent: (activity) => engine.workoutIntent(activity, intentEnrichment(activity)),
+  onIntent: (activity) => declareIntent(activity),
   onSteps: (samples, deletedUuids) => {
     const { added } = store.upsertStepsSamples(samples)
     const { deleted } = store.deleteStepsSamples(deletedUuids)
@@ -290,7 +312,7 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
     }
     case 'intent': {
       const activity = String(params.activity ?? 'workout')
-      const surfaced = engine.workoutIntent(activity, intentEnrichment(activity))
+      const surfaced = declareIntent(activity)
       return { activity, surfaced }
     }
     case 'poll_now': {

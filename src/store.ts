@@ -115,8 +115,32 @@ export class Store {
     if (!readonly_) {
       this.db.run('PRAGMA journal_mode = WAL')
       this.db.run(SCHEMA)
-      if (!this.getMeta('schema_version')) this.setMeta('schema_version', '1')
+      this.migrate()
     }
+  }
+
+  /** Idempotent column adds for tables that predate a release. CREATE TABLE IF
+   * NOT EXISTS never alters an existing table, so new columns need explicit
+   * ALTERs guarded by what the live table actually has. Read-only opens (the
+   * MCP fallback) skip this; their reads must tolerate missing columns. */
+  private migrate(): void {
+    const have = new Set(
+      (this.db.query('PRAGMA table_info(live_sessions)').all() as Array<{ name: string }>).map(
+        (c) => c.name,
+      ),
+    )
+    const want: Array<[string, string]> = [
+      ['confidence', 'TEXT'],
+      ['demoted', 'INTEGER'],
+      ['intent_matched', 'INTEGER'],
+      ['corroborated', 'INTEGER'],
+      ['rr_presence', 'REAL'],
+      ['rr_consistency', 'REAL'],
+    ]
+    for (const [col, type] of want) {
+      if (!have.has(col)) this.db.run(`ALTER TABLE live_sessions ADD COLUMN ${col} ${type}`)
+    }
+    this.setMeta('schema_version', '2')
   }
 
   close(): void {
@@ -353,15 +377,60 @@ export class Store {
     max_bpm: number
     zone_seconds: number[]
     recovery_60s_drop: number | null
+    confidence?: string
+    demoted?: boolean
+    intent_matched?: boolean
+    corroborated?: boolean
+    rr_presence?: number | null
+    rr_consistency?: number | null
   }): void {
+    // corroborated is INSERT-only, never in the conflict-update list: it is
+    // also stamped externally by corroborateLiveSessions, and a re-insert of
+    // the same started_at must not wipe a post-hoc upgrade back to 0.
+    // Booleans bind as 0/1 (bun:sqlite rejects raw boolean params).
     this.db.run(
-      `INSERT INTO live_sessions (started_at, ended_at, reason, duration_s, avg_bpm, max_bpm, zone_seconds, recovery_60s_drop)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO live_sessions (started_at, ended_at, reason, duration_s, avg_bpm, max_bpm, zone_seconds, recovery_60s_drop,
+         confidence, demoted, intent_matched, corroborated, rr_presence, rr_consistency)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(started_at) DO UPDATE SET ended_at=excluded.ended_at, reason=excluded.reason,
          duration_s=excluded.duration_s, avg_bpm=excluded.avg_bpm, max_bpm=excluded.max_bpm,
-         zone_seconds=excluded.zone_seconds, recovery_60s_drop=excluded.recovery_60s_drop`,
-      [s.started_at, s.ended_at, s.reason, s.duration_s, s.avg_bpm, s.max_bpm, JSON.stringify(s.zone_seconds), s.recovery_60s_drop],
+         zone_seconds=excluded.zone_seconds, recovery_60s_drop=excluded.recovery_60s_drop,
+         confidence=excluded.confidence, demoted=excluded.demoted,
+         intent_matched=excluded.intent_matched,
+         rr_presence=excluded.rr_presence, rr_consistency=excluded.rr_consistency`,
+      [
+        s.started_at, s.ended_at, s.reason, s.duration_s, s.avg_bpm, s.max_bpm,
+        JSON.stringify(s.zone_seconds), s.recovery_60s_drop,
+        s.confidence ?? null, s.demoted == null ? null : s.demoted ? 1 : 0,
+        s.intent_matched == null ? null : s.intent_matched ? 1 : 0,
+        s.corroborated == null ? null : s.corroborated ? 1 : 0,
+        s.rr_presence ?? null, s.rr_consistency ?? null,
+      ],
     )
+  }
+
+  /** Any SCORED WHOOP workout overlapping [startIso, endIso]? Used at live-
+   * session insert time: a workout can score while the live session is still
+   * running (its row not yet written), and workouts never re-score, so the
+   * forward corroboration pass alone would miss it. */
+  hasScoredWorkoutOverlapping(startIso: string, endIso: string): boolean {
+    return !!this.db
+      .query(
+        `SELECT 1 FROM workouts WHERE score_state = 'SCORED' AND start <= ? AND end >= ? LIMIT 1`,
+      )
+      .get(endIso, startIso)
+  }
+
+  /** Stamp corroborated=1 on live sessions overlapping a WHOOP-scored workout
+   * window (bounds pre-expanded by the caller). All timestamps here are UTC
+   * ISO Z strings, so lexicographic comparison is chronological. A demoted
+   * row that WHOOP later scores gets upgraded post-hoc by this stamp. */
+  corroborateLiveSessions(startIso: string, endIso: string): number {
+    return this.db.run(
+      `UPDATE live_sessions SET corroborated = 1
+       WHERE started_at <= ? AND ended_at >= ?`,
+      [endIso, startIso],
+    ).changes
   }
 
   recentLiveSessions(days: number): Record<string, unknown>[] {

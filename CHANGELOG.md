@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.7.0 - 2026-07-12
+
+### Added
+
+- **Confidence-tiered live sessions.** Every auto-detected session now carries
+  confidence=low|medium|high, computed from an exercise-signature evidence
+  model: effort cycles (set/interval oscillation across the hot line, with an
+  observed-descent re-arm so threshold noise and feed gaps cannot fake
+  structure), sustained Z3+ (5 continuous minutes), or a continuous Z4 minute.
+  Duration alone is deliberately not evidence (passive elevations like a hot
+  shower or stress run long too); it only upgrades an evidenced session to
+  high. A declared workout intent outranks everything and is claimed once per
+  tap: at a session's start, or the moment an open session earns evidence.
+- **live.confirm event class.** Fires once per session when the elevation
+  develops an exercise signature (or was declared), carrying the level and
+  reasons. Low-confidence starts get situational-awareness prose only, and
+  zone milestones obey the same contract, holding until confidence arrives.
+- **Demotion + corroboration.** A session ending low-confidence with no
+  intent and no confirm is demoted ("probably not a workout, ignore for
+  training load") and archived with confidence, intent, and RR forensics
+  (a schema migration adds the columns). WHOOP scoring an overlapping workout
+  upgrades the archived row, both forward (on score) and reverse (at insert,
+  for workouts that scored mid-session); the overlap check uses 60s slack so
+  an adjacent post-workout elevation is never upgraded by mere proximity.
+- **RR-vs-bpm artifact signal.** Frames whose RR intervals imply a different
+  rate than the bpm field (the cadence-lock signature) cap the session's
+  confidence; RR absence stays neutral and junk intervals outside the
+  physiological range are ignored. Counters freeze at cooling onset so a
+  resting tail cannot dilute the work-window verdict.
+
+### Fixed
+
+- **Dual-up battery release churn.** Releasing a low-battery standby is
+  pointless (its pending-connect anchor re-grabs the band within a minute)
+  and cycled release/reconnect holes for hours; the daemon now tolerates the
+  spare hold, logs once per episode, and clears at the recovery bar. A true
+  shed needs an app-side anchor disarm, queued for the next app build.
+- **Dev-channel manifest.** The .mcp.json plugin-root wrapper now works in
+  both installed and dev scopes and fails loudly on an unexpected root
+  instead of silently running another project's start script.
+
 ## 0.6.1 - 2026-07-12
 
 ### Fixed

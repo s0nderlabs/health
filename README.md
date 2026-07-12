@@ -33,7 +33,12 @@ WHOOP band ──(BLE Broadcast HR)──> health-relay ──(WS, raw frames)�
   `/health live` (current BPM, zone, live resting HRV when still), automatic
   session detection (WHOOP cannot signal workout starts; a sustained-hot heart
   rate can), zone milestones during the session, and an end-of-session summary
-  with the HR-recovery read.
+  with the HR-recovery read. Detection is confidence-tiered: HR level alone
+  cannot separate a warmup from a hot shower, so a session only earns coach
+  attention once it shows an exercise signature (set/interval structure,
+  sustained depth, or your declared intent); an unconfirmed elevation is
+  demoted at the end instead of counting as training load, then upgraded
+  automatically if WHOOP later scores an overlapping workout.
 - **`/health`**: today's read on demand. `/health trend` for the long view.
 - **A permanent local archive** of your WHOOP data in one SQLite file.
 

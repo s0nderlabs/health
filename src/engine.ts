@@ -37,6 +37,7 @@ export class Engine {
     priority: EventPriority,
     dedupeKey: string,
     payload: { content: string; meta: Record<string, string> },
+    opts?: { bypassCooldown?: boolean },
   ): boolean {
     const config = this.getConfig()
 
@@ -53,7 +54,11 @@ export class Engine {
     if (!isSupersede) {
       const cooldownMin = config.cooldown_minutes[cls] ?? 0
       const last = this.store.lastEventOfClass(cls)
-      if (last && cooldownMin > 0 && Date.now() - Date.parse(last.created_at) < cooldownMin * 60_000) {
+      // bypassCooldown: for emitters that self-throttle. The live state
+      // machine uses it for declared/evidenced session starts and its
+      // once-per-session live.confirm: the live.session cooldown exists to
+      // mute LOW-confidence start flapping, nothing else.
+      if (!opts?.bypassCooldown && last && cooldownMin > 0 && Date.now() - Date.parse(last.created_at) < cooldownMin * 60_000) {
         return false
       }
 
@@ -131,6 +136,24 @@ export class Engine {
       if (intent.pr) card.meta.intent_pr = 'true'
     }
     this.emit('workout.card', 'info', `workout.card:${w.id}`, card)
+    // WHOOP scoring this window is ground truth that the elevation was a real
+    // workout: upgrade any overlapping live session (a demoted one included).
+    // 60s slack only: the two windows cover the SAME activity, so genuine
+    // matches overlap massively; a wider pad would stamp the ADJACENT
+    // post-workout shower, the exact class demotion exists for. Bounds are
+    // normalized to ms-precision UTC ISO so string compares stay chronological.
+    try {
+      const startMs = Date.parse(w.start)
+      const endMs = Date.parse(w.end)
+      if (Number.isFinite(startMs) && Number.isFinite(endMs)) {
+        this.store.corroborateLiveSessions(
+          new Date(startMs - 60_000).toISOString(),
+          new Date(endMs + 60_000).toISOString(),
+        )
+      }
+    } catch (err) {
+      this.log(`live-session corroboration failed: ${err}`)
+    }
   }
 
 
@@ -237,6 +260,7 @@ export class Engine {
       'system.health': 24,
       // Live events are moment-bound: a zone milestone from hours ago is noise.
       'live.session': 1,
+      'live.confirm': 1,
       'live.zone': 1,
       'live.rest': 6,
     })
@@ -263,11 +287,12 @@ export class Engine {
 
   /** Entry point for the live HR state machine (pre-throttled per-session). */
   liveEvent(
-    cls: 'live.session' | 'live.zone' | 'live.rest',
+    cls: 'live.session' | 'live.confirm' | 'live.zone' | 'live.rest',
     dedupeKey: string,
     payload: { content: string; meta: Record<string, string> },
+    opts?: { bypassCooldown?: boolean },
   ): boolean {
-    return this.emit(cls, 'info', dedupeKey, payload)
+    return this.emit(cls, 'info', dedupeKey, payload, opts)
   }
 
   /** A same-activity re-press inside this window is a retry, not a second

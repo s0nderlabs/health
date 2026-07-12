@@ -165,6 +165,15 @@ export class LiveListener {
   private lastDualAttemptAt = 0
   private dualExhaustedUntil = 0
   private wasDual = false
+  // Battery-low episode tracker (per source, survives ws reconnects). The old
+  // behavior released the low-battery standby every eligible arb tick; the
+  // phone's ALWAYS-ARMED pending connect re-grabbed the band within ~a minute
+  // and the cycle churned 111 release/reconnect holes in 2h (Jul 12). A
+  // release cannot shed the phone (standdown keeps the anchor armed by
+  // design: it is the walk-out lifeline), so the daemon tolerates the spare
+  // hold and logs ONCE per episode. Actually keeping the phone off the band
+  // needs an app-side anchor-disarm message: queued for the next app build.
+  private batteryStandDown = new Map<string, number>()
   private planWatcher: FSWatcher | null = null
   private planDebounce: ReturnType<typeof setTimeout> | null = null
   private lastPhoneSeenWrite = 0
@@ -241,6 +250,10 @@ export class LiveListener {
             // Same walk-out grace as the status:false path: a vanished live
             // feed must not trigger a release at the surviving holder.
             if (wasFresh) self.lastDualAttemptAt = Date.now()
+            // Real socket teardown (an app restart, not a band drop: those
+            // keep the ws) is a clean battery-episode boundary; without this,
+            // a stale entry could mute the one log line of a NEW episode.
+            self.batteryStandDown.delete(ws.data.source)
           }
           // The departing relayer may have been the one holding the band;
           // a survivor's next hr frame re-asserts connected within a second.
@@ -380,17 +393,22 @@ export class LiveListener {
       this.wasDual = true
       this.dualAttempts = 0
       this.dualWindowUntil = 0
-      // A standby draining on battery is released: a spare BLE connection is
-      // a wall-power luxury. 0.35 vs the 0.4 entry bar = hysteresis, so a
-      // phone hovering at the line doesn't flap. Battery-only on purpose:
-      // transport flips mid-walk-out while dual is still nominally true, and
-      // releasing then would drop the band on the street for nothing.
+      // A standby draining on battery is a wall-power luxury we would rather
+      // shed, but a release cannot shed it: the phone's pending-connect
+      // anchor (armed even in standdown; it is the walk-out lifeline)
+      // re-grabs the band within ~a minute, so a release just punches a hole
+      // in the standby feed and reforms dual. 111 such cycles in 2h on
+      // Jul 12. Until the app grows an anchor-disarm, the spare hold is
+      // TOLERATED: note the episode once, release nothing. 0.35 vs the 0.4
+      // dual-entry bar = hysteresis. Battery-only on purpose: transport
+      // flips mid-walk-out while dual is still nominally true.
       for (const ws of this.relayers) {
         if (ws.data.source === 'mac' || ws.data.source === 'unknown') continue
         const b = ws.data.battery
         if (this.sourceFresh(ws.data.source, now) && b && !b.charging && b.level < 0.35) {
-          this.push(ws, { type: 'release' })
-          log(`dual-up: standby ${ws.data.source} battery low (${Math.round(b.level * 100)}%), released`)
+          if (this.batteryStandDown.has(ws.data.source)) continue
+          this.batteryStandDown.set(ws.data.source, now)
+          log(`dual-up: standby ${ws.data.source} battery low (${Math.round(b.level * 100)}%); tolerating the spare hold (its anchor re-grabs any release; app-side disarm pending)`)
           break
         }
       }
@@ -520,6 +538,10 @@ export class LiveListener {
           : []
         // A relayer reconnect changes the topology: give dual-up a new epoch.
         this.dualAttempts = 0
+        // And a new battery episode: an app restart can race its old socket's
+        // close (new ws first), which would skip the close-handler reset and
+        // mute the fresh episode's one log line.
+        this.batteryStandDown.delete(ws.data.source)
         log(
           `hello from ${ws.data.source}${ws.data.device ? ` (${ws.data.device})` : ''}${ws.data.transport !== 'unknown' ? ` via ${ws.data.transport}` : ''}${ws.data.caps.length ? ` caps=[${ws.data.caps.join(',')}]` : ''}`,
         )
@@ -603,6 +625,14 @@ export class LiveListener {
         const level = typeof msg.level === 'number' ? msg.level : Number.NaN
         if (Number.isFinite(level) && level >= 0 && level <= 1) {
           ws.data.battery = { level, charging: Boolean(msg.charging) }
+          // Recovery ends the episode. LEVEL-only, at the dual-entry bar
+          // (0.4 vs the 0.35 trip line = hysteresis): clearing on `charging`
+          // would end the episode on every cable fiddle at a low level and
+          // re-log it on unplug.
+          if (this.batteryStandDown.has(ws.data.source) && level >= 0.4) {
+            this.batteryStandDown.delete(ws.data.source)
+            log(`dual-up: ${ws.data.source} battery recovered (${Math.round(level * 100)}%), standby episode over`)
+          }
         }
         break
       }
