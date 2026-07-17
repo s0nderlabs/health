@@ -10,6 +10,7 @@ struct LiveView: View {
     @ObservedObject private var la = LiveActivityController.shared
     var onSettings: () -> Void = {}
     @State private var showIntent = false
+    @State private var confirmReclaim = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -151,6 +152,7 @@ struct LiveView: View {
                 label: relay.bandConnected ? (relay.bandName ?? "Band") : "No band"
             )
             Spacer(minLength: 8)
+            yieldToggle
             Button(action: onSettings) {
                 Image(systemName: "gearshape")
                     .font(.system(size: 14))
@@ -159,6 +161,44 @@ struct LiveView: View {
                     .glassCapsule()
                     .contentShape(Circle())
             }
+        }
+    }
+
+    /// The Strava handoff switch: one tap surrenders the band so another app
+    /// can pair it; tap again to reclaim. Accent while yielded (the unusual
+    /// state should be loud); needs the daemon socket to act.
+    private var yieldToggle: some View {
+        Button {
+            if relay.mode == .disarmed {
+                // Reclaiming is the dangerous direction: if Strava is still
+                // recording, a blip after re-arm hands us its sensor.
+                confirmReclaim = true
+            } else {
+                relay.requestYield()
+            }
+        } label: {
+            Image(systemName: "antenna.radiowaves.left.and.right.slash")
+                .font(.system(size: 14))
+                .foregroundStyle(relay.mode == .disarmed ? Theme.accentInk : Theme.textSecondary)
+                .frame(width: 32, height: 32)
+                .background {
+                    if relay.mode == .disarmed {
+                        Circle().fill(Theme.accent)
+                    }
+                }
+                .glassCapsule()
+                .contentShape(Circle())
+        }
+        // Yielding needs the daemon; reclaiming must NOT (a yielded phone
+        // away from the tailnet would otherwise be stranded dark with the
+        // hero telling the user to tap a dead button).
+        .disabled(!relay.socketConnected && relay.mode != .disarmed && !Demo.active)
+        .opacity(relay.socketConnected || relay.mode == .disarmed || Demo.active ? 1 : 0.35)
+        .alert("Reclaim the band?", isPresented: $confirmReclaim) {
+            Button("Reclaim", role: .destructive) { relay.reclaimTapped() }
+            Button("Keep yielded", role: .cancel) {}
+        } message: {
+            Text("If Strava is still recording, it can lose the sensor. Reclaim after you finish.")
         }
     }
 
@@ -201,6 +241,12 @@ struct LiveView: View {
                     icon: "arrow.left.arrow.right",
                     title: "Handing off",
                     sub: "Giving the Mac a moment to take the band back."
+                )
+            case .disarmed:
+                heroMessage(
+                    icon: "antenna.radiowaves.left.and.right.slash",
+                    title: "Yielded",
+                    sub: "The band is free for another app (Strava). Tap the antenna up top to reclaim it."
                 )
             case .active:
                 activeHero

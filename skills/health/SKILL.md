@@ -76,13 +76,41 @@ Format tightly. A short table for the numbers is fine; the verdict is prose.
 ### `live`
 
 1. Call `health__live`.
-2. If `feed` is not "live": say the feed is down and why it might be (band
-   Broadcast HR off in the WHOOP app, relayer not running) in one line.
+2. If `yield.active` is true: the feed is dark ON PURPOSE (band surrendered to
+   an external app until `yield.until`); report that, plus `breach_source` if
+   set (a relayer missed its disarm and is still holding the band: open or
+   force-quit the phone app / restart the mac relay). Do not diagnose a
+   yielded feed as a fault.
+   Otherwise, if `feed` is not "live": say the feed is down and why it might
+   be (band Broadcast HR off in the WHOOP app, relayer not running) in one line.
 3. Otherwise present: current BPM + zone, smoothed BPM, 5-min rMSSD (if
    present, this is live HRV at rest), and session state (elapsed, avg/max,
    zone time) if one is active.
 4. The read: at rest, rMSSD vs the morning HRV (stress check); in session,
    what the zone time says about the work being done.
+
+### `yield` (optionally `yield 90m` / `yield 3h`) and `reclaim`
+
+The relayers hold the band's Broadcast HR exclusively, so external apps
+(Strava sensor pairing) can never see it. `yield` surrenders it on purpose.
+
+1. Parse an optional duration from `$ARGUMENTS` (minutes; accept `90m`/`3h`
+   forms; `forever`/`indefinite` = minutes 0). Call `health__live` with
+   `{action:'yield', minutes:N}` (default 240). Pick/confirm a window LONGER
+   than the planned activity: expiry mid-ride re-arms the relayers, and a
+   Strava BLE blip could then hand them the band mid-recording. minutes 0 =
+   INDEFINITE: no expiry exists, only an explicit reclaim ends it (the
+   ironclad mode; the daemon nags daily while it stays active). The phone
+   app's antenna toggle uses indefinite mode.
+2. Relay the response's `warnings` VERBATIM: they are load-bearing (an
+   unreachable phone relayer keeps an armed anchor that can silently defeat
+   the yield; the fix is opening or force-quitting the HealthRelay app).
+3. Say what to expect: the band appears in the other app's sensor list within
+   seconds; live coaching is dark until reclaim/expiry; WHOOP's own recording
+   and scoring are unaffected.
+
+`reclaim` calls `health__live {action:'reclaim'}`: always safe (a held band
+cannot be stolen; the relayers re-arm and wait for the band to free).
 
 ### `status`
 

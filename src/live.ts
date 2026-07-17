@@ -24,6 +24,17 @@
 //     {type:'release'}            drop the band NOW but keep hunting it (caps
 //                                 gated; the dual-up race: both receivers'
 //                                 anchors fire into the advertising window)
+//     {type:'disarm', until:ms}   YIELD: drop the band, cancel the pending
+//                                 connect, stop hunting entirely, so an
+//                                 external receiver (Strava) can take the
+//                                 broadcast. Unlike release/standdown, NOTHING
+//                                 stays armed. 'disarm' hello cap marks builds
+//                                 that obey; old builds ignore it silently.
+//     {type:'rearm'}              yield over: resume normal hunting. Relayers
+//                                 also treat a hello reply of 'ok' as ensure-
+//                                 armed, so a leg that missed the one-shot
+//                                 rearm (socket down at reclaim) self-heals on
+//                                 its next reconnect.
 //     {type:'plan_updated'}       the workout plan file changed; refetch GET /plan
 //
 // DUAL-UP (deterministic-through-retries dual connection): at home, at rest,
@@ -64,7 +75,32 @@ export interface LiveListenerOpts {
   getPlanPath?: () => string
   /** Persist "a phone relayer was alive at <iso>" (cert-expiry watchdog). */
   onPhoneSeen?: (atIso: string) => void
+  /** Yield state changed: untilIso to persist, null on reclaim. The reclaim
+   *  reason rides along so the daemon can surface auto-reclaims. */
+  onYieldChange?: (untilIso: string | null, reason?: YieldReclaimReason, sinceIso?: string) => void
+  /** A leg kept streaming while yielded (missed/ignored its disarm). */
+  onYieldBreach?: (source: string) => void
+  /** An INDEFINITE yield has been active for another reminder interval:
+   *  surface a nag (never an auto-reclaim; that is the whole point). */
+  onYieldReminder?: (sinceIso: string) => void
   timing?: Partial<ArbTiming>
+}
+
+export type YieldReclaimReason = 'manual' | 'expired'
+
+/** Indefinite-yield sentinel: far enough that expiry never fires, near
+ *  enough that Date/ISO round-trips stay exact. */
+export const YIELD_FOREVER_MS = Date.UTC(9999, 0, 1)
+
+/** The one yield-minutes parser, shared by the RPC and the phone request so
+ *  their contracts cannot drift. 0 (and any non-positive value) = INDEFINITE.
+ *  NOTE: never `|| dflt` a number here: 0 is falsy and is the most important
+ *  value in the domain (the xhigh review caught exactly that bug). */
+export function parseYieldMinutes(v: unknown, dflt: number): number {
+  if (v == null) return dflt
+  const n = Math.round(Number(v))
+  if (!Number.isFinite(n)) return dflt
+  return n <= 0 ? 0 : Math.min(Math.max(n, 5), 720)
 }
 
 /** Arbitration timing; overridable so tests run in milliseconds. */
@@ -80,6 +116,8 @@ export interface ArbTiming {
   dualUpExhaustedMs: number // rest period after maxAttempts strikeout
   dualUpMaxAttempts: number // attempts per epoch before backing off long
   dualUpPeerRecentMs: number // the other leg must have seen band frames this recently before we release a holder
+  yieldRepushMs: number // min gap between disarm re-pushes to a leg still streaming while yielded
+  yieldReminderMs: number // nag cadence while an INDEFINITE yield stays active
 }
 
 const DEFAULT_TIMING: ArbTiming = {
@@ -94,9 +132,11 @@ const DEFAULT_TIMING: ArbTiming = {
   dualUpExhaustedMs: 1_800_000,
   dualUpMaxAttempts: 4,
   dualUpPeerRecentMs: 600_000,
+  yieldRepushMs: 30_000,
+  yieldReminderMs: 24 * 3_600_000,
 }
 
-type RelayerMode = 'active' | 'standdown' | 'paused'
+type RelayerMode = 'active' | 'standdown' | 'paused' | 'disarmed'
 type Transport = 'wifi' | 'cellular' | 'unknown'
 
 interface RelayerData {
@@ -132,6 +172,13 @@ export interface LiveFeedStatus {
   frames: number
   parse_errors: number
   rejected_samples: number
+  yield: {
+    active: boolean
+    indefinite: boolean
+    since: string | null
+    until: string | null
+    breach_source: string | null
+  }
 }
 
 export class LiveListener {
@@ -174,6 +221,19 @@ export class LiveListener {
   // hold and logs ONCE per episode. Actually keeping the phone off the band
   // needs an app-side anchor-disarm message: queued for the next app build.
   private batteryStandDown = new Map<string, number>()
+  // Yield: the band is deliberately surrendered to an external receiver
+  // (Strava). While yieldUntil is in the future, every leg is disarmed and
+  // ALL arbitration is suspended. Reclaim is deterministic only: expiry timer
+  // or an explicit call (sighting-based auto-reclaim was designed and cut:
+  // name-matched sightings can't tell his band from a stranger's WHOOP, and a
+  // 3-min mid-ride BLE dropout is indistinguishable from "ride over").
+  private yieldUntil = 0
+  private yieldSince = 0
+  // Per-source disarm re-push throttle for legs still streaming while yielded
+  // (a leg whose socket was down at yield time never saw the disarm).
+  private yieldRepush = new Map<string, number>()
+  private yieldBreachSource: string | null = null
+  private lastYieldReminder = 0
   private planWatcher: FSWatcher | null = null
   private planDebounce: ReturnType<typeof setTimeout> | null = null
   private lastPhoneSeenWrite = 0
@@ -353,6 +413,30 @@ export class LiveListener {
    *   mac-reacquire probe still runs. Never anything during a live session.
    */
   private arbitrate(now = Date.now()): void {
+    // Yield short-circuits EVERYTHING: no standdown/resume, no dual-up, no
+    // probes. The only arbitration while yielded is the expiry check, which
+    // an INDEFINITE yield never reaches: nothing but an explicit reclaim can
+    // re-arm a leg then (the "no force on earth" guarantee), so the daemon
+    // nags on a timer instead of ever acting on one.
+    if (this.yieldUntil > 0) {
+      if (now >= this.yieldUntil) {
+        this.reclaim('expired', now)
+      } else {
+        if (
+          this.yieldUntil === YIELD_FOREVER_MS &&
+          now - Math.max(this.yieldSince, this.lastYieldReminder) >= this.timing.yieldReminderMs
+        ) {
+          this.lastYieldReminder = now
+          try {
+            this.opts.onYieldReminder?.(new Date(this.yieldSince).toISOString())
+          } catch (err) {
+            log(`yield reminder failed: ${err}`)
+          }
+        }
+        return
+      }
+    }
+
     const macFresh = this.sourceFresh('mac', now)
     for (const ws of this.relayers) {
       if (ws.data.source === 'mac' || ws.data.source === 'unknown') continue
@@ -486,6 +570,127 @@ export class LiveListener {
     log(`dual-up: released ${released}, racing both anchors (attempt ${this.dualAttempts}/${this.timing.dualUpMaxAttempts})`)
   }
 
+  // ── Yield (surrender the band to an external receiver) ──────────
+
+  yielded(now = Date.now()): boolean {
+    return this.yieldUntil > now
+  }
+
+  /**
+   * Disarm every leg so the band starts advertising and an external receiver
+   * (Strava) can pair it. Returns which connected legs were told and which of
+   * those lack the 'disarm' cap (old builds that will ignore it): the caller
+   * surfaces both, plus a warning for legs that are not connected at all (a
+   * suspended phone with an armed pending connect will grab the freed band
+   * and cannot be reached until its socket returns; the hello-during-yield
+   * and frame-repush paths self-heal it the moment it does).
+   */
+  yieldBand(durationMs: number, now = Date.now()): {
+    until: string
+    disarmed: string[]
+    capless: string[]
+  } {
+    // durationMs <= 0 = INDEFINITE: no expiry exists; only an explicit
+    // reclaim ends it. This is the strongest non-interference mode: nothing
+    // time-based can ever re-arm a leg while an external app has the band.
+    this.yieldUntil = durationMs > 0 ? now + durationMs : YIELD_FOREVER_MS
+    this.yieldSince = now
+    this.lastYieldReminder = 0
+    this.yieldRepush.clear()
+    this.yieldBreachSource = null
+    // A probe or dual-up window in flight is abandoned; its bookkeeping must
+    // not fire resume/release pushes after reclaim on stale state.
+    this.probing = null
+    this.dualWindowUntil = 0
+    // A session open at yield time ends NOW with an honest reason; the
+    // feed-drop timer reporting "broadcast stopped" mid-yield would read as
+    // a fault the user caused on purpose.
+    try {
+      this.state.yieldInterrupt(now)
+    } catch (err) {
+      log(`yield session close failed: ${err}`)
+    }
+    const disarmed: string[] = []
+    const capless: string[] = []
+    for (const ws of this.relayers) {
+      this.push(ws, { type: 'disarm', until: this.yieldUntil })
+      // mode reflects what the leg will actually DO: an old build without the
+      // cap ignores the push and keeps hunting; stamping it 'disarmed' would
+      // make status lie about exactly the leg most likely to breach.
+      if (ws.data.caps.includes('disarm')) {
+        ws.data.mode = 'disarmed'
+        disarmed.push(ws.data.source)
+      } else {
+        capless.push(ws.data.source)
+      }
+    }
+    const untilIso = new Date(this.yieldUntil).toISOString()
+    try {
+      this.opts.onYieldChange?.(untilIso, undefined, new Date(this.yieldSince).toISOString())
+    } catch (err) {
+      log(`yield persist failed: ${err}`)
+    }
+    log(`yield: band surrendered until ${untilIso} (disarmed: ${disarmed.join(',') || 'none'}${capless.length ? `; no disarm cap: ${capless.join(',')}` : ''})`)
+    return { until: untilIso, disarmed, capless }
+  }
+
+  /** Yield over: re-arm every leg. Idempotent; a leg that misses this push
+   *  self-heals on reconnect (relayers treat a hello 'ok' as ensure-armed). */
+  reclaim(reason: YieldReclaimReason, now = Date.now()): void {
+    if (this.yieldUntil === 0) return
+    this.yieldUntil = 0
+    this.yieldSince = 0
+    this.yieldRepush.clear()
+    this.yieldBreachSource = null
+    for (const ws of this.relayers) {
+      this.push(ws, { type: 'rearm' })
+      ws.data.mode = 'active'
+    }
+    // Fresh dual-up epoch, but with the standard grace: both anchors are
+    // racing for the freed band already; a release on top would punch a hole.
+    this.dualAttempts = 0
+    this.lastDualAttemptAt = now
+    try {
+      this.opts.onYieldChange?.(null, reason)
+    } catch (err) {
+      log(`yield persist failed: ${err}`)
+    }
+    log(`yield: reclaimed (${reason}), all legs re-armed`)
+  }
+
+  /** Boot re-apply of a persisted yield (daemon restarted mid-yield). No legs
+   *  are connected yet; hello-during-yield disarms each as it returns. */
+  restoreYield(untilMs: number, sinceMs?: number, now = Date.now()): void {
+    if (untilMs <= now) return
+    this.yieldUntil = untilMs
+    // Preserve the ORIGINAL start: the indefinite-yield daily reminder keys
+    // off it, and a daemon that restarts daily would otherwise never nag.
+    this.yieldSince = sinceMs != null && Number.isFinite(sinceMs) && sinceMs < now ? sinceMs : now
+    log(`yield: restored from persistence, until ${new Date(untilMs).toISOString()}`)
+  }
+
+  /** A frame arrived from `source` while yielded: it missed its disarm.
+   *  Re-push (throttled) and surface a breach if it keeps streaming. */
+  private yieldFrameSeen(ws: RelayerWs, now: number): void {
+    const last = this.yieldRepush.get(ws.data.source)
+    if (last != null && now - last < this.timing.yieldRepushMs) return
+    this.yieldRepush.set(ws.data.source, now)
+    this.push(ws, { type: 'disarm', until: this.yieldUntil })
+    if (ws.data.caps.includes('disarm')) ws.data.mode = 'disarmed'
+    log(`yield: ${ws.data.source} is still streaming while yielded, disarm re-pushed`)
+    // Second re-push = it survived a full throttle window still holding the
+    // band: that is a breach worth telling the user about (Strava cannot see
+    // a held band). Once per yield.
+    if (last != null && this.yieldBreachSource == null) {
+      this.yieldBreachSource = ws.data.source
+      try {
+        this.opts.onYieldBreach?.(ws.data.source)
+      } catch (err) {
+        log(`yield breach surface failed: ${err}`)
+      }
+    }
+  }
+
   /** Role display truth for the phone UI: standby = the mac holds the pen
    *  and the phone's stream is the shadowed hot spare. */
   private pushRole(role: 'standby' | 'primary'): void {
@@ -545,14 +750,23 @@ export class LiveListener {
         log(
           `hello from ${ws.data.source}${ws.data.device ? ` (${ws.data.device})` : ''}${ws.data.transport !== 'unknown' ? ` via ${ws.data.transport}` : ''}${ws.data.caps.length ? ` caps=[${ws.data.caps.join(',')}]` : ''}`,
         )
-        if (ws.data.source !== 'mac' && ws.data.source !== 'unknown') {
-          this.phoneSeen(true)
-          if (this.sourceFresh('mac')) {
-            ws.data.mode = 'standdown'
-            ws.send(JSON.stringify({ type: 'standdown' }))
-            log(`${ws.data.source} standing down at hello (mac feed live)`)
-            break
-          }
+        if (ws.data.source !== 'mac' && ws.data.source !== 'unknown') this.phoneSeen(true)
+        // Yield outranks every hello verdict: a leg reconnecting mid-yield
+        // (reopened app, relay restart) must not re-arm its anchor. This is
+        // also half of the rearm self-heal: when NOT yielded, the ok/standdown
+        // replies below double as ensure-armed for a leg that missed the
+        // one-shot rearm (relayers clear their disarmed state on either).
+        if (this.yielded()) {
+          if (ws.data.caps.includes('disarm')) ws.data.mode = 'disarmed'
+          ws.send(JSON.stringify({ type: 'disarm', until: this.yieldUntil }))
+          log(`${ws.data.source} disarmed at hello (yield active)`)
+          break
+        }
+        if (ws.data.source !== 'mac' && ws.data.source !== 'unknown' && this.sourceFresh('mac')) {
+          ws.data.mode = 'standdown'
+          ws.send(JSON.stringify({ type: 'standdown' }))
+          log(`${ws.data.source} standing down at hello (mac feed live)`)
+          break
         }
         ws.data.mode = 'active'
         ws.send(JSON.stringify({ type: 'ok' }))
@@ -577,6 +791,17 @@ export class LiveListener {
         this.frameArrival.set(ws.data.source, this.lastFrameAt)
         this.bandSeen.set(ws.data.source, this.lastFrameAt)
         this.bandConnected = true
+        // Streaming while yielded = this leg missed its disarm (socket was
+        // down at push time). Heal it and STOP: the frame must not reach
+        // LiveState (addSample emits live.session/zone/rest, and the yield
+        // contract promises live.* is dark for the window). Freshness and
+        // band_seen were stamped above so status stays truthful about the
+        // breach; yieldFrameSeen owns the re-push and the breach surface.
+        if (this.yielded()) {
+          this.yieldFrameSeen(ws, this.lastFrameAt)
+          if (ws.data.source !== 'mac' && ws.data.source !== 'unknown') this.phoneSeen()
+          return
+        }
         // Single-writer gate: during a dual hold, only the primary source
         // feeds the live math (a second receiver's interleaved copies would
         // double the sample rate and poison RR/HRV). Freshness was stamped
@@ -658,6 +883,24 @@ export class LiveListener {
         this.push(ws, { type: 'steps_ack', received: clean.length, added, deleted: removed })
         if (clean.length > 0 || deleted.length > 0)
           log(`steps: ${clean.length} samples (${added} new) + ${deleted.length} deletions (${removed} removed) from ${ws.data.source}`)
+        break
+      }
+      case 'yield_request': {
+        // The phone's one-tap toggle: same yield as the RPC, requested over
+        // the relayer socket (the user is standing there with Strava open).
+        // The disarm push that yieldBand sends to every leg IS the app's
+        // state change; the ack is just tap feedback. minutes 0 (the app's
+        // default) = INDEFINITE: a physical switch, off only by hand.
+        const minutes = parseYieldMinutes(msg.minutes, 0)
+        const res = this.yieldBand(minutes * 60_000)
+        log(`yield requested by ${ws.data.source} (${minutes === 0 ? 'until reclaimed' : `${minutes}m`})`)
+        this.push(ws, { type: 'yield_ack', until: new Date(res.until).getTime() })
+        break
+      }
+      case 'reclaim_request': {
+        this.reclaim('manual')
+        log(`reclaim requested by ${ws.data.source}`)
+        this.push(ws, { type: 'reclaim_ack' })
         break
       }
       case 'intent': {
@@ -833,6 +1076,16 @@ export class LiveListener {
       frames: this.frames,
       parse_errors: this.parseErrors,
       rejected_samples: this.state.rejectedSamples(),
+      yield: {
+        active: this.yieldUntil > now,
+        indefinite: this.yieldUntil === YIELD_FOREVER_MS,
+        since: this.yieldSince ? new Date(this.yieldSince).toISOString() : null,
+        until:
+          this.yieldUntil && this.yieldUntil !== YIELD_FOREVER_MS
+            ? new Date(this.yieldUntil).toISOString()
+            : null,
+        breach_source: this.yieldBreachSource,
+      },
     }
   }
 

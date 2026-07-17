@@ -166,6 +166,15 @@ final class DemoDriver {
         relay.bandName = "WHOOP 5B01348592"
         relay.blePhase = .streaming("WHOOP 5B01348592")
         relay.mode = .active
+        // HR_DEMO_YIELD=1: the yielded face (band surrendered to Strava).
+        if ProcessInfo.processInfo.environment["HR_DEMO_YIELD"] != nil {
+            relay.mode = .disarmed
+            relay.bandConnected = false
+            relay.bandName = nil
+            relay.blePhase = .off
+            relay.bpm = nil
+            return
+        }
         // Timer fires on the main run loop; published mutations stay on main.
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [self] _ in
             bpm += Double.random(in: -2.5...2.7)

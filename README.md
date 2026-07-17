@@ -39,6 +39,15 @@ WHOOP band ──(BLE Broadcast HR)──> health-relay ──(WS, raw frames)�
   sustained depth, or your declared intent); an unconfirmed elevation is
   demoted at the end instead of counting as training load, then upgraded
   automatically if WHOOP later scores an overlapping workout.
+- **Band yield** (Strava handoff): the relayers hold the band's broadcast
+  exclusively, and a held band never advertises, so other apps can never pair
+  it as a sensor. One tap in the phone app (or `/health yield`) disarms every
+  relayer so Strava can take the broadcast for a recording; reclaim with a
+  tap, a command, or window expiry. Indefinite yields never auto-reclaim
+  (a daily reminder nags instead), yields survive daemon and relayer
+  restarts, and a relayer that misses its disarm is re-pushed and surfaced
+  loudly. Live coaching is dark while yielded, by contract; WHOOP's own
+  recording and scoring are unaffected.
 - **`/health`**: today's read on demand. `/health trend` for the long view.
 - **A permanent local archive** of your WHOOP data in one SQLite file.
 
@@ -96,6 +105,11 @@ BLE relayer (macOS, near your body):
 scripts/build-relayer.sh
 bin/health-relay   # or install it under launchd for always-on
 ```
+
+If you run it under launchd, copy the binary somewhere OUTSIDE `~/Documents`
+(e.g. `~/.local/bin`) and point the LaunchAgent there: Documents is
+TCC-protected, and a launchd spawn of a rebuilt binary from a protected
+folder wedges silently in dyld with no way to prompt.
 
 The relayer is a dumb pipe: it subscribes to the band's standard Bluetooth
 Heart Rate service (matching device names against `WHOOP` by default; set

@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.8.0 - 2026-07-17
+
+### Added
+
+- **Band yield: hand the broadcast to another app (Strava) on demand.** The
+  relayers hold the band's Broadcast HR exclusively and a held band never
+  advertises, so external sensor pairing could never see it. A new yield mode
+  disarms every leg on command: a `disarm`/`rearm` protocol pair (with a
+  `disarm` hello cap; old builds ignore it safely and are reported), daemon
+  yield state that suspends ALL arbitration, and reclaim by explicit command
+  or window expiry. Yields survive daemon restarts (persisted window, restored
+  at boot; a reconnecting leg is disarmed at hello), a leg that missed its
+  disarm is re-pushed and surfaced as a breach event, and frames from a
+  breaching leg never reach the live pipeline (live.* is contractually dark
+  while yielded; an open session closes immediately with an honest
+  "band yielded" reason).
+- **Indefinite yield (`minutes: 0`).** No expiry exists; only an explicit
+  reclaim re-arms the relayers, so nothing time-based can ever interrupt the
+  external app mid-recording. A daily reminder nags while it stays active
+  (never an auto-reclaim). Timed windows (5-720 min) remain for the
+  `health__live {action:'yield'}` tool; `action:'reclaim'` ends either kind,
+  and reclaim is always safe (a held band cannot be stolen).
+- **One-tap yield toggle in the iPhone app.** An antenna button in the Live
+  header yields indefinitely (a physical-switch model) and reclaims behind a
+  confirmation; reclaiming works even with the daemon unreachable (local
+  override, re-verified against the daemon on reconnect). The Live tab and
+  lock-screen card show an honest "Yielded" face.
+- **Yield-proof relayer lifecycles.** The mac relay holds its first scan
+  until the daemon's verdict (5s capture-first timeout), persists its
+  disarmed state so a restart mid-yield fails closed, and drops a connect
+  that raced the disarm. The iOS leg persists the yield window and honors it
+  across suspension, relaunch, and BLE state restoration (which now also
+  starts the socket on background relaunches so verdicts can land).
+
+### Fixed
+
+- Time-critical yield advisories (expiry, breach, daily reminder) bypass the
+  6-hour system.health class cooldown, the daily event budget, and the
+  quiet-hours delivery hold; a window that expires while the daemon is down
+  emits the advisory at the next boot instead of being cleaned up silently.
+- The mac relay binary now runs from `~/.local/bin` (launchd binaries inside
+  `~/Documents` hit a TCC-mediated dyld stall after every rebuild).
+
 ## 0.7.0 - 2026-07-12
 
 ### Added

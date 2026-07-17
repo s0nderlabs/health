@@ -96,7 +96,7 @@ export interface LiveDeps {
 export interface SessionSummary {
   started_at: string
   ended_at: string
-  reason: 'cooldown' | 'feed_drop'
+  reason: 'cooldown' | 'feed_drop' | 'yield'
   duration_s: number
   avg_bpm: number
   max_bpm: number
@@ -574,6 +574,14 @@ export class LiveState {
     return this.session != null
   }
 
+  /** The band is being surrendered to an external receiver: close any open
+   *  session NOW with an honest reason, instead of letting the feed-drop
+   *  timer report "broadcast stopped" 12 minutes into the yield. */
+  yieldInterrupt(ts: number): void {
+    if (this.session) this.endSession(ts, 'yield')
+    this.hotSince = null
+  }
+
   /** Time-driven transitions; call every ~30s. Ends a session on feed silence. */
   tick(now: number): void {
     if (!this.session || !this.lastTs) return
@@ -589,7 +597,7 @@ export class LiveState {
     if (silent || garbage) this.endSession(this.lastTs, 'feed_drop')
   }
 
-  private endSession(endTs: number, reason: 'cooldown' | 'feed_drop'): void {
+  private endSession(endTs: number, reason: 'cooldown' | 'feed_drop' | 'yield'): void {
     const s = this.session!
     this.session = null
     this.hotSince = null
@@ -642,7 +650,8 @@ export class LiveState {
       summary.recovery_60s_drop != null
         ? ` HR recovery: -${summary.recovery_60s_drop} bpm in the minute after the last effort.`
         : ''
-    const how = reason === 'feed_drop' ? 'broadcast stopped' : 'cooled down'
+    const how =
+      reason === 'feed_drop' ? 'broadcast stopped' : reason === 'yield' ? 'band yielded' : 'cooled down'
     const body = `${fmtMinSec(summary.duration_s)}, avg ${summary.avg_bpm} bpm, peak ${summary.max_bpm}.${zoneLine ? ` Zones: ${zoneLine}.` : ''}${recovery}`
     const content = demoted
       ? `Elevation ended (${how}): ${body} Probably not a workout (no intent declared, no exercise signature: no set/interval structure, no sustained depth); ignore for training load.`

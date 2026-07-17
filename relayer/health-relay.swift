@@ -87,7 +87,7 @@ final class SocketLeg: NSObject, URLSessionWebSocketDelegate {
         log("socket up (\(config.url.absoluteString))")
         sendJSON([
             "type": "hello", "source": "mac",
-            "device": deviceName ?? "unknown", "caps": ["release"],
+            "device": deviceName ?? "unknown", "caps": ["release", "disarm"],
         ])
         flush()
         schedulePing(webSocketTask)
@@ -197,6 +197,21 @@ final class BleLeg: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     // earlier attempt must never cancel a fresh in-progress connection.
     private var connectGeneration = 0
     private var lastNotifyAt = Date.distantPast
+    // Yield: the daemon surrendered the band to an external receiver
+    // (Strava). While disarmed: no scan, no connect, nothing armed. Cleared
+    // by 'rearm' OR by a hello reply of 'ok' (the reconnect backstop: a
+    // one-shot rearm can miss a leg whose socket was down at reclaim).
+    private var disarmed = false
+    // Launch gate: a relay (re)started MID-YIELD must not race Strava for a
+    // blip-freed band in the seconds before the daemon's verdict arrives.
+    // Scanning holds until the first inbound daemon message; a 5s timeout
+    // preserves capture-first when the daemon is down UNLESS the persisted
+    // flag says we were disarmed: then the gate fails CLOSED (dark) until an
+    // explicit ok/rearm, because grabbing the band is the one unrecoverable
+    // wrong move mid-recording.
+    private var awaitingVerdict = true
+    private static let disarmFlag = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".claude/channels/health/relay.disarmed")
     // Only bind devices matching this name fragment. Defaulting to any nearby
     // 0x180D broadcaster would stream a STRANGER'S heart rate into the archive
     // the first time the band is slow to advertise at a gym.
@@ -205,6 +220,10 @@ final class BleLeg: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     init(socket: SocketLeg) {
         self.socket = socket
         super.init()
+        // A yield survives our own restarts: the flag written at disarm makes
+        // a relaunched relay come up dark until the daemon says otherwise.
+        disarmed = FileManager.default.fileExists(atPath: Self.disarmFlag.path)
+        if disarmed { log("restored disarmed state (yield) from flag; staying dark until ok/rearm") }
         central = CBCentralManager(delegate: self, queue: .main)
         // Subscribed-but-silent watchdog: a wedged notify stream (discovery
         // half-failed, band rebooted) recovers by rescanning.
@@ -251,7 +270,44 @@ final class BleLeg: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         resetAndRescan(p)
     }
 
+    /// Yield: drop the band and go fully idle so an external receiver
+    /// (Strava) can discover and pair it. Unlike release, nothing keeps
+    /// hunting: no scan, no reconnect, until rearm().
+    func disarm() {
+        try? Data().write(to: Self.disarmFlag) // idempotent; refresh even if already disarmed
+        guard !disarmed else { return }
+        disarmed = true
+        connectGeneration += 1 // kill any pending connect-timeout closure
+        connectTimer?.cancel()
+        central.stopScan()
+        if let p = peripheral {
+            central.cancelPeripheralConnection(p)
+            peripheral = nil
+            socket.sendJSON(["type": "status", "connected": false])
+        }
+        log("disarm: band surrendered (yield); idle until rearm")
+    }
+
+    /// Yield over (or an 'ok' hello reply while disarmed): resume hunting.
+    func rearm() {
+        try? FileManager.default.removeItem(at: Self.disarmFlag)
+        guard disarmed else { return }
+        disarmed = false
+        log("rearm: yield over, hunting the band again")
+        startScan()
+    }
+
+    /// First daemon message (any type) or the 5s launch timeout: the verdict
+    /// is in (or is not coming). If nothing above vetoed, start hunting.
+    func verdictArrived(_ why: String) {
+        guard awaitingVerdict else { return }
+        awaitingVerdict = false
+        if !disarmed { log("launch gate released (\(why))") }
+        startScan()
+    }
+
     private func startScan() {
+        guard !disarmed, !awaitingVerdict else { return }
         guard central.state == .poweredOn else { return }
         guard peripheral == nil else { return }
         log("scanning for \(deviceFilter) broadcasting Heart Rate (is Broadcast HR on in the WHOOP app?)")
@@ -264,7 +320,7 @@ final class BleLeg: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 
     private func pickAndConnect() {
-        guard peripheral == nil else { return }
+        guard !disarmed, peripheral == nil else { return }
         let matches = discovered.filter {
             ($0.name ?? "").uppercased().contains(deviceFilter.uppercased())
         }
@@ -304,6 +360,14 @@ final class BleLeg: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 
     func centralManager(_ c: CBCentralManager, didConnect p: CBPeripheral) {
+        if disarmed {
+            // A connect that raced the disarm (in flight when it landed):
+            // adopting it would hold the band Strava is waiting for.
+            log("connect completed while disarmed; dropping the band")
+            c.cancelPeripheralConnection(p)
+            peripheral = nil
+            return
+        }
         log("connected to \(p.name ?? "unnamed")")
         socket.setDevice(p.name)
         socket.sendJSON(["type": "status", "connected": true, "device": p.name ?? "unnamed"])
@@ -373,7 +437,21 @@ let socket = SocketLeg(config: config)
 socket.connect()
 let ble = BleLeg(socket: socket)
 socket.onCommand = { type in
-    if type == "release" { ble.release() }
+    switch type {
+    case "release": ble.release()
+    case "disarm": ble.disarm()
+    // 'ok' is the hello reply when no yield is active: it doubles as the
+    // ensure-armed backstop for a leg that missed the one-shot rearm
+    // (rearm() is a no-op unless disarmed, so this never disturbs normal runs).
+    case "rearm", "ok": ble.rearm()
+    default: break
+    }
+    // Whatever the daemon said, the verdict is in: the launch gate can lift
+    // (disarm above already vetoed scanning if that was the verdict).
+    ble.verdictArrived("daemon verdict: \(type)")
+}
+DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+    ble.verdictArrived("timeout, daemon unreachable; capture-first")
 }
 log("up (daemon: \(config.url.absoluteString))")
 RunLoop.main.run()

@@ -202,10 +202,20 @@ final class LiveActivityController: ObservableObject {
     /// let a background app re-arm an activity, so keeping it alive is the
     /// only way BPM can reappear when you walk out of the Mac's range.
     func macTookBand() {
+        bandGone(stateLine: "Mac has the band")
+    }
+
+    /// Yield: the band was surrendered to an external app (Strava). Same
+    /// cleanup as a mac takeover, honest copy on the card.
+    func bandYielded() {
+        bandGone(stateLine: "Yielded to another app")
+    }
+
+    private func bandGone(stateLine: String) {
         guard !Demo.active else { return }
         state.bpm = nil
         state.zone = nil
-        state.stateLine = "Mac has the band"
+        state.stateLine = stateLine
         state.restEndsAt = nil
         state.restLabel = nil
         if state.sessionActive {

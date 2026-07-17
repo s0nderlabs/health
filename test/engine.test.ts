@@ -304,6 +304,21 @@ describe('live events through the engine', () => {
     expect(engine.liveEvent('live.rest', 'live.rest:s1', { content: 'r', meta: {} })).toBe(true)
   })
 
+  test('time-critical systemProblem bypasses the 6h class cooldown AND the daily budget', () => {
+    const store = freshStore()
+    // daily_budget 0: any budget-subject event is dropped; bypass must not be.
+    const engine = new Engine(store, () => testConfig({ daily_budget: 0 }))
+    engine.systemProblem('yield breach: mac still holds the band', 'yield-breach:mac:t1', { bypassCooldown: true })
+    // Minutes later (inside the 360-min system.health cooldown) the window
+    // expires; without the bypass this advisory is silently dropped.
+    engine.systemProblem('yield window ended; relayers re-armed', 'yield-expired:t2', { bypassCooldown: true })
+    const classes = store.undeliveredEvents().filter((e) => e.class === 'system.health')
+    expect(classes.length).toBe(2)
+    // The default path keeps the cooldown: a third, non-bypass problem stays muted.
+    engine.systemProblem('chronic: auth broken', 'auth-broken:t3')
+    expect(store.undeliveredEvents().filter((e) => e.class === 'system.health').length).toBe(2)
+  })
+
   test('the confirm passes inside the live.session cooldown; a plain second start does not', () => {
     const store = freshStore()
     const engine = new Engine(store, () => testConfig()) // live.session cooldown: 10 min

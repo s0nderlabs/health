@@ -19,6 +19,30 @@ protocol BleLegDelegate: AnyObject {
     func bleFrame(_ raw: Data)
     func bleStatus(connected: Bool, device: String?)
     func blePhase(_ phase: BleLeg.Phase)
+    /// iOS relaunched us for a BLE event (state restoration). The socket does
+    /// not start on background relaunches by itself; the controller uses this
+    /// to bring it up so the daemon's verdict (disarm during a yield!) can land.
+    func bleDidRestore()
+}
+
+/// Persisted yield verdict, readable before any controller exists (the state-
+/// restoration path runs first and must not re-arm a yielded radio).
+enum YieldState {
+    private static let key = "disarmed_until"
+    static var disarmedUntil: Date? {
+        let t = UserDefaults.standard.double(forKey: key)
+        return t > 0 ? Date(timeIntervalSince1970: t) : nil
+    }
+    static var active: Bool {
+        guard let until = disarmedUntil else { return false }
+        return until > Date()
+    }
+    static func set(untilMs: Double) {
+        UserDefaults.standard.set(untilMs / 1000, forKey: key)
+    }
+    static func clear() {
+        UserDefaults.standard.removeObject(forKey: key)
+    }
 }
 
 final class BleLeg: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
@@ -175,7 +199,21 @@ final class BleLeg: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     /// survived the jetsam; leave it armed.
     func centralManager(_ c: CBCentralManager, willRestoreState dict: [String: Any]) {
         let restored = (dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral]) ?? []
+        defer { delegate?.bleDidRestore() } // socket must come up even in background
         guard let p = restored.first(where: { matchesFilter($0.name) }) else { return }
+        // A yield outranks restoration: if the system relaunched us holding
+        // (or hunting) the band while a persisted disarm is active, that grab
+        // is exactly what the yield exists to prevent: DROP it, stay dark.
+        // (The restored anchor may have already won the race at the OS level:
+        // a suspended pending connect fires on the freed band; canceling here
+        // frees it again within the wake window.)
+        if YieldState.active {
+            rlog("restored \(p.name ?? "unnamed") during an active yield; dropping it (radio stays off)")
+            radioMode = .off
+            c.cancelPeripheralConnection(p)
+            delegate?.blePhase(.off)
+            return
+        }
         rlog("restored \(p.name ?? "unnamed") from system state (\(p.state.rawValue))")
         radioMode = .on
         peripheral = p

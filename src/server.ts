@@ -10,7 +10,7 @@ import { Store } from './store.js'
 import { DB_PATH } from './config.js'
 import { existsSync } from 'fs'
 
-const VERSION = '0.7.0'
+const VERSION = '0.8.0'
 
 const INSTRUCTIONS = `
 health: WHOOP recovery, sleep, and strain as a live channel. The daemon on this
@@ -110,6 +110,23 @@ device. dual:true means both the mac and the phone hold the band: the mac
 writes, the phone is a hot standby that takes over with zero gap; this is
 normal and healthy at home, not a conflict.
 
+YIELD (health__live action:yield): the relayers hold the band's broadcast
+exclusively, so external apps (Strava sensor pairing) can never see it. When
+the user says they want to record in Strava / pair the band elsewhere / "give
+Strava the sensor", call health__live {action:'yield', minutes:N} with N
+comfortably LONGER than the planned activity (default 240), or minutes:0 for
+an INDEFINITE yield (no expiry; only an explicit reclaim ends it; the daemon
+nags daily while it stays active). Use 0 when the user wants certainty that
+nothing can interrupt the external app. Relay the response's warnings
+verbatim: they are load-bearing (an unreachable phone relayer can silently
+defeat the yield). While yielded: live.* events are dark
+by design (not a fault); WHOOP's own recording and scoring are unaffected.
+The yield ends by expiry or health__live {action:'reclaim'}; reclaim is
+always safe (a held band cannot be stolen; the relayers just re-arm and wait
+for the band to free). status.live.yield shows the window; yield.breach_source
+non-null means a relayer missed its disarm and is still holding the band: the
+user must open or force-quit the phone app (or restart the mac relay).
+
 Tools: health__read (today + plan_today), health__trend (multi-day),
 health__workout_intent (user says they are starting a workout NOW; WHOOP
 cannot detect starts), health__live (live BPM/zone/HRV while the band
@@ -189,8 +206,22 @@ export function createServer(ipc: IpcClient) {
       {
         name: 'health__live',
         description:
-          'Live heart-rate feed snapshot (BLE relayer streaming the band\'s Broadcast HR): current BPM, zone, 5-min HRV (rMSSD), auto-detected session state, feed health. Only meaningful while the band is broadcasting.',
-        inputSchema: { type: 'object' as const, properties: {}, required: [] },
+          'Live heart-rate feed: snapshot (default) returns current BPM, zone, 5-min HRV (rMSSD), session state, feed health. action "yield" surrenders the band so an external app (Strava sensor pairing) can take the broadcast; action "reclaim" ends a yield early and re-arms the relayers.',
+        inputSchema: {
+          type: 'object' as const,
+          properties: {
+            action: {
+              type: 'string',
+              enum: ['snapshot', 'yield', 'reclaim'],
+              description: 'Default snapshot. yield = disarm the relayers so Strava can pair the band (live coaching goes dark). reclaim = end the yield now.',
+            },
+            minutes: {
+              type: 'number',
+              description: 'Yield window in minutes (default 240, clamp 5-720). Pick LONGER than the planned activity: expiry mid-ride re-arms the relayers. 0 = INDEFINITE: no expiry, only an explicit reclaim ends it (the ironclad mode; a daily reminder fires while active).',
+            },
+          },
+          required: [],
+        },
       },
     ],
   }))
@@ -226,8 +257,15 @@ export function createServer(ipc: IpcClient) {
             JSON.stringify({ ...status, this_session_receives_events: ipc.eventsEnabled }, null, 2),
           )
         }
-        case 'health__live':
+        case 'health__live': {
+          if (args.action === 'yield') {
+            return toolResult(JSON.stringify(await ipc.rpc('live_yield', { minutes: args.minutes }), null, 2))
+          }
+          if (args.action === 'reclaim') {
+            return toolResult(JSON.stringify(await ipc.rpc('live_reclaim', {}), null, 2))
+          }
           return toolResult(JSON.stringify(await ipc.rpc('live'), null, 2))
+        }
         default:
           return toolError(`Unknown tool: ${req.params.name}`)
       }

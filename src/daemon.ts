@@ -16,7 +16,7 @@ import { backfill, pollOnce, type Fact } from './poller.js'
 import { startWebhookReceiver } from './webhook.js'
 import { isWakeSignal, wakeReleaseActive } from './wake.js'
 import { LiveState } from './livestate.js'
-import { LiveListener } from './live.js'
+import { LiveListener, parseYieldMinutes } from './live.js'
 
 function log(msg: string): void {
   process.stderr.write(`healthd: ${new Date().toISOString()} ${msg}\n`)
@@ -165,7 +165,64 @@ const liveListener = new LiveListener(liveState, () => config().live.token, {
   },
   getPlanPath: () => resolvePlanPath(config()),
   onPhoneSeen: (atIso) => store.setMeta('phone_relayer_last_seen', atIso),
+  // Yield survives daemon restarts: the window is persisted and re-applied at
+  // boot (below), so a kickstart mid-ride cannot silently re-arm the legs and
+  // steal the band back from Strava.
+  onYieldChange: (untilIso, reason, sinceIso) => {
+    store.setMeta('live_yield_until', untilIso ?? '')
+    store.setMeta('live_yield_since', untilIso ? (sinceIso ?? new Date().toISOString()) : '')
+    if (reason === 'expired') {
+      // bypassCooldown: this advisory is time-critical and must not be
+      // swallowed by the 6h class-wide system.health cooldown (a breach
+      // warning earlier in the same ride would otherwise mute it).
+      engine.systemProblem(
+        'Live HR: the yield window ended and the relayers re-armed; they will reclaim the band when the external app releases it. If a Strava recording is still running, re-yield now (a BLE blip could hand the sensor back to the relayers mid-ride).',
+        `yield-expired:${new Date().toISOString()}`,
+        { bypassCooldown: true },
+      )
+    }
+  },
+  onYieldBreach: (source) => {
+    engine.systemProblem(
+      `Live HR: yield breach: the ${source} relayer is still holding the band while yielded (it likely missed the disarm push). Strava cannot see a held band. ${source === 'mac' ? 'Restart the mac relay: launchctl kickstart -k gui/$UID/com.s0nderlabs.health.relay' : 'Open the HealthRelay app once (it will yield), or force-quit it.'}`,
+      `yield-breach:${source}:${new Date().toISOString()}`,
+      { bypassCooldown: true },
+    )
+  },
+  onYieldReminder: (sinceIso) => {
+    // Indefinite yields never auto-reclaim (by design: nothing on our side
+    // may ever interrupt the external app). This daily nag is the only
+    // guard against a forgotten toggle silently costing live coverage.
+    engine.systemProblem(
+      `Live HR: the band is still yielded to an external app (since ${sinceIso}, no expiry). Live coaching stays dark until you reclaim: /health reclaim or the app's antenna toggle.`,
+      `yield-reminder:${new Date().toISOString().slice(0, 10)}`,
+      { bypassCooldown: true },
+    )
+  },
 })
+
+// Re-apply a persisted yield window (daemon restarted mid-yield). Legs are
+// not connected yet; each gets its disarm from the hello-during-yield path.
+{
+  const persisted = store.getMeta('live_yield_until')
+  const untilMs = persisted ? Date.parse(persisted) : NaN
+  const sinceMeta = store.getMeta('live_yield_since')
+  const sinceMs = sinceMeta ? Date.parse(sinceMeta) : NaN
+  if (Number.isFinite(untilMs) && untilMs > Date.now()) {
+    liveListener.restoreYield(untilMs, Number.isFinite(sinceMs) ? sinceMs : undefined)
+  } else if (persisted) {
+    // The window expired while the daemon was down: the advisory the live
+    // expiry path guarantees must still fire (this is exactly the case where
+    // the user was not told). Legs self-heal on their next hello/app-open.
+    store.setMeta('live_yield_until', '')
+    store.setMeta('live_yield_since', '')
+    engine.systemProblem(
+      'Live HR: a yield window expired while the daemon was down; relayers re-arm on their next contact (the mac at its next hello, the phone when its app is next opened). If a recording is still running, re-yield now.',
+      `yield-expired:${new Date().toISOString()}`,
+      { bypassCooldown: true },
+    )
+  }
+}
 
 // Events only flow once the initial backfill has completed. Until then the
 // archive is still filling: if a partial backfill left tables sparse, a poll
@@ -253,7 +310,10 @@ function deliverPending(): void {
   for (const e of store.undeliveredEvents()) {
     // live.* events prove the user is awake and active RIGHT NOW; holding
     // them would deliver a stale burst at the quiet-hours boundary instead.
-    if (quiet && e.priority !== 'alert' && !e.class.startsWith('live.')) continue // holds until quiet hours end
+    // Yield advisories are time-critical (a re-armed relayer can take the
+    // band mid-recording); they ride through quiet hours like live.* does.
+    const yieldAdvisory = e.dedupe_key.startsWith('system.health:yield-')
+    if (quiet && e.priority !== 'alert' && !e.class.startsWith('live.') && !yieldAdvisory) continue // holds until quiet hours end
     const pushedTo = ipc.pushEvent(e, inFlight.exclusions(e.id))
     inFlight.pushed(e.id, pushedTo) // delivered_at is stamped on ack
   }
@@ -324,6 +384,60 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
         ...liveState.snapshot(Date.now()),
         ...liveListener.status(),
         sessions_24h: store.recentLiveSessions(1), // rolling window, not calendar-today
+      }
+    }
+    case 'live_yield': {
+      // Surrender the band to an external receiver (Strava). Live coaching is
+      // dark for the window; WHOOP's own recording/scoring is unaffected.
+      // minutes 0 = INDEFINITE (until an explicit reclaim): the strongest
+      // guarantee that nothing on our side can interrupt the external app.
+      const minutes = parseYieldMinutes(params.minutes, 240)
+      const res = liveListener.yieldBand(minutes * 60_000)
+      // yieldBand already enumerated every connected leg; no status() rebuild.
+      const phoneConnected = [...res.disarmed, ...res.capless].some(
+        (source) => source !== 'mac' && source !== 'unknown',
+      )
+      const lastSeen = store.getMeta('phone_relayer_last_seen')
+      const phoneRecent =
+        !!lastSeen && Date.now() - Date.parse(lastSeen) < 7 * 86_400_000
+      const warnings: string[] = []
+      if (!phoneConnected && phoneRecent) {
+        // The one leg we cannot reach is the one that can silently defeat the
+        // yield: a suspended phone's pending connect survives suspension and
+        // will grab the freed band at the OS level. Only the user can fix it.
+        warnings.push(
+          'The phone relayer is not connected right now, but was seen recently: its parked BLE anchor may grab the freed band before Strava can. Open the HealthRelay app once (it will receive the disarm and show "Yielded"), or force-quit it, BEFORE pairing the sensor.',
+        )
+      }
+      if (res.capless.length > 0) {
+        warnings.push(
+          `These relayers predate the disarm protocol and were NOT disarmed: ${res.capless.join(', ')}. Update/restart them or they will keep the band.`,
+        )
+      }
+      return {
+        ...(minutes === 0
+          ? { yielded: 'indefinitely (until an explicit reclaim; a daily reminder fires while active)' }
+          : { yielded_until: res.until, minutes }),
+        legs_disarmed: res.disarmed,
+        legs_without_disarm_cap: res.capless,
+        ...(warnings.length ? { warnings } : {}),
+        note:
+          minutes === 0
+            ? 'Live coaching (live.session/zone/rest) is dark until reclaimed. NOTHING time-based can re-arm the relayers; only live action:reclaim (or the app toggle) ends this.'
+            : 'Live coaching (live.session/zone/rest) is dark while yielded. Reclaim early with live action:reclaim; otherwise the window expires on its own. Pick a window longer than the planned activity: expiry mid-ride re-arms the relayers, and a Strava BLE blip could then hand them the band. For an ironclad hold, use minutes 0 (indefinite).',
+      }
+    }
+    case 'live_reclaim': {
+      const wasActive = liveListener.yielded()
+      const phoneConnected = liveListener
+        .status()
+        .relayers.some((r) => r.source !== 'mac' && r.source !== 'unknown')
+      liveListener.reclaim('manual')
+      return {
+        reclaimed: wasActive,
+        note: wasActive
+          ? `Relayers re-armed; they will reclaim the band as soon as the external app releases it (a held band cannot be stolen).${phoneConnected ? '' : ' The phone relayer is not connected: it stays dark until the HealthRelay app is next opened (open it once after the activity).'}`
+          : 'No yield was active.',
       }
     }
     case 'config_get':

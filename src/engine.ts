@@ -67,7 +67,14 @@ export class Engine {
       // per-day). Only automated info/notable events are subject to the daily
       // budget. Count events CREATED today (queued or delivered), so a night
       // of offline/quiet-hours queueing cannot flush past the budget in one burst.
-      const budgetExempt = priority === 'alert' || cls === 'workout.intent' || cls.startsWith('live.')
+      // bypassCooldown marks self-throttled or time-critical emitters; the
+      // daily budget must not swallow those either (a yield-expired advisory
+      // dropped on a busy day = the band stolen mid-ride with zero notice).
+      const budgetExempt =
+        priority === 'alert' ||
+        cls === 'workout.intent' ||
+        cls.startsWith('live.') ||
+        opts?.bypassCooldown === true
       if (!budgetExempt && this.store.createdToday() >= config.daily_budget) {
         this.log(`budget reached, dropping ${cls} (${dedupeKey})`)
         return false
@@ -281,8 +288,11 @@ export class Engine {
       fmt.bedtimeNudge(debt, sleep.performance_pct as number | null))
   }
 
-  systemProblem(problem: string, dedupeKey: string): void {
-    this.emit('system.health', 'notable', `system.health:${dedupeKey}`, fmt.systemHealth(problem))
+  systemProblem(problem: string, dedupeKey: string, opts?: { bypassCooldown?: boolean }): void {
+    // The class cooldown (6h) is right for chronic conditions (auth broken,
+    // bind failure) but wrong for time-critical one-shots: a yield breach at
+    // ride start must not swallow the yield-expired advisory hours later.
+    this.emit('system.health', 'notable', `system.health:${dedupeKey}`, fmt.systemHealth(problem), opts)
   }
 
   /** Entry point for the live HR state machine (pre-throttled per-session). */

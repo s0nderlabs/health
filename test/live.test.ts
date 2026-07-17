@@ -795,3 +795,282 @@ describe('phone surfaces (steps, intent, plan, watchdog)', () => {
     mac.ws.close()
   })
 })
+
+// ── Yield (band surrendered to an external receiver) ───────────────
+
+describe('yield', () => {
+  const YIELD_MS = 60_000 // comfortably beyond test duration; expiry tested separately
+
+  test('yield disarms every connected leg, reports caps, persists, and shows in status', async () => {
+    const persisted: Array<{ until: string | null; reason?: string }> = []
+    const { listener, port } = makeArbListener({
+      onYieldChange: (until, reason) => persisted.push({ until, reason }),
+    })
+    cleanup.push(() => listener.stop())
+    const mac = await relayer(port, 'mac', undefined, { caps: ['release', 'disarm'] })
+    const phone = await relayer(port, 'phone', 'wifi', { caps: ['release', 'battery'] })
+    const res = listener.yieldBand(YIELD_MS)
+    await waitFor(() => has(mac.msgs, 'disarm') && has(phone.msgs, 'disarm'))
+    // The disarm carries the window end so the phone can persist it.
+    const disarm = parsed(mac.msgs).find((m) => m.type === 'disarm') as { until?: number }
+    expect(typeof disarm.until).toBe('number')
+    expect(res.disarmed).toEqual(['mac'])
+    expect(res.capless).toEqual(['phone']) // old build: told anyway, reported as non-compliant
+    expect(persisted.length).toBe(1)
+    expect(persisted[0].until).toBe(res.until)
+    const y = listener.status().yield
+    expect(y.active).toBe(true)
+    expect(y.until).toBe(res.until)
+    mac.ws.close()
+    phone.ws.close()
+  })
+
+  test('hello during yield is answered with disarm, not ok/standdown', async () => {
+    const { listener, port } = makeArbListener()
+    cleanup.push(() => listener.stop())
+    listener.yieldBand(YIELD_MS)
+    const mac = await relayer(port, 'mac')
+    const phone = await relayer(port, 'phone', 'wifi')
+    expect(JSON.parse(mac.helloReply).type).toBe('disarm')
+    expect(JSON.parse(phone.helloReply).type).toBe('disarm')
+    mac.ws.close()
+    phone.ws.close()
+  })
+
+  test('arbitration is fully silent while yielded (no standdown/resume/release/pause)', async () => {
+    const { listener, port } = makeArbListener()
+    cleanup.push(() => listener.stop())
+    // A dual-eligible pair mid-stream: without yield this topology standdowns
+    // the idle phone and (once cooldown passes) fires dual-up releases.
+    const mac = await relayer(port, 'mac', undefined, { caps: ['release', 'disarm'] })
+    const phone = await relayer(port, 'phone', 'wifi', DUAL_CAPS)
+    listener.yieldBand(YIELD_MS)
+    await waitFor(() => has(phone.msgs, 'disarm'))
+    const t0 = Date.now() - 30_000
+    // The mac keeps streaming (it "missed" the disarm): feeds freshness, which
+    // would drive standdown pushes at the phone were arbitration alive.
+    for (let i = 0; i < 3; i++) mac.ws.send(hrFrame(t0 + i * 1000, 80))
+    await Bun.sleep(FAST.arbTickMs * 8)
+    const arbTypes = ['standdown', 'resume', 'release', 'pause']
+    expect(parsed(phone.msgs).filter((m) => arbTypes.includes(m.type))).toEqual([])
+    expect(parsed(mac.msgs).filter((m) => arbTypes.includes(m.type))).toEqual([])
+    mac.ws.close()
+    phone.ws.close()
+  })
+
+  test('frames during yield NEVER reach LiveState (live.* stays dark), re-push throttled, breach once', async () => {
+    const breaches: string[] = []
+    const { listener, state, events, port } = makeArbListener({
+      timing: { ...FAST, yieldRepushMs: 100 },
+      onYieldBreach: (source) => breaches.push(source),
+    })
+    cleanup.push(() => listener.stop())
+    const mac = await relayer(port, 'mac', undefined, { caps: ['release', 'disarm'] })
+    listener.yieldBand(YIELD_MS)
+    await waitFor(() => has(mac.msgs, 'disarm'))
+    const before = parsed(mac.msgs).filter((m) => m.type === 'disarm').length
+    const t0 = Date.now() - 60_000
+    // A leg that missed the disarm keeps streaming across 3 throttle windows,
+    // HOT (would open a session and emit live.* were the yield gate absent).
+    for (let i = 0; i < 30; i++) {
+      mac.ws.send(hrFrame(t0 + i * 1000, 150 + (i % 3)))
+      if (i % 10 === 9) await Bun.sleep(120)
+    }
+    await Bun.sleep(150)
+    const after = parsed(mac.msgs).filter((m) => m.type === 'disarm').length
+    expect(after).toBeGreaterThan(before) // re-pushed
+    expect(after - before).toBeLessThan(30) // but throttled, not per-frame
+    expect(breaches).toEqual(['mac']) // exactly once per yield
+    // The yield contract: live coaching is DARK. No sample may enter the live
+    // math and no live.* event may emit while the band is surrendered.
+    expect(state.snapshot(t0 + 30_000).samples_buffered).toBe(0)
+    expect(events).toEqual([])
+    // But the breach stays visible: status tells the truth about the holdout.
+    expect(listener.status().yield.breach_source).toBe('mac')
+    expect(listener.status().band_connected).toBe(true)
+    mac.ws.close()
+  })
+
+  test('expiry reclaims: rearm pushed, state cleared, persistence told the reason', async () => {
+    const persisted: Array<{ until: string | null; reason?: string }> = []
+    const { listener, port } = makeArbListener({
+      onYieldChange: (until, reason) => persisted.push({ until, reason }),
+    })
+    cleanup.push(() => listener.stop())
+    const mac = await relayer(port, 'mac', undefined, { caps: ['release', 'disarm'] })
+    listener.yieldBand(150) // expires almost immediately
+    await waitFor(() => has(mac.msgs, 'disarm'))
+    await waitFor(() => has(mac.msgs, 'rearm')) // the arb tick reclaims on expiry
+    expect(listener.status().yield.active).toBe(false)
+    expect(persisted.map((p) => p.reason)).toEqual([undefined, 'expired'])
+    expect(persisted[1].until).toBeNull()
+    mac.ws.close()
+  })
+
+  test('manual reclaim rearms; reclaiming with no yield active is a no-op', async () => {
+    const persisted: Array<{ until: string | null; reason?: string }> = []
+    const { listener, port } = makeArbListener({
+      onYieldChange: (until, reason) => persisted.push({ until, reason }),
+    })
+    cleanup.push(() => listener.stop())
+    const mac = await relayer(port, 'mac', undefined, { caps: ['release', 'disarm'] })
+    listener.reclaim('manual') // nothing yielded: must not push or persist
+    await Bun.sleep(50)
+    expect(has(mac.msgs, 'rearm')).toBe(false)
+    expect(persisted.length).toBe(0)
+    listener.yieldBand(YIELD_MS)
+    listener.reclaim('manual')
+    await waitFor(() => has(mac.msgs, 'rearm'))
+    expect(listener.status().yield.active).toBe(false)
+    expect(persisted.map((p) => p.reason)).toEqual([undefined, 'manual'])
+    mac.ws.close()
+  })
+
+  test('arbitration resumes after reclaim (standdown flows again)', async () => {
+    const { listener, port } = makeArbListener()
+    cleanup.push(() => listener.stop())
+    const mac = await relayer(port, 'mac', undefined, { caps: ['release', 'disarm'] })
+    const phone = await relayer(port, 'phone', 'wifi')
+    listener.yieldBand(YIELD_MS)
+    await waitFor(() => has(phone.msgs, 'disarm'))
+    listener.reclaim('manual')
+    await waitFor(() => has(phone.msgs, 'rearm'))
+    // Mac streams again: the idle phone must get a standdown like normal.
+    const t0 = Date.now() - 30_000
+    const feed = setInterval(() => mac.ws.send(hrFrame(t0, 80)), 30)
+    cleanup.push(() => clearInterval(feed))
+    await waitFor(() => has(phone.msgs, 'standdown'))
+    mac.ws.close()
+    phone.ws.close()
+  })
+
+  test('restoreYield re-applies a persisted window without pushes; hellos then disarm', async () => {
+    const persisted: Array<{ until: string | null }> = []
+    const { listener, port } = makeArbListener({
+      onYieldChange: (until) => persisted.push({ until }),
+    })
+    cleanup.push(() => listener.stop())
+    listener.restoreYield(Date.now() + YIELD_MS)
+    expect(persisted.length).toBe(0) // already persisted; no rewrite
+    expect(listener.status().yield.active).toBe(true)
+    const mac = await relayer(port, 'mac')
+    expect(JSON.parse(mac.helloReply).type).toBe('disarm')
+    mac.ws.close()
+  })
+
+  test('an expired restoreYield is ignored', async () => {
+    const { listener, port } = makeArbListener()
+    cleanup.push(() => listener.stop())
+    listener.restoreYield(Date.now() - 1000)
+    expect(listener.status().yield.active).toBe(false)
+    const mac = await relayer(port, 'mac')
+    expect(JSON.parse(mac.helloReply).type).toBe('ok')
+    mac.ws.close()
+  })
+
+  test('a phone yield_request runs the same yield: disarms all legs, acks, clamps minutes', async () => {
+    const persisted: Array<{ until: string | null }> = []
+    const { listener, port } = makeArbListener({ onYieldChange: (until) => persisted.push({ until }) })
+    cleanup.push(() => listener.stop())
+    const mac = await relayer(port, 'mac', undefined, { caps: ['release', 'disarm'] })
+    const phone = await relayer(port, 'phone', 'wifi', { caps: ['release', 'battery', 'disarm'] })
+    phone.ws.send(JSON.stringify({ type: 'yield_request', minutes: 999999 }))
+    await waitFor(() => has(phone.msgs, 'yield_ack'))
+    await waitFor(() => has(mac.msgs, 'disarm') && has(phone.msgs, 'disarm'))
+    const ack = parsed(phone.msgs).find((m) => m.type === 'yield_ack') as { until?: number }
+    // Clamped to the 720-minute ceiling, not the requested 999999.
+    expect(ack.until! - Date.now()).toBeLessThanOrEqual(720 * 60_000 + 5_000)
+    expect(listener.status().yield.active).toBe(true)
+    expect(persisted.length).toBe(1)
+    phone.ws.send(JSON.stringify({ type: 'reclaim_request' }))
+    await waitFor(() => has(phone.msgs, 'reclaim_ack'))
+    await waitFor(() => has(mac.msgs, 'rearm'))
+    expect(listener.status().yield.active).toBe(false)
+    mac.ws.close()
+    phone.ws.close()
+  })
+
+  test('indefinite yield (0 ms) never expires; a daily-cadence reminder nags instead', async () => {
+    const reminders: string[] = []
+    const persisted: Array<{ until: string | null; reason?: string }> = []
+    const { listener, port } = makeArbListener({
+      timing: { ...FAST, yieldReminderMs: 150 },
+      onYieldReminder: (since) => reminders.push(since),
+      onYieldChange: (until, reason) => persisted.push({ until, reason }),
+    })
+    cleanup.push(() => listener.stop())
+    const mac = await relayer(port, 'mac', undefined, { caps: ['release', 'disarm'] })
+    listener.yieldBand(0) // 0 = indefinite
+    await waitFor(() => has(mac.msgs, 'disarm'))
+    expect(listener.status().yield.indefinite).toBe(true)
+    expect(listener.status().yield.until).toBeNull()
+    // Far past any timed window at test scale: still yielded, never rearmed,
+    // but the reminder fired (and keeps its cadence, not per-tick spam).
+    await Bun.sleep(500)
+    expect(listener.status().yield.active).toBe(true)
+    expect(has(mac.msgs, 'rearm')).toBe(false)
+    expect(persisted.filter((p) => p.reason === 'expired')).toEqual([])
+    expect(reminders.length).toBeGreaterThanOrEqual(1)
+    expect(reminders.length).toBeLessThanOrEqual(4)
+    // Only the explicit reclaim ends it.
+    listener.reclaim('manual')
+    await waitFor(() => has(mac.msgs, 'rearm'))
+    expect(listener.status().yield.active).toBe(false)
+    mac.ws.close()
+  })
+
+  test('a phone yield_request with no minutes is indefinite (the app toggle contract)', async () => {
+    const { listener, port } = makeArbListener()
+    cleanup.push(() => listener.stop())
+    const phone = await relayer(port, 'phone', 'wifi', { caps: ['release', 'battery', 'disarm'] })
+    phone.ws.send(JSON.stringify({ type: 'yield_request' }))
+    await waitFor(() => has(phone.msgs, 'yield_ack'))
+    expect(listener.status().yield.indefinite).toBe(true)
+    phone.ws.close()
+  })
+
+  test('an indefinite yield survives persistence round-trip as indefinite', async () => {
+    let saved: string | null = null
+    const a = makeArbListener({ onYieldChange: (until) => { saved = until } })
+    cleanup.push(() => a.listener.stop())
+    a.listener.yieldBand(0)
+    expect(saved).not.toBeNull()
+    // A "restarted daemon" restoring the persisted ISO must land back in
+    // indefinite mode, not a finite far-future window.
+    const b = makeArbListener()
+    cleanup.push(() => b.listener.stop())
+    b.listener.restoreYield(Date.parse(saved as unknown as string))
+    expect(b.listener.status().yield.active).toBe(true)
+    expect(b.listener.status().yield.indefinite).toBe(true)
+  })
+})
+
+describe('yield parsing and session close', () => {
+  test('parseYieldMinutes: 0 is INDEFINITE, never eaten by a falsy fallback', async () => {
+    const { parseYieldMinutes } = await import('../src/live.js')
+    expect(parseYieldMinutes(0, 240)).toBe(0) // THE xhigh-review bug, pinned
+    expect(parseYieldMinutes(-5, 240)).toBe(0)
+    expect(parseYieldMinutes(undefined, 240)).toBe(240)
+    expect(parseYieldMinutes(null, 0)).toBe(0)
+    expect(parseYieldMinutes('junk', 240)).toBe(240)
+    expect(parseYieldMinutes(999999, 240)).toBe(720)
+    expect(parseYieldMinutes(2, 240)).toBe(5)
+  })
+
+  test('a session open at yield time closes immediately with the yield reason, not feed_drop later', async () => {
+    const { listener, state, events, port } = makeArbListener()
+    cleanup.push(() => listener.stop())
+    const mac = await relayer(port, 'mac', undefined, { caps: ['release', 'disarm'] })
+    // Drive a hot session (mirrors the e2e synthetic workout ramp).
+    const t0 = Date.now() - 30 * 60_000
+    let t = t0
+    for (let i = 0; i < 120; i++) mac.ws.send(hrFrame((t += 1000), 80 + i))
+    for (let i = 0; i < 300; i++) mac.ws.send(hrFrame((t += 1000), 165))
+    await waitFor(() => state.sessionActive())
+    listener.yieldBand(60_000, t + 1000)
+    expect(state.sessionActive()).toBe(false) // closed NOW, not 12 min later
+    const rest = events.find((e) => e.cls === 'live.rest')
+    expect(rest).toBeDefined()
+    mac.ws.close()
+  })
+})

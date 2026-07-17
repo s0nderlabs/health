@@ -29,6 +29,10 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
         case active
         case standdown
         case paused
+        /// Yield: the band is surrendered to an external app (Strava). Radio
+        /// fully off, nothing armed, and CRUCIALLY no capture-first fallback:
+        /// a dead socket must not re-grab the band mid-recording.
+        case disarmed
     }
 
     @Published var socketConnected = false
@@ -84,6 +88,15 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
     func start() {
         guard Settings.shared.configured else { return }
         socket.start()
+        // A persisted yield outranks capture-first: coming up armed here
+        // would grab the band Strava is recording from. The hello reply
+        // corrects either way (disarm refreshes it; ok/standdown clears it).
+        if YieldState.active {
+            rlog("start: persisted yield active; staying disarmed until the daemon says otherwise")
+            applyMode(.disarmed)
+            return
+        }
+        YieldState.clear() // an expired window must not linger
         // Capture-first: BLE comes up before the daemon's verdict arrives, so
         // a dead tailnet link never costs frames (the socket buffer holds ~10
         // minutes). If the mac owns the band, hello answers standdown and the
@@ -100,13 +113,49 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
     }
 
     /// Foreground nudge (scenePhase active): give a long-stale pending
-    /// connect a chance to trade itself for a fresh scan.
+    /// connect a chance to trade itself for a fresh scan. Also the reliable
+    /// wake for a suspended-through-expiry yield: the daemon's rearm push
+    /// lands on a dead socket, so the expiry check must live here.
     func kick() {
+        if mode == .disarmed && !YieldState.active {
+            rlog("yield window expired while suspended; resuming capture")
+            YieldState.clear()
+            applyMode(.active)
+            return
+        }
         ble.kick()
     }
 
     func sendIntent(_ activity: String) {
         socket.sendJSON(["type": "intent", "activity": activity])
+    }
+
+    /// One-tap yield toggle (the "give the band to Strava" button). A
+    /// physical switch: minutes 0 = INDEFINITE, on until tapped off, so no
+    /// timer can ever re-arm us mid-recording. The daemon's disarm/rearm
+    /// pushes drive the actual state change; the ack is tap feedback only.
+    func requestYield(minutes: Int = 0) {
+        socket.sendJSON(["type": "yield_request", "minutes": minutes])
+    }
+
+    func requestReclaim() {
+        socket.sendJSON(["type": "reclaim_request"])
+    }
+
+    /// The reclaim tap, socket-aware: with the daemon reachable it asks (the
+    /// rearm push flips state); without it, reclaim LOCALLY so a yielded
+    /// phone away from the tailnet is never stranded dark. If the daemon is
+    /// still yielded when the socket returns, its hello verdict re-disarms:
+    /// the daemon stays the source of truth.
+    func reclaimTapped() {
+        if socketConnected {
+            requestReclaim()
+        } else {
+            rlog("reclaim tapped with no daemon; reclaiming locally")
+            YieldState.clear()
+            applyMode(.active)
+            lastAck = "reclaimed locally (daemon unreachable)"
+        }
     }
 
     func sendSteps(_ samples: [[String: Any]], deleted: [String] = []) {
@@ -115,13 +164,22 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
     }
 
     private func applyMode(_ newMode: ServerMode) {
-        if mode == .paused && newMode != .paused { endPauseTask() }
-        mode = newMode
+        // The one radio chokepoint enforces the yield invariant: NOTHING may
+        // arm while a persisted yield is active (a stale pauseSafety timer, a
+        // future code path). Callers that intend to arm must clear YieldState
+        // first (rearm/ok/local reclaim all do).
+        var applied = newMode
+        if newMode == .active && YieldState.active {
+            rlog("applyMode(.active) vetoed by active yield; staying disarmed")
+            applied = .disarmed
+        }
+        if mode == .paused && applied != .paused { endPauseTask() }
+        mode = applied
         guard Settings.shared.configured else {
             ble.apply(.off)
             return
         }
-        switch newMode {
+        switch applied {
         case .active:
             ble.apply(.on)
         case .standdown:
@@ -135,6 +193,11 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
             // Truly silent: the probe window is the mac's exclusive shot at
             // the band, so no pending connect either (it would win the race
             // instantly, since the freed band is right on our wrist).
+            ble.apply(.off)
+        case .disarmed:
+            // Yield: same radio-off primitive as pause, but with no
+            // self-resume of any kind; only a daemon verdict or the persisted
+            // window expiring brings capture back.
             ble.apply(.off)
         }
     }
@@ -180,6 +243,21 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
     func socketDidDisconnect(reason: String) {
         guard !Demo.active else { return }
         socketConnected = false
+        // A disarmed leg MUST NOT capture-first: the socket dying is the
+        // expected next event after a disarm (radio off -> iOS suspends us),
+        // and resuming here would grab the band right out of Strava's hands.
+        // The persisted window is the authority; it expiring restores
+        // capture-first on the next wake.
+        if mode == .disarmed {
+            if YieldState.active {
+                rlog("socket lost while disarmed (yield active); staying dark")
+                return
+            }
+            rlog("socket lost while disarmed but the yield window has expired; resuming capture")
+            YieldState.clear()
+            applyMode(.active)
+            return
+        }
         // No daemon means no arbitration: if we were parked in standdown or
         // paused, the verdict source is gone. Capture-first applies again.
         if mode != .active {
@@ -193,9 +271,13 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
         guard !Demo.active else { return }
         switch type {
         case "ok":
+            // Also the rearm backstop: a hello answered 'ok' means no yield
+            // is active, so any persisted disarm is stale.
+            YieldState.clear()
             applyMode(.active)
         case "standdown":
             pauseSafety?.cancel()
+            YieldState.clear() // daemon verdicts outrank a stale yield
             rlog("daemon: standdown (mac owns the band)")
             applyMode(.standdown)
             role = nil
@@ -205,7 +287,25 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
             SessionProgress.shared.endSession()
         case "resume":
             pauseSafety?.cancel()
+            YieldState.clear()
             rlog("daemon: resume")
+            applyMode(.active)
+        case "disarm":
+            // Yield: the user gave the band to an external app. Persist the
+            // window FIRST: if iOS suspends/relaunches us mid-yield, the
+            // restoration path and start() must both see it.
+            pauseSafety?.cancel()
+            if let until = payload["until"] as? Double { YieldState.set(untilMs: until) }
+            rlog("daemon: disarm (yield): band surrendered")
+            applyMode(.disarmed)
+            role = nil
+            LiveActivityController.shared.standby = false
+            LiveActivityController.shared.bandYielded()
+            SessionProgress.shared.endSession()
+        case "rearm":
+            pauseSafety?.cancel()
+            YieldState.clear()
+            rlog("daemon: rearm (yield over)")
             applyMode(.active)
         case "release":
             // Dual-up race: let the band go; the anchor re-arms on disconnect
@@ -247,12 +347,26 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
         case "intent_ack":
             let activity = (payload["activity"] as? String) ?? ""
             lastAck = "intent logged: \(activity)"
+        case "yield_ack":
+            lastAck = "band yielded until you reclaim: pair it in Strava now"
+        case "reclaim_ack":
+            lastAck = "reclaimed: hunting the band"
         default:
             break
         }
     }
 
     // ── BleLegDelegate ───────────────────────────────────────────────
+
+    /// iOS relaunched us for a BLE event (state restoration): boot() never
+    /// runs on a background relaunch, so bring the socket up here. During a
+    /// yield this is load-bearing: the hello reaches the daemon inside the
+    /// wake window and its disarm verdict keeps the radio dark.
+    func bleDidRestore() {
+        guard !Demo.active, Settings.shared.configured else { return }
+        if YieldState.active && mode != .disarmed { applyMode(.disarmed) }
+        socket.start()
+    }
 
     func bleFrame(_ raw: Data) {
         // A frame while parked means the standdown anchor fired: the band
