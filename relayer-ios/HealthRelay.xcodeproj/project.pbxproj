@@ -26,10 +26,12 @@
 		922ADEDC379D9A3D28B03DFE /* BleLeg.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33A0B5A8C357C1E29CC3B4DD /* BleLeg.swift */; };
 		A239F28AA97AD2844BF82AFA /* Settings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48C4EF4AB3A7E881A50E208A /* Settings.swift */; };
 		ABC8D64C5466F7F9F993AF41 /* LiveActivityController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54A8187D9DBB0F6A24ECF7FE /* LiveActivityController.swift */; };
+		AE5A906D6DC070E3693F3897 /* RestChime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D4B7FD975836D714362DE5D /* RestChime.swift */; };
 		BB140371ECD3394B5878D0A9 /* StepsCourier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30521B200C323A43A1C00934 /* StepsCourier.swift */; };
 		C1FDDA7C59C5AB9579A1DB2C /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F51C6B23C65BB01F03022C0C /* SettingsView.swift */; };
 		D2B5E64BDA2FFD33874065A6 /* SessionProgress.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6B8F07C72771C974D660880 /* SessionProgress.swift */; };
 		EC55FAC5F3C4618E5EC020A2 /* HrLocal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71E9733BB5C2DA0304E3FBCC /* HrLocal.swift */; };
+		F27C508363549FE119B36889 /* rest-over.wav in Resources */ = {isa = PBXBuildFile; fileRef = 28FCAD86548854074CB1351F /* rest-over.wav */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -59,7 +61,9 @@
 /* Begin PBXFileReference section */
 		0A24BCDD8CFA18FB513E0089 /* SocketLeg.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SocketLeg.swift; sourceTree = "<group>"; };
 		1684D662AA5DEA9BC7223309 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		1D4B7FD975836D714362DE5D /* RestChime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RestChime.swift; sourceTree = "<group>"; };
 		225726ED5C2B1E6B7E6622FC /* PlanStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanStore.swift; sourceTree = "<group>"; };
+		28FCAD86548854074CB1351F /* rest-over.wav */ = {isa = PBXFileReference; lastKnownFileType = audio.wav; path = "rest-over.wav"; sourceTree = "<group>"; };
 		2F15C0824BE664359828A19B /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
 		2FDFDBDFCD7BFAA2E34B4160 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		30521B200C323A43A1C00934 /* StepsCourier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StepsCourier.swift; sourceTree = "<group>"; };
@@ -178,6 +182,8 @@
 			isa = PBXGroup;
 			children = (
 				2F15C0824BE664359828A19B /* Keychain.swift */,
+				28FCAD86548854074CB1351F /* rest-over.wav */,
+				1D4B7FD975836D714362DE5D /* RestChime.swift */,
 				48C4EF4AB3A7E881A50E208A /* Settings.swift */,
 			);
 			path = Support;
@@ -279,6 +285,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				3C802DEEDB74EE65F631BEFB /* Assets.xcassets in Resources */,
+				F27C508363549FE119B36889 /* rest-over.wav in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -311,6 +318,7 @@
 				558AB8EBDEA37E89C8BFF0DF /* PlanView.swift in Sources */,
 				5E1FFF8CA6502D77E6C0DFAF /* PulseActivity.swift in Sources */,
 				858B13EBBA1D2EB0A5F0DB60 /* RelayController.swift in Sources */,
+				AE5A906D6DC070E3693F3897 /* RestChime.swift in Sources */,
 				D2B5E64BDA2FFD33874065A6 /* SessionProgress.swift in Sources */,
 				A239F28AA97AD2844BF82AFA /* Settings.swift in Sources */,
 				C1FDDA7C59C5AB9579A1DB2C /* SettingsView.swift in Sources */,

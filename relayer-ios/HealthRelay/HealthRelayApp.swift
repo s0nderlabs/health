@@ -19,6 +19,7 @@ struct HealthRelayApp: App {
                 .onAppear { boot() }
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .active {
+                        SessionProgress.shared.noteSceneActive()
                         plan.refresh()
                         steps.syncNow()
                         relay.kick() // trade a long-stale pending connect for a scan
@@ -245,18 +246,30 @@ final class DemoDriver {
                 title: "Day 1 · Full Body 8s",
                 startedAt: Date().addingTimeInterval(-1543))
         }
+        // HR_DEMO_ARMED=1: session just started, nothing checked yet: the
+        // clean armed face with every circle empty.
+        if ProcessInfo.processInfo.environment["HR_DEMO_ARMED"] != nil {
+            let sp = SessionProgress.shared
+            sp.attach(planKey: "\(today)|\(generated)")
+            sp.beginSession()
+        }
         // HR_DEMO_PROGRESS=1: a mid-session snapshot for screenshots: squat
         // ramp checked off, rest running toward the working sets.
         if ProcessInfo.processInfo.environment["HR_DEMO_PROGRESS"] != nil {
             let sp = SessionProgress.shared
-            sp.attach(planKey: today)
+            // Same composite key PlanView.attachProgress builds; a bare date
+            // here would land the demo checkmarks under a key nobody reads.
+            sp.attach(planKey: "\(today)|\(generated)")
             sp.beginSession()
-            for token in [SessionProgress.lift(0), SessionProgress.lift(1),
-                          SessionProgress.rung(2, 0), SessionProgress.rung(2, 1),
-                          SessionProgress.rung(2, 2)] where !sp.isDone(token) {
+            // Pullup 5x2 and Lat Pulldown 2x10-12 expand into per-set rungs
+            // now, so "done" means their rung tokens, not the lift tokens.
+            let done = (0..<5).map { SessionProgress.rung(0, $0) }
+                + (0..<2).map { SessionProgress.rung(1, $0) }
+                + (0..<3).map { SessionProgress.rung(2, $0) }
+            for token in done where !sp.isDone(token) {
                 sp.toggle(token)
             }
-            sp.startRest(seconds: 143, thenLine: "Squat 65 ×8 · 2 sets")
+            sp.startRest(seconds: 143, thenLine: "Squat 65 ×8 · 1/2")
         }
     }
 }

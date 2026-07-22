@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.9.0 - 2026-07-22
+
+### Added
+
+- **Per-set checkmarks: every set is its own rung with its own rest timer.**
+  Multi-set schemes ("4x4", "2x10-12", "4x4 + AMRAP") now expand into one
+  checkable rung per working set, labeled with its position ("x4 - 2/4");
+  back-off blocks expand per set the same way; bodyweight work (weight 0)
+  renders as "BW" rungs instead of being dropped, including bodyweight
+  back-offs and AMRAP sets. Lifts whose only structure is a 2+ set scheme
+  (no ladder, AMRAP, or back-off) now expand too, so no exercise is a single
+  all-or-nothing checkbox. Checking any rung starts that set's prescribed
+  rest; the lock screen's NEXT pointer names the exact set ("Squat 92.5 x4 -
+  2/4"). Unparsed schemes ("top double") keep their single rung, and test-day
+  ladders that top out at the working weight still suppress duplicate rungs.
+- **Audible rest-over cue on both faces of the phone.** A bundled chime now
+  rides the rest-over notification (marked time-sensitive, with the matching
+  entitlement, so a workout Focus cannot swallow it), and when the app is
+  open the same chime plays through a playback audio session that beats the
+  mute switch, ducks any playing music for the moment of the cue, and adds a
+  haptic. The two paths never double-fire: the in-app chime only plays for a
+  countdown crossing the app actually watched (fresh crossing while the
+  scene was active), so reopening the phone right after the notification
+  rang stays silent. Locked plus muted degrades to vibration, the platform's
+  ceiling without critical-alert approval.
+- **Screenshot demo hooks.** `HR_DEMO_ARMED` (session live, nothing checked)
+  and `HR_DEMO_SCROLL=<lift index>` (park a lift at the top of the frame)
+  join the demo harness so mock reviews can frame any lift in any state.
+
+### Fixed
+
+- Demo session progress was keyed by bare date while the plan view keys by
+  date plus generation stamp, so `HR_DEMO_PROGRESS` checkmarks landed under a
+  key nobody read and mock screenshots showed a pristine session. The demo
+  now uses the composite key and toggles the per-set rung tokens that
+  expanded lifts actually render.
+
 ## 0.8.0 - 2026-07-17
 
 ### Added

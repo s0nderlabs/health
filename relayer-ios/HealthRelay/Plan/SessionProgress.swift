@@ -22,7 +22,10 @@ final class RestNotificationDelegate: NSObject, UNUserNotificationCenterDelegate
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        completionHandler([.banner, .sound])
+        // Banner only: foreground audio is RestChime's job (its playback
+        // session beats the mute switch, which notification sound cannot),
+        // and two sounds for one expiry would be noise.
+        completionHandler([.banner])
     }
 }
 
@@ -39,6 +42,14 @@ final class SessionProgress: ObservableObject {
     private var planKey = ""
     private static let storeKey = "session_progress_v1"
     private static let restNoteId = "rest-timer"
+    /// When the scene last became active; distantPast until first activation.
+    private var sceneActivatedAt = Date.distantPast
+
+    /// Stamped by the app on every scene activation, so the chime can tell
+    /// a watched crossing from a return AFTER the notification already rang.
+    func noteSceneActive() {
+        sceneActivatedAt = Date()
+    }
 
     /// Tokens: "L2" = whole lift at index 2, "L2R4" = rung 4 of lift 2.
     static func lift(_ i: Int) -> String { "L\(i)" }
@@ -105,6 +116,14 @@ final class SessionProgress: ObservableObject {
             restEndsAt = nil
             restLabel = nil
             LiveActivityController.shared.clearRest()
+            // Chime only for a crossing the app actually watched: fresh
+            // (not a return minutes later) AND the scene was already active
+            // before the countdown hit zero. A background expiry sounds via
+            // the notification; opening the app right after it must not
+            // ring the same rest twice.
+            if Date().timeIntervalSince(ends) <= 3, sceneActivatedAt < ends {
+                RestChime.play()
+            }
         }
     }
 
@@ -116,7 +135,10 @@ final class SessionProgress: ObservableObject {
             let content = UNMutableNotificationContent()
             content.title = "Rest over"
             content.body = thenLine.map { "Next: \($0)" } ?? "Back to the bar."
-            content.sound = .default
+            content.sound = RestChime.notificationSound
+            // Cuts through a gym Focus/DND. It does not beat the mute
+            // switch: locked + muted still degrades to vibration.
+            content.interruptionLevel = .timeSensitive
             let trigger = UNTimeIntervalNotificationTrigger(
                 timeInterval: max(1, date.timeIntervalSinceNow), repeats: false)
             center.removePendingNotificationRequests(withIdentifiers: [Self.restNoteId])

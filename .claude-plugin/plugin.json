@@ -1,7 +1,7 @@
 {
   "name": "health",
   "description": "WHOOP channel plugin for Claude Code. Recovery, sleep, and strain stream into Claude the moment your body produces them; Claude acts as your health instructor.",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "author": {
     "name": "s0nderlabs",
     "email": "s0nderlabs.hq@gmail.com",

@@ -146,8 +146,11 @@ battery.
 Handover is silent in both directions: a parked phone keeps a pending BLE
 connect armed, so walking out of the Mac's range hands it the band without
 opening the app. The app adds: a Plan tab rendering the training
-plan your main session's coach writes to `plan.json` (tap-to-expand ladders,
-set-by-set completion, rest timers parsed from the plan's own prescriptions),
+plan your main session's coach writes to `plan.json` (tap-to-expand ladders
+where every working, back-off, and bodyweight set is its own checkmark;
+checking a set starts its prescribed rest, with an audible chime when rest
+ends: in-app it beats the mute switch and ducks your music, locked it rides
+a time-sensitive notification),
 a one-tap workout intent that lands in your live Claude session (while a
 session runs, the start button becomes a live session bar with an elapsed
 timer and an in-app End, mirrored in the Plan header), a

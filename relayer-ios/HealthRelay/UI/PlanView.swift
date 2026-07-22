@@ -35,49 +35,60 @@ struct PlanView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                if let plan = store.plan {
-                    header(plan)
-                    if let note = plan.recovery_note, !note.isEmpty {
-                        guardrailCard(note)
-                    }
-                    if plan.rest == true {
-                        restCard(plan)
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if let plan = store.plan {
+                        header(plan)
+                        if let note = plan.recovery_note, !note.isEmpty {
+                            guardrailCard(note)
+                        }
+                        if plan.rest == true {
+                            restCard(plan)
+                        } else {
+                            if let warmup = plan.warmup, !warmup.isEmpty {
+                                quietCard("WARMUP", items: warmup)
+                            }
+                            if let lifts = plan.lifts, !lifts.isEmpty {
+                                sessionCard(lifts)
+                            }
+                            if let notes = plan.session_notes, !notes.isEmpty {
+                                quietCard("NOTES", items: notes)
+                            }
+                        }
+                        if let reminders = plan.reminders, !reminders.isEmpty {
+                            quietCard("REMINDERS", items: reminders)
+                        }
+                        freshness(plan)
                     } else {
-                        if let warmup = plan.warmup, !warmup.isEmpty {
-                            quietCard("WARMUP", items: warmup)
-                        }
-                        if let lifts = plan.lifts, !lifts.isEmpty {
-                            sessionCard(lifts)
-                        }
-                        if let notes = plan.session_notes, !notes.isEmpty {
-                            quietCard("NOTES", items: notes)
-                        }
+                        emptyState
                     }
-                    if let reminders = plan.reminders, !reminders.isEmpty {
-                        quietCard("REMINDERS", items: reminders)
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+                .padding(.bottom, 110)
+            }
+            .scrollIndicators(.hidden)
+            .background(AmbientBackground())
+            .refreshable { store.refresh() }
+            .onAppear {
+                seedExpansion()
+                attachProgress()
+                // Screenshot hook: HR_DEMO_SCROLL=<index> parks a lift at the
+                // top of the frame so audits can capture a whole ladder.
+                if Demo.active,
+                   let raw = ProcessInfo.processInfo.environment["HR_DEMO_SCROLL"],
+                   let index = Int(raw) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
+                        proxy.scrollTo("lift-\(index)", anchor: .top)
                     }
-                    freshness(plan)
-                } else {
-                    emptyState
                 }
             }
-            .padding(.horizontal, 20)
-            .padding(.top, 12)
-            .padding(.bottom, 110)
-        }
-        .scrollIndicators(.hidden)
-        .background(AmbientBackground())
-        .refreshable { store.refresh() }
-        .onAppear {
-            seedExpansion()
-            attachProgress()
-        }
-        .onChange(of: store.plan?.generated_at) { _, _ in
-            seededExpansion = false
-            seedExpansion()
-            attachProgress()
+            .onChange(of: store.plan?.generated_at) { _, _ in
+                seededExpansion = false
+                seedExpansion()
+                attachProgress()
+            }
         }
     }
 
@@ -198,6 +209,7 @@ struct PlanView: View {
             .padding(.bottom, 4)
             ForEach(Array(lifts.enumerated()), id: \.offset) { index, lift in
                 liftRow(lift, index: index)
+                    .id("lift-\(index)")
                 if index < lifts.count - 1 {
                     Rectangle().fill(Theme.hairline).frame(height: 1)
                 }
@@ -382,10 +394,12 @@ struct PlanView: View {
     }
 
     private func buildRungs(_ lift: Plan.Lift) -> [Rung] {
-        // A lone working-set rung would just repeat the row above it; only
-        // lifts with a ramp, an AMRAP, or back-offs have anything to expand.
+        // A lone working-set rung would just repeat the row above it; lifts
+        // with a ramp, an AMRAP, back-offs, or 2+ working sets can expand.
         let hasLadder = !(lift.ladder ?? "").isEmpty
-        if !hasLadder && lift.amrap == nil && (lift.backoff ?? []).isEmpty { return [] }
+        let workSets = Self.parseScheme(lift.scheme)?.sets ?? 1
+        if !hasLadder && lift.amrap == nil && (lift.backoff ?? []).isEmpty
+            && workSets < 2 { return [] }
 
         var rungs: [Rung] = []
 
@@ -432,20 +446,40 @@ struct PlanView: View {
         }
 
         // 2. The working sets, unless the ladder already tops out at (or
-        //    beyond) the working weight, as it does on test days.
-        if let weight = lift.weight_kg, weight > 0 {
-            let ladderMax = rungs.map(\.weight).max() ?? 0
-            if weight > ladderMax {
+        //    beyond) the working weight, as it does on test days. One rung
+        //    PER SET: each check is a set done and starts that set's rest.
+        let weight = lift.weight_kg ?? 0
+        let ladderMax = rungs.map(\.weight).max() ?? 0
+        let workRest = Self.parseRestSeconds(lift.rest)
+        let parsed = Self.parseScheme(lift.scheme)
+        // A "1x AMRAP" scheme describes the set the amrap struct below
+        // already renders; a scheme-derived rung would duplicate it.
+        let schemeIsAmrap = lift.amrap != nil
+            && parsed?.reps.range(of: "amrap", options: .caseInsensitive) != nil
+        if !schemeIsAmrap {
+            // Weighted work must clear the ramp; bodyweight work has no
+            // weight to clear and earns rungs once there are 2+ sets.
+            if let (sets, reps) = parsed, weight > 0 ? weight > ladderMax : sets >= 2 {
+                let label = reps.first?.isNumber == true ? "×\(reps)" : reps
+                for set in 1...sets {
+                    rungs.append(Rung(
+                        weight: weight,
+                        detail: sets == 1 ? label : "\(label) · \(set)/\(sets)",
+                        note: nil, noteHot: false, tone: .work,
+                        restSeconds: workRest))
+                }
+            } else if parsed == nil, weight > 0, weight > ladderMax {
+                // Unparsed scheme ("top double"): one rung, shown as written.
                 rungs.append(Rung(
                     weight: weight,
                     detail: workDetail(lift.scheme),
                     note: nil, noteHot: false, tone: .work,
-                    restSeconds: Self.parseRestSeconds(lift.rest)))
+                    restSeconds: workRest))
             }
         }
 
-        // 3. AMRAP as its own rung at the working weight.
-        if let amrap = lift.amrap, let weight = lift.weight_kg, weight > 0 {
+        // 3. AMRAP as its own rung at the working weight (BW when unloaded).
+        if let amrap = lift.amrap {
             var noteParts: [String] = []
             if let rir = amrap.rir, !rir.isEmpty { noteParts.append("RIR \(rir)") }
             if let target = amrap.target, !target.isEmpty { noteParts.append("target \(target)") }
@@ -454,24 +488,48 @@ struct PlanView: View {
                 detail: "AMRAP",
                 note: noteParts.isEmpty ? nil : noteParts.joined(separator: " · "),
                 noteHot: true, tone: .work,
-                restSeconds: Self.parseRestSeconds(lift.rest)))
+                restSeconds: workRest))
         }
 
-        // 4. Back-off rungs.
+        // 4. Back-off rungs, one per set. weight_kg 0 is bodyweight back-off
+        //    work (pull-up doubles), not a hole in the plan.
         for backoff in lift.backoff ?? [] {
-            guard let weight = backoff.weight_kg, weight > 0 else { continue }
+            guard let boWeight = backoff.weight_kg, boWeight >= 0 else { continue }
             var noteParts = ["back-off"]
             if let rest = backoff.rest, !rest.isEmpty { noteParts.append(rest) }
             if let note = backoff.note, !note.isEmpty { noteParts.append(note) }
-            rungs.append(Rung(
-                weight: weight,
-                detail: backoff.sets.map { $0.replacingOccurrences(of: "x", with: "×") },
-                note: noteParts.joined(separator: " · "),
-                noteHot: false, tone: .backoff,
-                restSeconds: Self.parseRestSeconds(backoff.rest ?? lift.rest)))
+            let boRest = Self.parseRestSeconds(backoff.rest ?? lift.rest)
+            let boParsed = Self.parseScheme(backoff.sets)
+            let boSets = boParsed?.sets ?? 1
+            let boLabel = boParsed.map { $0.reps.first?.isNumber == true ? "×\($0.reps)" : $0.reps }
+                ?? backoff.sets.map { $0.replacingOccurrences(of: "x", with: "×") }
+            for set in 1...boSets {
+                rungs.append(Rung(
+                    weight: boWeight,
+                    detail: boSets == 1 ? boLabel : boLabel.map { "\($0) · \(set)/\(boSets)" },
+                    note: set == 1 ? noteParts.joined(separator: " · ") : nil,
+                    noteHot: false, tone: .backoff,
+                    restSeconds: boRest))
+            }
         }
 
         return rungs
+    }
+
+    /// "4x4 + AMRAP" -> (4, "4"); "2x10-12" -> (2, "10-12"); "1x AMRAP" ->
+    /// (1, "AMRAP"); nil when there is no leading set count ("top double").
+    /// The cap keeps a plan typo from exploding into a wall of rungs.
+    private static func parseScheme(_ scheme: String?) -> (sets: Int, reps: String)? {
+        guard var text = scheme?.trimmingCharacters(in: .whitespaces), !text.isEmpty else { return nil }
+        if let plus = text.range(of: "+") {
+            text = String(text[..<plus.lowerBound]).trimmingCharacters(in: .whitespaces)
+        }
+        let scanner = Scanner(string: text)
+        guard let sets = scanner.scanInt(), (1...12).contains(sets),
+              scanner.scanString("x") != nil else { return nil }
+        let reps = String(text[scanner.currentIndex...]).trimmingCharacters(in: .whitespaces)
+        guard !reps.isEmpty else { return nil }
+        return (sets, reps)
     }
 
     /// "2x8 + AMRAP" -> "×8 · 2 sets"; anything unparsed shows as written.
@@ -487,7 +545,8 @@ struct PlanView: View {
     }
 
     private func ladder(_ rungs: [Rung], liftIndex: Int, lift: Plan.Lift) -> some View {
-        let maxWeight = rungs.map(\.weight).max() ?? 1
+        // Floor of 1: an all-bodyweight ladder must not divide by zero.
+        let maxWeight = max(rungs.map(\.weight).max() ?? 1, 1)
         return VStack(alignment: .leading, spacing: 0) {
             ForEach(Array(rungs.enumerated()), id: \.offset) { j, rung in
                 let token = SessionProgress.rung(liftIndex, j)
@@ -502,7 +561,7 @@ struct PlanView: View {
                         }
                         bar(fraction: rung.weight / maxWeight, tone: rung.tone)
                         HStack(alignment: .firstTextBaseline, spacing: 4) {
-                            Text(fmt(rung.weight))
+                            Text(rung.weight > 0 ? fmt(rung.weight) : "BW")
                                 .font(Theme.rounded(13, .semibold))
                                 .monospacedDigit()
                                 .foregroundStyle(Theme.textPrimary)
@@ -556,7 +615,8 @@ struct PlanView: View {
             } else {
                 for (j, rung) in rungs.enumerated()
                 where !progress.isDone(SessionProgress.rung(i, j)) {
-                    var line = "\(lift.name.map { "\($0) " } ?? "")\(fmt(rung.weight))"
+                    var line = lift.name.map { "\($0) " } ?? ""
+                    line += rung.weight > 0 ? fmt(rung.weight) : "BW"
                     if let detail = rung.detail { line += " \(detail)" }
                     return line
                 }
