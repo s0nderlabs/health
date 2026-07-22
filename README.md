@@ -150,7 +150,7 @@ plan your main session's coach writes to `plan.json` (tap-to-expand ladders
 where every working, back-off, and bodyweight set is its own checkmark;
 checking a set starts its prescribed rest, with an audible chime when rest
 ends: in-app it beats the mute switch and ducks your music, locked it rides
-a time-sensitive notification),
+the rest-over notification),
 a one-tap workout intent that lands in your live Claude session (while a
 session runs, the start button becomes a live session bar with an elapsed
 timer and an in-app End, mirrored in the Plan header), a

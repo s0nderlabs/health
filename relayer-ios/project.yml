@@ -53,9 +53,10 @@ targets:
       properties:
         com.apple.developer.healthkit: true
         com.apple.developer.healthkit.background-delivery: true
-        # Without this, .timeSensitive on the rest-over notification is
-        # silently downgraded and a gym Focus swallows the chime.
-        com.apple.developer.usernotifications.time-sensitive: true
+        # Time Sensitive Notifications is NOT here on purpose: personal
+        # (free) teams cannot hold that capability, and requesting it makes
+        # profile generation fail outright. Paid-team forks can add it plus
+        # interruptionLevel = .timeSensitive to pierce Focus.
 
   HealthRelayWidgets:
     type: app-extension

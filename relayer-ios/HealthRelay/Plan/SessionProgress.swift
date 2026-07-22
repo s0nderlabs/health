@@ -136,9 +136,9 @@ final class SessionProgress: ObservableObject {
             content.title = "Rest over"
             content.body = thenLine.map { "Next: \($0)" } ?? "Back to the bar."
             content.sound = RestChime.notificationSound
-            // Cuts through a gym Focus/DND. It does not beat the mute
-            // switch: locked + muted still degrades to vibration.
-            content.interruptionLevel = .timeSensitive
+            // No .timeSensitive here: personal signing teams cannot hold
+            // that capability (profile generation fails), so a Focus can
+            // still mute this. Locked + muted degrades to vibration.
             let trigger = UNTimeIntervalNotificationTrigger(
                 timeInterval: max(1, date.timeIntervalSinceNow), repeats: false)
             center.removePendingNotificationRequests(withIdentifiers: [Self.restNoteId])
