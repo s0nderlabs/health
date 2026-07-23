@@ -27,7 +27,9 @@ process.env.HEALTH_CONFIG_PATH = join(configDir, 'config.json')
 // runtime dir.
 process.env.HEALTH_RUNTIME_DIR = configDir
 
-const { AuthBrokenError, forceRefresh, keychainWrite, loadTokens } = await import('../src/auth.js')
+const { AuthBrokenError, clearTokens, forceRefresh, keychainWrite, loadTokens } = await import(
+  '../src/auth.js'
+)
 
 const realFetch = globalThis.fetch
 
@@ -111,6 +113,13 @@ describe('tokenRequest lost-rotation diagnosability', () => {
     }
     expect(err).toBeInstanceOf(AuthBrokenError)
     expect(String(err)).not.toContain('re-consent is required')
+  })
+
+  test('clearTokens removes the stored pair (setup dead-pair path)', () => {
+    keychainWrite(TOKEN_SERVICE, tokenStore('rt-dead'))
+    expect(loadTokens()).not.toBeNull()
+    clearTokens()
+    expect(loadTokens()).toBeNull()
   })
 
   test('a successful refresh persists the rotated pair before returning', async () => {

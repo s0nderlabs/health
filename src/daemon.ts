@@ -644,7 +644,7 @@ setInterval(() => {
     ) {
       const staleMin = Math.round((Date.now() - anchor) / 60_000)
       engine.systemProblem(
-        `no successful WHOOP poll in ${staleMin} minutes: cloud data (recovery, sleep, cycles) is STALE regardless of cause. Check daemon.log; if auth is broken, the fix is: security delete-generic-password -s whoop-tokens, then bun run setup`,
+        `no successful WHOOP poll in ${staleMin} minutes: cloud data (recovery, sleep, cycles) is STALE regardless of cause. Check daemon.log; if auth is broken, run: bun run setup (it validates the stored tokens and re-consents only if needed)`,
         `stale-data:${new Date().toISOString().slice(0, 10)}`,
         { priority: 'alert', bypassCooldown: true },
       )

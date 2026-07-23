@@ -84,7 +84,9 @@ bun run setup
 
 Setup walks you through: registering your WHOOP dev app, storing credentials
 in the macOS Keychain (never on disk), the one-time OAuth consent, backfilling
-your full history, and installing the always-on launchd daemon.
+your full history, and installing the always-on launchd daemon. Re-running it
+is always safe and is also the recovery path: it validates the stored tokens
+and only asks for a fresh consent if WHOOP has actually rejected them.
 
 ### Real-time webhooks (optional but worth it)
 

@@ -10,7 +10,15 @@ import { existsSync, mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { loadConfig, saveConfig, ensureRuntimeDir, LOG_PATH, PID_PATH } from '../src/config.js'
-import { keychainRead, keychainWrite, loadTokens, exchangeCode } from '../src/auth.js'
+import {
+  AuthBrokenError,
+  clearTokens,
+  exchangeCode,
+  forceRefresh,
+  keychainRead,
+  keychainWrite,
+  loadTokens,
+} from '../src/auth.js'
 import { Store } from '../src/store.js'
 import { backfill } from '../src/poller.js'
 
@@ -88,11 +96,64 @@ if (keychainRead(SECRET_SERVICE)) {
   say('Secret stored in the macOS Keychain (never on disk).')
 }
 
-// ── Step 2: OAuth consent (the only interactive auth moment, ever) ─
+// ── Step 2: stop any running daemon BEFORE any token use ──────────
+//
+// WHOOP refresh tokens are single-use and rotate, so exactly one process may
+// refresh at a time (auth.ts header). The validation below and backfill()
+// later both refresh; a live daemon's 5-minute poll could refresh
+// concurrently and burn the token (forcing a re-consent) or collide on the
+// SQLite writer. So bring the daemon down before touching tokens or data,
+// and bootstrap the fresh one only at the very end (Step 4).
+const setupUid = Bun.spawnSync(['id', '-u']).stdout.toString().trim()
+Bun.spawnSync(['launchctl', 'bootout', `gui/${setupUid}/${LAUNCHD_LABEL}`])
+if (existsSync(PID_PATH)) await Bun.sleep(1000) // let it release the token + db
 
-if (loadTokens()) {
-  say('Tokens already present in Keychain; skipping consent. (Delete the whoop-tokens Keychain item to redo.)')
-} else {
+// ── Step 3: token validation + OAuth consent (only when needed) ───
+//
+// A stored pair proves nothing: a burned refresh token (the Jul 22 2026
+// lost-rotation incident) sits in the Keychain looking exactly like a
+// healthy one, and skipping consent on mere existence turned recovery into
+// a two-step dance with a delete-this-first foot-gun. So VALIDATE by
+// refreshing: success rotates and persists (safe: the daemon is stopped);
+// a definitive rejection means the pair is dead, so clear it and fall into
+// consent. First install, healthy re-run, and disaster recovery are all the
+// same one command on purpose.
+
+let needConsent = !loadTokens()
+if (!needConsent) {
+  say('Tokens found in Keychain; validating against WHOOP...')
+  try {
+    await forceRefresh()
+    say('Tokens are healthy (validated and rotated); skipping consent.')
+  } catch (e) {
+    // Wipe ONLY on token-level rejections (allowlist). A 4xx can also mean
+    // invalid_client (wrong secret in the Keychain): the pair is healthy and
+    // wiping it would destroy a load-bearing single-use credential over a
+    // fixable secret, then consent would fail on the same bad secret anyway.
+    const tokenDead =
+      e instanceof AuthBrokenError &&
+      /invalid_request|invalid_grant|token_inactive/.test(e.message)
+    if (tokenDead) {
+      say('Stored tokens are DEAD (WHOOP rejected the refresh). Clearing them; re-consent follows.')
+      clearTokens()
+      needConsent = true
+    } else if (e instanceof AuthBrokenError) {
+      console.error(`\nWHOOP rejected the CLIENT credentials, not the tokens: ${e.message}`)
+      console.error('The pair was NOT touched. Re-run setup and answer y to replace the client secret.')
+      console.error('The daemon is currently stopped; re-running setup restores it.')
+      process.exit(1)
+    } else {
+      // Transport trouble: the pair MAY be fine, and wiping a live pair on a
+      // network blip would force a pointless re-consent. Fail safe instead.
+      console.error(`\nCould not validate tokens (${e instanceof Error ? e.message : e}).`)
+      console.error('The pair was NOT touched. Check connectivity and re-run: bun run setup')
+      console.error('The daemon is currently stopped; re-running setup restores it.')
+      process.exit(1)
+    }
+  }
+}
+
+if (needConsent) {
   const state = crypto.randomUUID().replaceAll('-', '').slice(0, 8) // must be exactly 8 chars
   const redirect = new URL(config.whoop.redirect_uri)
   const port = Number(redirect.port || 80)
@@ -153,22 +214,11 @@ if (loadTokens()) {
   } catch (e) {
     console.error(`\nSetup failed during authorization: ${e instanceof Error ? e.message : e}`)
     console.error('Fix the issue (usually a wrong client secret) and re-run: bun run setup')
+    console.error('The daemon is currently stopped; re-running setup restores it.')
     process.exit(1)
   }
   say('Tokens stored in Keychain. From here on everything is headless.')
 }
-
-// ── Step 3: stop any running daemon FIRST ─────────────────────────
-//
-// backfill() below refreshes the WHOOP token via getAccessToken. WHOOP refresh
-// tokens are single-use and rotate, so exactly one process may refresh at a
-// time (auth.ts header). If an older daemon is live, its 5-minute poll could
-// refresh concurrently with setup and burn the token (forcing a re-consent) or
-// collide on the SQLite writer. So bring the daemon down before touching data,
-// and bootstrap the fresh one only at the very end (Step 4).
-const setupUid = Bun.spawnSync(['id', '-u']).stdout.toString().trim()
-Bun.spawnSync(['launchctl', 'bootout', `gui/${setupUid}/${LAUNCHD_LABEL}`])
-if (existsSync(PID_PATH)) await Bun.sleep(1000) // let it release the token + db
 
 // ── Step 3b: backfill the archive ─────────────────────────────────
 

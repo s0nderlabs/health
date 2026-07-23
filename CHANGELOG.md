@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.2 - 2026-07-23
+
+### Changed
+
+- **Setup self-heals a burned token pair: recovery is now one command.**
+  `bun run setup` validates stored tokens against WHOOP instead of skipping
+  consent on mere existence: a healthy pair is rotated and consent is
+  skipped; a dead pair (the lost-rotation burn class) is cleared
+  automatically and consent runs again. The delete-the-Keychain-item-first
+  step is gone. Wiping is allowlisted to token-level rejections only: a
+  wrong client secret (invalid_client) or a transport failure fails safe
+  without touching the pair. The daemon now stops before any token use in
+  setup (removing a concurrent-refresh hazard window) and restarts at the
+  end as before.
+
 ## 0.9.1 - 2026-07-23
 
 ### Fixed

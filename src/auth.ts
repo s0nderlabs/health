@@ -136,6 +136,12 @@ export function saveTokens(raw: Omit<TokenStore, 'obtained_at'>): TokenStore {
   return store
 }
 
+/** Remove the stored pair (setup uses this when WHOOP rejects a refresh:
+ *  a burned pair in the Keychain would otherwise make setup skip consent). */
+export function clearTokens(): void {
+  Bun.spawnSync(['security', 'delete-generic-password', '-s', TOKEN_SERVICE()])
+}
+
 async function tokenRequest(params: Record<string, string>): Promise<TokenStore> {
   const config = loadConfig()
   const body = new URLSearchParams({
