@@ -45,8 +45,9 @@ const GARBAGE_END_S = FEED_DROP_END_S * 2
 // what separates exercise on an HR-only feed is EXERCISE SIGNATURE:
 // - effort cycling: lifting oscillates across the hot line (sets vs rests);
 //   heat/stress/fever plateaus cross it once. Counted as hot-streak starts.
-// - sustained depth: steady cardio holds Z3+ for minutes on end, or touches
-//   Z4; a shower peaks into low Z3 briefly and vasodilation cannot hold it.
+// - sustained depth: steady cardio holds the depth zone for minutes on end,
+//   or touches the hard zone; a shower grazes depth briefly and vasodilation
+//   cannot hold it.
 const CONFIRM_MIN_ALIVE_S = 720 // 12 min: duration UPGRADES evidence to high, never creates it
 const HOT_CYCLES_EVIDENCE = 4 // distinct hot streaks = interval/set structure
 // A hot streak only counts as a NEW effort cycle after an OBSERVED descent
@@ -55,9 +56,14 @@ const HOT_CYCLES_EVIDENCE = 4 // distinct hot streaks = interval/set structure
 // and feed gaps (a gap resets the streak for detection purposes but is
 // absence of data, not a rest interval, so it must not re-arm the counter).
 const HOT_REARM_DROP = 8
-const DEEP_ZONE = 3
-const DEEP_SUSTAIN_S = 300 // continuous Z3+ this long = steady-cardio depth
-const Z4_SUSTAIN_S = 60 // one continuous Z4+ minute = unambiguous effort
+// Evidence zones are KARVONEN zones (see zoneOf). They sit one zone lower
+// than the pre-Karvonen constants because the new Z2/Z3 edges land within
+// ~5 bpm of the old %-max Z3/Z4 edges this detector was field-validated at
+// (tennis, Jul 12): the bars kept their bpm meaning, only the labels moved.
+const DEEP_ZONE = 2
+const DEEP_SUSTAIN_S = 300 // continuous depth this long = steady-cardio
+const HARD_ZONE = 3
+const HARD_SUSTAIN_S = 60 // one continuous hard minute = unambiguous effort
 const INTENT_MATCH_BEFORE_MS = 30 * 60_000 // declared-intent lookback (mirrors engine claim window)
 // RR-vs-bpm consistency: the band emits RR only with beat-level confidence, so
 // a frame's implied rate (60000/meanRR) matching its bpm field proves a real
@@ -76,7 +82,9 @@ export type SessionConfidence = 'low' | 'medium' | 'high'
 export interface LiveDeps {
   /** Resolved max HR (config override or observed-workout-derived). */
   getMaxHr: () => number
-  /** Resting HR from the latest recovery, or a safe default. */
+  /** Rolling resting HR (7-day median of scored recoveries), or a safe
+   *  default. Rolling, never a single night: one hot/short night moves RHR
+   *  2-3 bpm and every Karvonen zone edge with it. */
   getRestHr: () => number
   /** Config override for the session-start threshold, if set. */
   getHotBpm: () => number | null
@@ -140,8 +148,8 @@ interface Session {
   intentMatched: boolean
   hotCycles: number // effort cycles (starts at 1: the detection streak)
   cycleArmed: boolean // an observed sub-(hot-REARM) descent primes the next cycle
-  deepHeld: boolean // continuous Z3+ for DEEP_SUSTAIN_S, latched
-  z4Held: boolean // continuous Z4+ for Z4_SUSTAIN_S, latched
+  deepHeld: boolean // continuous DEEP_ZONE+ for DEEP_SUSTAIN_S, latched
+  hardHeld: boolean // continuous HARD_ZONE+ for HARD_SUSTAIN_S, latched
   rrSamples: number
   rrConsistent: number
   confirmAnnounced: boolean
@@ -194,10 +202,14 @@ export class LiveState {
     this.lastIntentTs = ts
   }
 
-  /** % of max HR -> zone 0-5. Edges: 50/60/70/80/90. */
+  /** Karvonen zone 0-5: % of heart-rate reserve above resting HR, edges
+   *  40/60/70/80/90, matching WHOOP's own bands. Plain %-of-max ran up to
+   *  two zones hot at the low end ("Zone 3" at 134 bpm that WHOOP calls
+   *  Zone 1) and misled mid-ride coaching on a zone-targeted base plan. */
   zoneOf(bpm: number): number {
-    const pct = bpm / this.deps.getMaxHr()
-    if (pct < 0.5) return 0
+    const rest = this.deps.getRestHr()
+    const pct = (bpm - rest) / Math.max(1, this.deps.getMaxHr() - rest)
+    if (pct < 0.4) return 0
     if (pct < 0.6) return 1
     if (pct < 0.7) return 2
     if (pct < 0.8) return 3
@@ -344,8 +356,8 @@ export class LiveState {
     }
     const reasons: string[] = []
     if (s.hotCycles >= HOT_CYCLES_EVIDENCE) reasons.push('effort_cycles')
-    if (s.deepHeld) reasons.push('sustained_z3')
-    if (s.z4Held) reasons.push('z4')
+    if (s.deepHeld) reasons.push('sustained_depth')
+    if (s.hardHeld) reasons.push('hard_effort')
     // Exercise signature: interval/set structure or sustained depth. Duration
     // alone is NOT evidence (showers run 15 min, stress runs hours); it only
     // upgrades an already-evidenced session to high.
@@ -435,7 +447,7 @@ export class LiveState {
       hotCycles: 1,
       cycleArmed: false,
       deepHeld: false,
-      z4Held: false,
+      hardHeld: false,
       rrSamples: 0,
       rrConsistent: 0,
       confirmAnnounced: false,
@@ -514,7 +526,9 @@ export class LiveState {
     const zone = this.zoneOf(bpm)
     s.zoneSeconds[zone] += dt
 
-    for (let z = 3; z <= 5; z++) {
+    // From DEEP_ZONE up: the evidence latches need the lower streaks tracked,
+    // the milestone loop below only ever reads 3+.
+    for (let z = DEEP_ZONE; z <= 5; z++) {
       if (zone >= z) {
         if (s.zoneSince[z] == null) s.zoneSince[z] = ts
       } else {
@@ -525,8 +539,8 @@ export class LiveState {
     // zoneSince) reset the STREAK but never a latch already earned.
     const deepSince = s.zoneSince[DEEP_ZONE]
     if (deepSince != null && ts - deepSince >= DEEP_SUSTAIN_S * 1000) s.deepHeld = true
-    const z4Since = s.zoneSince[4]
-    if (z4Since != null && ts - z4Since >= Z4_SUSTAIN_S * 1000) s.z4Held = true
+    const hardSince = s.zoneSince[HARD_ZONE]
+    if (hardSince != null && ts - hardSince >= HARD_SUSTAIN_S * 1000) s.hardHeld = true
     // Announce only the HIGHEST newly-earned zone; a jump straight to Z5
     // should not also fire Z3 and Z4 in the same breath.
     let earned = 0
@@ -543,8 +557,12 @@ export class LiveState {
       if (conf.level !== 'low') {
         for (let z = 3; z <= earned; z++) s.announced.add(z)
         const startIso = new Date(s.startTs).toISOString()
+        const rest = this.deps.getRestHr()
+        const reservePct = Math.round(
+          ((bpm - rest) / Math.max(1, this.deps.getMaxHr() - rest)) * 100,
+        )
         this.deps.emit('live.zone', `live.zone:${startIso}:z${earned}`, {
-          content: `Zone ${earned} reached: ${bpm} bpm (${Math.round((bpm / this.deps.getMaxHr()) * 100)}% of max), ${fmtMinSec((ts - s.startTs) / 1000)} into the session.`,
+          content: `Zone ${earned} reached: ${bpm} bpm (${reservePct}% of heart-rate reserve), ${fmtMinSec((ts - s.startTs) / 1000)} into the session.`,
           meta: {
             class: 'live.zone',
             zone: String(earned),
@@ -738,6 +756,7 @@ export class LiveState {
       last_sample_at: last ? new Date(last.ts).toISOString() : null,
       samples_buffered: this.ring.length,
       max_hr: this.deps.getMaxHr(),
+      rest_hr: this.deps.getRestHr(),
       session_threshold_bpm: this.hotBpm(),
       rmssd_5min: this.rmssd(),
       rr_pairs_5min: this.restRrPairs().length,

@@ -28,12 +28,16 @@ WHOOP band ──(BLE Broadcast HR)──> health-relay ──(WS, raw frames)�
   single-day dips; alert fatigue is treated as the #1 failure mode).
 - **Strain crossings, bedtime nudges, trend alerts**: each togglable, all quiet
   by default.
+- **A data-freshness watchdog**: if no poll has succeeded for 90 minutes
+  (whatever the cause: burned token, network, WHOOP outage), the daemon raises
+  one loud alert per broken day instead of failing silently.
 - **Live heart rate** (optional): turn on the band's Broadcast Heart Rate and
   the bundled BLE relayer streams it into the daemon in real time. You get
   `/health live` (current BPM, zone, live resting HRV when still), automatic
   session detection (WHOOP cannot signal workout starts; a sustained-hot heart
   rate can), zone milestones during the session, and an end-of-session summary
-  with the HR-recovery read. Detection is confidence-tiered: HR level alone
+  with the HR-recovery read. Zones are Karvonen (% of heart-rate reserve over
+  a rolling 7-day median resting HR), matching WHOOP's own bands. Detection is confidence-tiered: HR level alone
   cannot separate a warmup from a hot shower, so a session only earns coach
   attention once it shows an exercise signature (set/interval structure,
   sustained depth, or your declared intent); an unconfirmed elevation is

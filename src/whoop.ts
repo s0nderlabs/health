@@ -38,8 +38,11 @@ function query(params: RangeParams): string {
 
 async function request<T>(path: string, retried = false): Promise<T> {
   const token = await getAccessToken()
+  // Timeout so a hung request cannot stall the poll chain for Bun's 300s
+  // default idle window; GETs are idempotent and retried at the poll level.
   const res = await fetch(`${API_BASE}${path}`, {
     headers: { Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(60_000),
   })
 
   if (res.ok) return (await res.json()) as T

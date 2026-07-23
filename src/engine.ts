@@ -288,11 +288,23 @@ export class Engine {
       fmt.bedtimeNudge(debt, sleep.performance_pct as number | null))
   }
 
-  systemProblem(problem: string, dedupeKey: string, opts?: { bypassCooldown?: boolean }): void {
+  systemProblem(
+    problem: string,
+    dedupeKey: string,
+    opts?: { bypassCooldown?: boolean; priority?: 'notable' | 'alert' },
+  ): void {
     // The class cooldown (6h) is right for chronic conditions (auth broken,
     // bind failure) but wrong for time-critical one-shots: a yield breach at
     // ride start must not swallow the yield-expired advisory hours later.
-    this.emit('system.health', 'notable', `system.health:${dedupeKey}`, fmt.systemHealth(problem), opts)
+    // priority 'alert' is reserved for hard-down conditions (the stale-data
+    // watchdog): it pierces quiet hours, cooldown, and the daily budget.
+    this.emit(
+      'system.health',
+      opts?.priority ?? 'notable',
+      `system.health:${dedupeKey}`,
+      fmt.systemHealth(problem),
+      opts,
+    )
   }
 
   /** Entry point for the live HR state machine (pre-throttled per-session). */

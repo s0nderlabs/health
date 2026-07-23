@@ -10,7 +10,7 @@ import { Store } from './store.js'
 import { DB_PATH } from './config.js'
 import { existsSync } from 'fs'
 
-const VERSION = '0.9.0'
+const VERSION = '0.9.1'
 
 const INSTRUCTIONS = `
 health: WHOOP recovery, sleep, and strain as a live channel. The daemon on this
@@ -70,7 +70,7 @@ invite an intent (at a ~116bpm/90s threshold a low start may be a shower,
 stress, heat, or a walk). Engage on medium/high, or on live.confirm (once
 per session: fires when the elevation develops an exercise signature;
 confidence_reasons lists which: effort_cycles = set/interval structure,
-sustained_z3 / z4 = depth, intent = user-declared, duration = 12+ min WITH
+sustained_depth / hard_effort = depth, intent = user-declared, duration = 12+ min WITH
 evidence). live.zone = a notable-intensity milestone (one line, keep the
 flow). live.rest = session summary with the HR-recovery read (the coaching
 moment: recovery speed reflects fitness and current fatigue). live.rest with

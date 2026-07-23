@@ -116,8 +116,18 @@ const liveState = new LiveState({
     return Math.max(store.maxWorkoutHr() ?? 0, profile, 187)
   }),
   getRestHr: cached(() => {
-    const rhr = store.latestRecovery()?.resting_heart_rate
-    return typeof rhr === 'number' && rhr > 25 ? rhr : 60
+    // Rolling 7-day MEDIAN, never last night's number: a single hot/short
+    // night moves RHR 2-3 bpm and every Karvonen zone edge with it (the
+    // Jul 21 Strava-mirror lesson), and a median won't let one fever night
+    // drag the edges the way a mean would.
+    const vals = store
+      .recentRecoveries(7)
+      .map((r) => r.resting_heart_rate)
+      .filter((v): v is number => typeof v === 'number' && v > 25)
+    if (vals.length === 0) return 60
+    vals.sort((a, b) => a - b)
+    const mid = Math.floor(vals.length / 2)
+    return vals.length % 2 ? vals[mid] : Math.round((vals[mid - 1] + vals[mid]) / 2)
   }),
   getHotBpm: cached(() => config().live.hot_bpm),
   emit: (cls, dedupeKey, payload, opts) => {
@@ -540,18 +550,21 @@ setInterval(() => {
   }
 }, 30_000)
 
-let authBroken = false
-
 async function guarded(label: string, fn: () => Promise<unknown>): Promise<void> {
   try {
     await fn()
-    authBroken = false
   } catch (err) {
     if (err instanceof AuthBrokenError) {
-      if (!authBroken) {
-        authBroken = true
-        engine.systemProblem(err.message, `auth-broken:${new Date().toISOString().slice(0, 10)}`)
-      }
+      // Re-asserted every failing cycle, not just on the transition: the
+      // date-scoped dedupe key makes this one nag per broken DAY. The old
+      // transition-only gate emitted a single event for an entire multi-day
+      // outage (Jul 22: broke at 02:12 WIB, one event, then silence forever).
+      // bypassCooldown: self-throttled by the daily key; without it, the 6h
+      // system.health class cooldown delays a new day's nag for hours and a
+      // recurring sibling system.health event can suppress it entirely.
+      engine.systemProblem(err.message, `auth-broken:${new Date().toISOString().slice(0, 10)}`, {
+        bypassCooldown: true,
+      })
       log(`${label}: ${err.message}`)
     } else {
       log(`${label} failed: ${err}`)
@@ -590,11 +603,54 @@ async function scheduleNextPoll(): Promise<void> {
 }
 void scheduleNextPoll()
 
+// Data-freshness watchdog: cause-AGNOSTIC. Detects the ABSENCE of successful
+// polls rather than any particular failure, so it catches the auth-burn class
+// AND every future cause of stale cloud data nobody has thought of yet
+// (additive safeguards report events; only a staleness gate notices silence:
+// the Jul 22 lesson, 11 hours hard-down behind 133 identical log lines).
+// priority alert = pierces quiet hours, cooldown, and budget; the date-scoped
+// key throttles it to one alarm per broken day. The uptime grace stops a
+// daemon that was simply off (laptop shut, reboot) from alarming before its
+// startup poll has had a chance to catch up.
+const daemonStartedAt = Date.now()
+const STALE_DATA_FLOOR_MS = 90 * 60_000
+// The uptime grace covers "the daemon was simply off" (reboot, laptop shut):
+// the startup poll needs a chance to catch up before staleness means
+// anything. Known limit: an in-process watchdog cannot observe its own
+// crash-loop (a process that dies every few minutes never accumulates
+// grace); that failure mode needs an EXTERNAL monitor and is out of scope.
+const WATCHDOG_UPTIME_GRACE_MS = 15 * 60_000
+
 setInterval(() => {
   try {
     engine.tick()
   } catch (err) {
     log(`tick failed: ${err}`)
+  }
+  try {
+    // Anchor on the last successful poll; an install that has NEVER polled
+    // successfully (backfill done, then every poll failing on some non-auth
+    // cause) anchors on backfill completion so it still alarms.
+    const anchorIso = store.getMeta('last_poll_at') ?? store.getMeta('backfill_done')
+    const anchor = anchorIso ? Date.parse(anchorIso) : Number.NaN
+    // Derived from the LIVE config, floored at 90 min: a legitimately raised
+    // poll interval must not read as an outage (a healthy 2h-interval daemon
+    // has 2h-old last_poll_at by design).
+    const staleMs = Math.max(STALE_DATA_FLOOR_MS, 3 * config().poll_interval_minutes * 60_000)
+    if (
+      Number.isFinite(anchor) &&
+      Date.now() - daemonStartedAt > WATCHDOG_UPTIME_GRACE_MS &&
+      Date.now() - anchor > staleMs
+    ) {
+      const staleMin = Math.round((Date.now() - anchor) / 60_000)
+      engine.systemProblem(
+        `no successful WHOOP poll in ${staleMin} minutes: cloud data (recovery, sleep, cycles) is STALE regardless of cause. Check daemon.log; if auth is broken, the fix is: security delete-generic-password -s whoop-tokens, then bun run setup`,
+        `stale-data:${new Date().toISOString().slice(0, 10)}`,
+        { priority: 'alert', bypassCooldown: true },
+      )
+    }
+  } catch (err) {
+    log(`freshness watchdog failed: ${err}`)
   }
   scheduleDelivery() // re-check quiet-hours holds
 }, 5 * 60_000)

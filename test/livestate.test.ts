@@ -92,6 +92,32 @@ describe('session detection', () => {
   })
 })
 
+describe('zoneOf (Karvonen)', () => {
+  // % of heart-rate reserve above resting, edges 40/60/70/80/90, matching
+  // WHOOP's bands. At max 190 / rest 56 (reserve 134) the edges land at
+  // 109.6 / 136.4 / 149.8 / 163.2 / 176.6.
+  test('zone edges match WHOOP bands', () => {
+    const { state } = harness()
+    expect(state.zoneOf(109)).toBe(0)
+    expect(state.zoneOf(110)).toBe(1)
+    expect(state.zoneOf(136)).toBe(1)
+    expect(state.zoneOf(137)).toBe(2)
+    expect(state.zoneOf(149)).toBe(2)
+    expect(state.zoneOf(150)).toBe(3)
+    expect(state.zoneOf(163)).toBe(3)
+    expect(state.zoneOf(164)).toBe(4)
+    expect(state.zoneOf(176)).toBe(4)
+    expect(state.zoneOf(177)).toBe(5)
+  })
+
+  test('the Jul 22 field case: 134 bpm is Zone 1, not Zone 3', () => {
+    // At his real numbers (max 187, rolling rest 59), the %-max model called
+    // 134 bpm "Zone 3" mid-ride while WHOOP's app showed Zone 1.
+    const { state } = harness({ maxHr: 187, restHr: 59 })
+    expect(state.zoneOf(134)).toBe(1)
+  })
+})
+
 describe('zone milestones', () => {
   // Milestones obey the confidence contract (low = silent), so these tests
   // declare an intent up front: the session is high-confidence throughout
@@ -99,8 +125,8 @@ describe('zone milestones', () => {
   test('sustained Z4 announces only the highest zone reached', () => {
     const { state, events } = harness()
     state.noteIntent(T0)
-    feed(state, 0, 95, 125) // session starts (Z2 at 125/190=66%)
-    feed(state, 95, 30, 160) // Z4 (84%)
+    feed(state, 0, 95, 125) // session starts (Z1: 51% of reserve)
+    feed(state, 95, 30, 170) // Z4 (85% of reserve)
     const zones = events.filter((e) => e.cls === 'live.zone')
     expect(zones).toHaveLength(1)
     expect(zones[0].meta.zone).toBe('4')
@@ -110,9 +136,9 @@ describe('zone milestones', () => {
     const { state, events } = harness()
     state.noteIntent(T0)
     feed(state, 0, 95, 125)
-    feed(state, 95, 60, 140) // Z3 (74%)
-    feed(state, 155, 60, 160) // Z4
-    feed(state, 215, 60, 175) // Z5 (92%)
+    feed(state, 95, 60, 152) // Z3 (72% of reserve)
+    feed(state, 155, 60, 168) // Z4 (84%)
+    feed(state, 215, 60, 180) // Z5 (93%)
     const zones = events.filter((e) => e.cls === 'live.zone').map((e) => e.meta.zone)
     expect(zones).toEqual(['3', '4', '5'])
   })
@@ -121,9 +147,9 @@ describe('zone milestones', () => {
     const { state, events } = harness()
     state.noteIntent(T0)
     feed(state, 0, 95, 125)
-    feed(state, 95, 30, 160) // Z4
+    feed(state, 95, 30, 160) // Z3 (78% of reserve)
     feed(state, 125, 60, 125) // back down
-    feed(state, 185, 30, 160) // Z4 again
+    feed(state, 185, 30, 160) // Z3 again
     expect(events.filter((e) => e.cls === 'live.zone')).toHaveLength(1)
   })
 
@@ -429,7 +455,8 @@ describe('artifact gates', () => {
 })
 
 describe('session confidence + demotion', () => {
-  // Harness defaults: hot 116, cool 90; zones at maxHr 190: Z3 133, Z4 152.
+  // Harness defaults: hot 116, cool 90; Karvonen zones at max 190 / rest 56:
+  // Z2 136, Z3 150, Z4 163, Z5 177. Depth evidence = Z2+, hard = Z3+.
   const confirms = (events: Emitted[]) => events.filter((e) => e.meta.kind === 'confirm')
   const starts = (events: Emitted[]) => events.filter((e) => e.cls === 'live.session' && e.meta.kind !== 'confirm')
   const rests = (events: Emitted[]) => events.filter((e) => e.cls === 'live.rest')
@@ -438,7 +465,7 @@ describe('session confidence + demotion', () => {
     const { state, events, summaries } = harness()
     feed(state, 0, 60, 70)
     feed(state, 60, 4, (i) => 85 + i * 10) // physiological ramp 85 -> 115
-    feed(state, 64, 570, 122) // ~9.5 min smooth Z2 plateau, one hot streak
+    feed(state, 64, 570, 122) // ~9.5 min smooth Z1 plateau, one hot streak
     expect(starts(events)).toHaveLength(1)
     expect(starts(events)[0].meta.confidence).toBe('low')
     expect(starts(events)[0].content).toContain('Unconfirmed')
@@ -459,7 +486,7 @@ describe('session confidence + demotion', () => {
     const { state, events } = harness()
     feed(state, 0, 30, 80)
     feed(state, 30, 4, (i) => 88 + i * 10)
-    feed(state, 34, 960, 124) // 16 min, structureless, Z2
+    feed(state, 34, 960, 124) // 16 min, structureless, Z1
     expect(confirms(events)).toHaveLength(0)
     expect(starts(events)).toHaveLength(1)
     feed(state, 994, 310, 70)
@@ -490,22 +517,22 @@ describe('session confidence + demotion', () => {
     expect(summaries[0].rr_presence).toBe(0)
   })
 
-  test('sustained Z3 earns depth evidence and confirms (steady cardio)', () => {
+  test('sustained depth earns evidence and confirms (steady cardio)', () => {
     const { state, events } = harness()
     feed(state, 0, 95, 125)
-    feed(state, 95, 301, 140) // Z3 held past 5 min
+    feed(state, 95, 301, 140) // Z2 (depth zone) held past 5 min
     expect(confirms(events)).toHaveLength(1)
     expect(confirms(events)[0].meta.confidence).toBe('medium')
-    expect(confirms(events)[0].meta.confidence_reasons).toContain('sustained_z3')
+    expect(confirms(events)[0].meta.confidence_reasons).toContain('sustained_depth')
   })
 
-  test('one continuous Z4 minute is evidence on its own', () => {
+  test('one continuous hard-effort minute is evidence on its own', () => {
     const { state, events } = harness()
     feed(state, 0, 95, 125)
     feed(state, 95, 30, 140)
-    feed(state, 125, 61, 155) // Z4 for 61s
+    feed(state, 125, 61, 155) // Z3 (hard zone) for 61s
     expect(confirms(events)).toHaveLength(1)
-    expect(confirms(events)[0].meta.confidence_reasons).toContain('z4')
+    expect(confirms(events)[0].meta.confidence_reasons).toContain('hard_effort')
   })
 
   test('evidence without duration ends medium and is not demoted', () => {
@@ -547,7 +574,7 @@ describe('session confidence + demotion', () => {
     feed(state, 0, 200, 122) // low-confidence session running
     state.noteIntent(T0 + 200_000)
     expect(confirms(events)).toHaveLength(0) // not stapled blindly
-    feed(state, 200, 301, 140) // sustained Z3: evidence arrives, claim lands
+    feed(state, 200, 301, 140) // sustained depth (Z2): evidence arrives, claim lands
     expect(confirms(events)).toHaveLength(1)
     expect(confirms(events)[0].meta.confidence).toBe('high')
     expect(confirms(events)[0].meta.confidence_reasons).toContain('intent')
@@ -657,12 +684,12 @@ describe('session confidence + demotion', () => {
 
   test('junk RR intervals are filtered, never flag a real workout as suspect', () => {
     // Edge-hunt find: 150ms junk (the rMSSD tests model the same value) used
-    // to count as mismatched RR and demote a genuine sustained-Z3 ride.
+    // to count as mismatched RR and demote a genuine sustained-depth ride.
     const { state, events, summaries } = harness()
     feed(state, 0, 95, 125, [150])
     feed(state, 95, 301, 140, [150]) // deep evidence with junk-only RR
     expect(confirms(events)).toHaveLength(1)
-    expect(confirms(events)[0].meta.confidence_reasons).toContain('sustained_z3')
+    expect(confirms(events)[0].meta.confidence_reasons).toContain('sustained_depth')
     feed(state, 396, 310, 70, [150])
     expect(rests(events)[0].meta.demoted).toBeUndefined()
     expect(summaries[0].rr_consistency).toBeNull() // junk never became samples
@@ -727,9 +754,9 @@ describe('session confidence + demotion', () => {
     // (a passive elevation's 15s Z3 graze pinged the coach).
     const { state, events } = harness()
     feed(state, 0, 95, 125)
-    feed(state, 95, 100, 135) // Z3 sustained, but still low: 100s < 5min
+    feed(state, 95, 30, 152) // Z3 past the 15s milestone bar, but still low
     expect(events.filter((e) => e.cls === 'live.zone')).toHaveLength(0)
-    feed(state, 195, 210, 135) // crosses the 5-min sustained-Z3 evidence bar
+    feed(state, 125, 40, 152) // crosses the 60s hard-effort evidence bar
     const zones = events.filter((e) => e.cls === 'live.zone')
     expect(zones).toHaveLength(1)
     expect(zones[0].meta.confidence).toBe('medium')

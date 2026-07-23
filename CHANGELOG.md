@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.9.1 - 2026-07-23
+
+### Fixed
+
+- **HR zones are now Karvonen, matching WHOOP's bands exactly.** `zoneOf()`
+  computes % of heart-rate reserve above resting HR (edges 40/60/70/80/90)
+  instead of plain % of max (edges 50/60/70/80/90), which ran up to two zones
+  hot at the low end and misled mid-ride pacing on a zone-targeted plan. The
+  resting HR input is a rolling 7-day median of scored recoveries, never a
+  single night. Session-confidence evidence bars were remapped one zone down
+  (depth = Z2+, hard effort = Z3+) so detection behavior is preserved; the
+  `confidence_reasons` strings were renamed `sustained_z3` to
+  `sustained_depth` and `z4` to `hard_effort`. The iOS Live Activity zone
+  mirror uses the same model. Zone milestone events now report % of
+  heart-rate reserve, and the live snapshot exposes `rest_hr`.
+- **Token-endpoint requests are bounded and observable.** The Jul 22 outage:
+  a refresh POST hung unanswered for Bun's default 300s idle timeout while
+  WHOOP had already processed the rotation, and the lost response burned the
+  single-use refresh token. The token fetch now warns at 30s and aborts at
+  240s (long on purpose: a slow rotation response carries the only copy of
+  the new token, so aborting early would convert recoverable slowness into a
+  burned credential), every no-response attempt is logged, and a 4xx after an
+  unanswered attempt names the likely lost rotation in the error. The
+  response body read now lives inside the retry loop's failure handling, so
+  a body that dies mid-read cannot escape classification. WHOOP API GETs got
+  a 60s bound (idempotent, poll-retried).
+
+### Added
+
+- **Cause-agnostic data-freshness watchdog.** If no poll has succeeded for
+  90 minutes (or 3x the configured poll interval, whichever is larger), the
+  daemon raises a system.health event at alert priority, piercing quiet
+  hours, cooldown, and the daily budget, once per broken day. It detects the
+  ABSENCE of fresh data rather than any particular cause, so it catches the
+  auth-burn class and every future cause of stale cloud data.
+- **In-flight rotation marker.** A marker is persisted before each refresh
+  POST and cleared on any concluded outcome; a surviving marker means an
+  attempt with an unknown outcome, and the next refresh logs it explicitly
+  so a lost rotation is diagnosable in one log read.
+- **Daily re-nag while auth is broken.** The auth-broken event now re-arms
+  each day of an outage (it used to fire once per outage total) and is
+  exempt from the class cooldown and daily budget.
+- **Earlier rotation.** Tokens refresh at half their lifetime instead of at
+  expiry-minus-120s, so a failed rotation is discovered with ~30 minutes of
+  valid access token still in hand.
+
 ## 0.9.0 - 2026-07-22
 
 ### Added
