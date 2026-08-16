@@ -142,6 +142,37 @@ export function clearTokens(): void {
   Bun.spawnSync(['security', 'delete-generic-password', '-s', TOKEN_SERVICE()])
 }
 
+// ── Top-of-hour rotation danger window ────────────────────────────
+// Every token burn since the Jul 23 hardening carries the same fingerprint:
+// a Cloudflare 502 ("prod.whoop.com | 502: Bad gateway") on the rotation
+// request within the first minute after the top of an hour, then
+// invalid_request on the retry because Hydra had already committed the
+// rotation when the gateway ate the response. Observed burns: Jul 29
+// 07:00:16Z, Aug 12 12:00:37Z, Aug 15 12:00:25Z (the only three 5xx the
+// token endpoint ever returned; 100% of them were lethal). That cadence is
+// WHOOP-side scheduled infrastructure, not us. Half-life rotation means a
+// due rotation still holds ~30 minutes of access-token life, so deferring a
+// few minutes is free: never spend the one unrecoverable request the system
+// makes inside the window.
+const DANGER_BEFORE_SEC = 120 // :58:00 onward
+const DANGER_AFTER_SEC = 300 // through :05:00
+
+export function inRotationDangerWindow(nowMs = Date.now()): boolean {
+  const s = Math.floor(nowMs / 1000) % 3600
+  return s >= 3600 - DANGER_BEFORE_SEC || s < DANGER_AFTER_SEC
+}
+
+function tokenAgeSec(t: TokenStore, nowMs: number): number {
+  return (nowMs - Date.parse(t.obtained_at)) / 1000
+}
+
+/** Not hard-expired (with margin): still worth presenting to the API. */
+function stillAlive(t: TokenStore, nowMs = Date.now()): boolean {
+  return tokenAgeSec(t, nowMs) < t.expires_in - 60
+}
+
+let lastDeferralLogAt = 0
+
 async function tokenRequest(params: Record<string, string>): Promise<TokenStore> {
   const config = loadConfig()
   const body = new URLSearchParams({
@@ -162,6 +193,7 @@ async function tokenRequest(params: Record<string, string>): Promise<TokenStore>
   if (isRefresh) markInflight(params.refresh_token)
   let lastError: Error | null = null
   let unanswered = 0
+  let gateway5xx = 0
   const delays = [0, 2000, 5000]
   for (let attempt = 0; attempt < delays.length; attempt++) {
     if (delays[attempt]) await Bun.sleep(delays[attempt])
@@ -204,16 +236,21 @@ async function tokenRequest(params: Record<string, string>): Promise<TokenStore>
       // cannot help. Note: WHOOP's Ory config answers ANY invalid refresh
       // token with invalid_request (not invalid_grant), so the error text
       // alone never distinguishes "burned" from "malformed".
-      const lostHint =
-        unanswered > 0 && isRefresh
-          ? ' [an earlier attempt this cycle got no response: if WHOOP processed that rotation, the response (and the only copy of the new token) is gone and re-consent is required]'
-          : ''
+      let lostHint = ''
+      if (isRefresh && (gateway5xx > 0 || unanswered > 0)) {
+        const cause =
+          gateway5xx > 0
+            ? 'a gateway 5xx, the known burn signature (Jul 29 / Aug 12 / Aug 15 2026)'
+            : 'no response'
+        lostHint = ` [an earlier attempt this cycle got ${cause}: if WHOOP processed that rotation, the response carrying the only copy of the new token is gone and re-consent is required]`
+      }
       // A 4xx is a CONCLUDED attempt (the server answered): the marker only
       // exists to expose attempts whose outcome is unknown, and leaving it
       // would warn on every cycle of an already-diagnosed broken state.
       clearInflight()
       throw new AuthBrokenError(`${status} ${text}${lostHint}`)
     }
+    if (status >= 500) gateway5xx++
     lastError = new Error(`token endpoint ${status}: ${text}`)
     log(`token request attempt ${attempt + 1}/${delays.length}: ${lastError.message}`)
   }
@@ -234,16 +271,25 @@ export async function exchangeCode(code: string): Promise<TokenStore> {
 let cached: TokenStore | null = null
 let refreshing: Promise<TokenStore> | null = null
 
-function isFresh(t: TokenStore): boolean {
-  const ageSec = (Date.now() - Date.parse(t.obtained_at)) / 1000
+function isFresh(t: TokenStore, nowMs = Date.now()): boolean {
   // Rotate at HALF the token's lifetime, not at expiry-minus-margin: a
   // rotation that fails (transiently or terminally) is then discovered with
   // ~30 minutes of still-valid access token in hand, leaving a long quiet
   // window to retry and alert instead of going straight to hard-down.
-  return ageSec < Math.min(t.expires_in / 2, t.expires_in - 120)
+  return tokenAgeSec(t, nowMs) < Math.min(t.expires_in / 2, t.expires_in - 120)
 }
 
-async function doRefresh(refreshToken: string): Promise<TokenStore> {
+async function doRefresh(refreshToken: string, evenInDangerWindow = false): Promise<TokenStore> {
+  // Structural backstop: NO route spends the one unrecoverable request the
+  // system makes inside the burn window: not the scheduled rotation, not
+  // 401 recovery. A failed data call retries after :05; a burned rotation
+  // is a manual re-consent. Only setup forces through (interactive: a burn
+  // there is caught and re-consented in the same run).
+  if (!evenInDangerWindow && inRotationDangerWindow()) {
+    throw new Error(
+      'rotation deferred: inside the top-of-hour window where WHOOP burns rotations (502s at :00); retrying after :05',
+    )
+  }
   const rotated = await tokenRequest({
     grant_type: 'refresh_token',
     refresh_token: refreshToken,
@@ -258,15 +304,42 @@ async function doRefresh(refreshToken: string): Promise<TokenStore> {
  * Daemon-only: see the module header.
  */
 export async function getAccessToken(): Promise<string> {
-  if (cached && isFresh(cached)) return cached.access_token
+  const now = Date.now()
+  // Serveable = fresh, or riding out the danger window with life left; the
+  // cache answers both without a Keychain subprocess per call.
+  if (
+    cached &&
+    (isFresh(cached, now) || (inRotationDangerWindow(now) && stillAlive(cached, now)))
+  ) {
+    return cached.access_token
+  }
 
   const stored = loadTokens()
   if (!stored) {
     throw new Error('No WHOOP tokens in Keychain. Run: bun run setup')
   }
-  if (isFresh(stored)) {
+  if (isFresh(stored, now)) {
     cached = stored
     return stored.access_token
+  }
+
+  // Rotation due, but NEVER inside the top-of-hour danger window (see the
+  // block comment above tokenRequest). With life left, the current token
+  // rides the window out; already dead, this call fails and the poll chain
+  // retries after :05 (a failed poll is recoverable, a burned rotation is
+  // not). doRefresh enforces the same refusal for every other route.
+  if (inRotationDangerWindow(now)) {
+    if (stillAlive(stored, now)) {
+      if (now - lastDeferralLogAt > 600_000) {
+        lastDeferralLogAt = now
+        log('rotation due but deferred: inside the top-of-hour window where WHOOP burns rotations (502s at :00); the current access token stays valid through the deferral')
+      }
+      cached = stored
+      return stored.access_token
+    }
+    throw new Error(
+      'rotation deferred: inside the top-of-hour window where WHOOP burns rotations (502s at :00) and the stored token is already expired; retrying after :05',
+    )
   }
 
   if (!refreshing) {
@@ -278,12 +351,25 @@ export async function getAccessToken(): Promise<string> {
   return rotated.access_token
 }
 
-/** Force one refresh cycle regardless of freshness (single-flight shared). */
-export async function forceRefresh(): Promise<TokenStore> {
+/** Test-only: bun shares one module registry across test files, and a
+ *  faked-clock test that rotates successfully leaves `cached` stamped with a
+ *  FUTURE obtained_at that reads as fresh forever under the real clock,
+ *  silently short-circuiting every later getAccessToken assertion. */
+export function _resetTokenCacheForTests(): void {
+  cached = null
+}
+
+/**
+ * Force one refresh cycle regardless of freshness (single-flight shared).
+ * Refuses inside the top-of-hour danger window like every rotation route;
+ * setup passes evenInDangerWindow (its consent fallback recovers a burn in
+ * the same interactive run, and validation must never silently no-op).
+ */
+export async function forceRefresh(evenInDangerWindow = false): Promise<TokenStore> {
   const stored = loadTokens()
   if (!stored) throw new Error('No WHOOP tokens in Keychain. Run: bun run setup')
   if (!refreshing) {
-    refreshing = doRefresh(stored.refresh_token).finally(() => {
+    refreshing = doRefresh(stored.refresh_token, evenInDangerWindow).finally(() => {
       refreshing = null
     })
   }

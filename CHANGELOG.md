@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.9.3 - 2026-08-16
+
+### Fixed
+
+- **Rotations dodge WHOOP's top-of-hour instability window.** Log forensics
+  across all four auth outages (Jul 22 through Aug 16) closed the "why do
+  rotation responses keep vanishing" question: the only three 5xx the token
+  endpoint ever returned were Cloudflare 502s within the first minute after
+  the top of an hour (07:00:16Z, 12:00:37Z, 12:00:25Z), and every one burned
+  the single-use refresh token (the rotation was committed server-side while
+  the gateway ate the response). WHOOP restarts its auth origin on a
+  top-of-hour schedule; nothing client- or account-side causes it. No
+  rotation route may now fire inside :58:00-:05:00: the scheduled rotation
+  serves the current token through the window (half-life rotation leaves ~30
+  minutes of slack, so this is free), a hard-expired token fails the call
+  and the poll chain retries after :05 (a failed poll is recoverable, a
+  burned rotation is not), and 401 recovery obeys the same refusal. Only
+  setup's validation forces through, where the interactive consent fallback
+  recovers a burn in the same run.
+- **The burn signature is named in the failure.** A refresh rejection
+  preceded by a gateway 5xx in the same cycle now says explicitly that the
+  rotation was likely processed and the response lost, distinct from the
+  no-response case, so the next outage self-diagnoses from the log line.
+
 ## 0.9.2 - 2026-07-23
 
 ### Changed

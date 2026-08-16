@@ -123,7 +123,9 @@ let needConsent = !loadTokens()
 if (!needConsent) {
   say('Tokens found in Keychain; validating against WHOOP...')
   try {
-    await forceRefresh()
+    // evenInDangerWindow: validation must never silently no-op, and a burn
+    // here is recovered by the consent fallback right below.
+    await forceRefresh(true)
     say('Tokens are healthy (validated and rotated); skipping consent.')
   } catch (e) {
     // Wipe ONLY on token-level rejections (allowlist). A 4xx can also mean
