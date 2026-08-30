@@ -27,6 +27,9 @@ struct HealthRelayApp: App {
                         // lock-screen pulse card; every open re-arms it.
                         LiveActivityController.shared.ensurePulse()
                         LiveActivityController.shared.syncSessionState()
+                        // Re-armed every open: a fresh install carries a
+                        // fresh death date and the old pings must follow it.
+                        Signing.scheduleExpiryNotifications()
                     }
                 }
         }
@@ -83,6 +86,10 @@ struct RootView: View {
         }
         .onAppear {
             if !Settings.shared.configured && !Demo.active { showSettings = true }
+            // Screenshot hook: HR_DEMO_SETTINGS=1 opens the settings sheet.
+            if Demo.active, ProcessInfo.processInfo.environment["HR_DEMO_SETTINGS"] != nil {
+                showSettings = true
+            }
         }
     }
 
@@ -187,23 +194,97 @@ final class DemoDriver {
         dateFmt.dateFormat = "yyyy-MM-dd"
         let today = dateFmt.string(from: Date())
         let generated = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-720))
-        // The demo plan is a real Day 1 shape: 8 lifts in locked order,
-        // structured AMRAP + back-offs, so every row type renders.
-        let sample = """
-        {
-          "generated_at": "\(generated)",
-          "date": "\(today)",
-          "title": "Day 1 · Full Body 8s",
-          "cycle": 2, "week": 1, "day": 1,
-          "rest": false,
-          "recovery_note": "Recovery 74%, green. Full volume as written. AMRAPs at RIR 2-3, you train solo.",
-          "warmup": [
+        // HR_DEMO_RIDE=easy|quality|long: the ride half of the day.
+        // easy = Monday 2 h before Day 1; quality = Tuesday 4x8 before Day 2;
+        // long = Saturday ride-only with a route + clock (lifts empty).
+        let rideMode = ProcessInfo.processInfo.environment["HR_DEMO_RIDE"] ?? ""
+        let rideBlock: String
+        switch rideMode {
+        case "easy":
+            rideBlock = """
+              "ride": {
+                "slot": "05:00", "kind": "easy",
+                "title": "Easy 2 h, the first of the new weekday length",
+                "duration_min": 120, "venue": "your call, easy roads",
+                "structure": [
+                  {"order": 1, "name": "Whole ride",
+                   "detail": "2 h continuous, Z1 into low Z2. Nowhere near 144.",
+                   "target": "full comfortable sentences the entire time"}
+                ],
+                "hr_readout": "Z2 ceiling 144, but this ride should sit well under it. LTHR 156 is the anchor. Talk test is primary, HR is secondary, do not police the bpm.",
+                "cues": [
+                  "if hour one does not feel too easy, it is too hard",
+                  "this ends ~07:00 against a 14:00 squat. The ride yields to the lift.",
+                  "optional: run the three-state talk test, comfortable vs yes-but vs no"
+                ],
+                "notes": "First 2 h weekday ride, stepped up from 50 min on Aug 26."
+              },
+            """
+        case "quality":
+            rideBlock = """
+              "ride": {
+                "slot": "05:00", "kind": "quality",
+                "title": "4 × 8 min, Sudirman",
+                "duration_min": 70, "venue": "Sudirman, Bundaran Senayan to Bundaran HI",
+                "segments": ["6200488 northbound 4,883.5 m", "6200491 southbound 4,856.7 m"],
+                "structure": [
+                  {"order": 1, "name": "Transit", "detail": "7.86 km easy, ~20 min. Soft, so the reps are the only load."},
+                  {"order": 2, "name": "Rep 1", "detail": "8:00 Senayan to HI, northbound", "target": "self-graded maximal tolerable, this rep sets the ceiling"},
+                  {"order": 3, "name": "Recovery", "detail": "out-and-back: 2:00 away, u-turn, 2:00 back", "rest": "4 min"},
+                  {"order": 4, "name": "Rep 2", "detail": "8:00 HI to Senayan, southbound", "target": "breath, not speed, going south"},
+                  {"order": 5, "name": "Recovery", "detail": "out-and-back", "rest": "4 min"},
+                  {"order": 6, "name": "Rep 3", "detail": "8:00 northbound", "target": "compare to rep 1, same direction"},
+                  {"order": 7, "name": "Recovery", "detail": "out-and-back", "rest": "4 min"},
+                  {"order": 8, "name": "Rep 4", "detail": "8:00 southbound", "target": "compare to rep 2. Empty the tank only in the last minute."},
+                  {"order": 9, "name": "Transit home", "detail": "easy spin"}
+                ],
+                "hr_readout": "151-159 sustained is the target. 164 is the demonstrated blow-up line, 142 is too easy by your own grade. HR lags 30-60 s, pace the first 2 min off breathing.",
+                "cues": ["rep 1 sets the ceiling", "three words at most", "the roundabout caps the rep: 8:00 or the roundabout, whichever comes first"],
+                "notes": "Never ride into roundabout traffic at speed."
+              },
+            """
+        case "long":
+            rideBlock = """
+              "ride": {
+                "slot": "05:30", "kind": "long",
+                "title": "Long ride, build Saturday 1 of 3",
+                "duration_min": 210, "venue": "Binloop out to Sudirman and back",
+                "structure": [
+                  {"order": 1, "name": "Hour one", "detail": "Z1 into low Z2. Should feel too easy.", "target": "that feeling is the plan, not a mistake"},
+                  {"order": 2, "name": "Middle", "detail": "steady Z2, 132-144. No chasing riders, no sprinting lights."},
+                  {"order": 3, "name": "Last hour", "detail": "hold the same effort as the heat arrives. Slower speed at the same effort is correct."}
+                ],
+                "hr_readout": "Z2 is 132-144. Touching 148 is the top of your real range, not a failure. Sustaining 150+ for hours is the TBK mistake.",
+                "cues": ["stop only to refill", "drink every 15 min, big swallows", "full comfortable sentences = Z2, whatever the screen says"],
+                "route": {"file": "demo-route.gpx", "name": "CFD Sudirman loop"},
+                "timeline": [
+                  {"at": "05:30", "kind": "note", "what": "Roll out, both bottles full"},
+                  {"at": "06:15", "kind": "gel", "what": "Gel 1 (EJ)"},
+                  {"at": "06:30", "kind": "drink", "what": "First bottle should be empty"},
+                  {"at": "07:00", "kind": "gel", "what": "Gel 2 (EJ)"},
+                  {"at": "07:20", "kind": "cp", "what": "Refill: Lawson Bendungan Hilir", "km": 28.5},
+                  {"at": "07:45", "kind": "gel", "what": "Gel 3 (Beta Fuel)"},
+                  {"at": "08:30", "kind": "gel", "what": "Gel 4 (EJ)"},
+                  {"at": "09:00", "kind": "note", "what": "Home. Eat sitting up, not lying flat."}
+                ]
+              },
+            """
+        default:
+            rideBlock = ""
+        }
+        let isLong = rideMode == "long"
+        let warmupJSON = """
+          [
             "Light cardio 3-5 min",
             "McGill Big 3: Bird Dog 1x8/side, Side Plank 1x20s/side, Curl-Up 1x5",
             "Hip mobility 2 min",
             "Glute bridges 2x10"
-          ],
-          "lifts": [
+          ]
+        """
+        // The demo lifts are a real Day 1 shape: 8 lifts in locked order,
+        // structured AMRAP + back-offs, so every row type renders.
+        let liftsJSON = """
+          [
             {"order": 1, "name": "Pullup", "weight_kg": 0, "scheme": "5x2",
              "notes": "grease-the-groove, submax doubles ~1 RIR, never to failure"},
             {"order": 2, "name": "Lat Pulldown", "weight_kg": 45, "scheme": "2x10-12",
@@ -230,9 +311,43 @@ final class DemoDriver {
              "notes": "strict, no leg drive"},
             {"order": 8, "name": "Lateral Raise", "weight_kg": 6, "scheme": "2x8-10",
              "notes": "strict tempo 2-0-2-1, the one isolation exception"}
-          ],
+          ]
+        """
+        let tailJSON = isLong ? """
+          "session_notes": ["Rung one of three build Saturdays before the Audax 150. Distance is your call."],
+          "reminders": ["Flat kit on the bike", "Plain water in both bottles"]
+        """ : """
           "session_notes": ["Bar speed rules: if the last working set grinds, that is fatigue talking, not weakness."],
           "reminders": ["5g creatine on waking", "Liquid chalk", "Black coffee sips between sets"]
+        """
+        let title = isLong
+            ? "Saturday · long ride"
+            : (rideMode == "quality" ? "Day 2 · Full Body 6s, plus the 4×8" : "Day 1 · Full Body 8s")
+        // HR_DEMO_RECOVERY=amber|red swaps the coach's margin note so every
+        // band colour can be screenshotted.
+        let recoveryNote: String
+        switch ProcessInfo.processInfo.environment["HR_DEMO_RECOVERY"] {
+        case "amber":
+            recoveryNote = "Recovery 51%, amber on 5h02m sleep. Top set to a single on any grind, and the farmer carry is the first thing cut."
+        case "red":
+            recoveryNote = "Recovery 22%, red. Surface the number, your call. If you go, the AMRAP is off and everything is RIR 3."
+        default:
+            recoveryNote = isLong
+                ? "Recovery 68%, green. Hour one too easy is the whole plan."
+                : "Recovery 74%, green. Full volume as written. AMRAPs at RIR 2-3, you train solo."
+        }
+        let sample = """
+        {
+          "generated_at": "\(generated)",
+          "date": "\(today)",
+          "title": "\(title)",
+          "cycle": 2, "week": 1, "day": \(isLong ? 0 : 1),
+          "rest": false,
+          "recovery_note": "\(recoveryNote)",
+          "warmup": \(isLong ? "[]" : warmupJSON),
+          \(rideBlock)
+          "lifts": \(isLong ? "[]" : liftsJSON),
+          \(tailJSON)
         }
         """
         if let data = sample.data(using: .utf8),

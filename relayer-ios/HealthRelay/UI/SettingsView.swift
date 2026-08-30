@@ -49,6 +49,32 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    LabeledContent("Version", value: Signing.appVersion)
+                    if let expires = Signing.expiresAt {
+                        LabeledContent("Signed until") {
+                            Text(expires.formatted(date: .abbreviated, time: .shortened))
+                        }
+                        // Only the countdown ticks; a TimelineView around
+                        // both rows would fuse them into one Form cell.
+                        TimelineView(.periodic(from: .now, by: 60)) { context in
+                            LabeledContent("Countdown") {
+                                Text(Signing.countdown(at: context.date) ?? "")
+                                    .monospacedDigit()
+                                    .foregroundStyle(signingTint(at: context.date))
+                            }
+                        }
+                    } else {
+                        LabeledContent("Signed until", value: "No profile embedded")
+                    }
+                } header: {
+                    Text("Sideload clock")
+                } footer: {
+                    Text(Signing.expiresAt == nil
+                        ? "Simulator or store builds carry no provisioning profile, so there is nothing to count down."
+                        : "A free-team signature lives seven days from when Xcode minted it, then iOS refuses to launch the app. You get a notification the day before and three hours out. Reinstall from Xcode (scripts/build-phone.sh install, cable in) to reset the clock.")
+                }
+
+                Section {
                     Button("Save & reconnect") {
                         settings.host = draftHost.trimmingCharacters(in: .whitespaces)
                         settings.token = draftToken.trimmingCharacters(in: .whitespaces)
@@ -71,6 +97,14 @@ struct SettingsView: View {
             }
         }
         .preferredColorScheme(.dark)
+    }
+
+    private func signingTint(at now: Date) -> Color {
+        switch Signing.urgency(at: now) {
+        case .critical: return Theme.accent
+        case .soon: return .primary
+        default: return .secondary
+        }
     }
 
     private var stepsStateText: String {

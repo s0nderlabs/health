@@ -7,7 +7,8 @@ import { readFileSync, writeFileSync, unlinkSync, existsSync } from 'fs'
 import { join } from 'path'
 import { randomBytes } from 'node:crypto'
 import { AuthBrokenError } from './auth.js'
-import { ensureRuntimeDir, loadConfig, saveConfig, configFileWritable, inQuietHours, resolvePlanPath, PID_PATH, SOCKET_PATH, RUNTIME_DIR } from './config.js'
+import { signedHoursLeft, signingNag } from './signing.js'
+import { ensureRuntimeDir, loadConfig, saveConfig, configFileWritable, inQuietHours, resolvePlanPath, PID_PATH, SOCKET_PATH, RUNTIME_DIR, ROUTES_DIR } from './config.js'
 import { Store } from './store.js'
 import { Engine } from './engine.js'
 import { IpcServer } from './ipc.js'
@@ -174,7 +175,18 @@ const liveListener = new LiveListener(liveState, () => config().live.token, {
     return { added, deleted }
   },
   getPlanPath: () => resolvePlanPath(config()),
+  getRoutesDir: () => ROUTES_DIR,
   onPhoneSeen: (atIso) => store.setMeta('phone_relayer_last_seen', atIso),
+  // The phone reads its own signature expiry off the embedded profile and
+  // reports it at hello; persisting it turns the 5-day last-seen guess into
+  // a countdown against the real date (see phoneSigningWatchdog).
+  // Only ever OVERWRITE with a real value: a hello from an older build (or a
+  // repackaged one with no embedded profile) must not wipe a known-good
+  // expiry and silently switch the countdown off.
+  onPhoneApp: ({ version, signedUntil }) => {
+    if (version) store.setMeta('phone_app_version', version)
+    if (signedUntil) store.setMeta('phone_app_signed_until', signedUntil)
+  },
   // Yield survives daemon restarts: the window is persisted and re-applied at
   // boot (below), so a kickstart mid-ride cannot silently re-arm the legs and
   // steal the band back from Strava.
@@ -350,6 +362,11 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
         // Free-tier sideload certs die silently after 7 days; surface staleness
         // so an expired phone relayer can never cost a workout unnoticed.
         phone_relayer_last_seen: store.getMeta('phone_relayer_last_seen'),
+        // The real sideload clock, self-reported by the phone build at hello
+        // (null until a build that carries it has connected once).
+        phone_app_version: store.getMeta('phone_app_version') || null,
+        phone_app_signed_until: store.getMeta('phone_app_signed_until') || null,
+        phone_app_signed_hours_left: signedHoursLeft(store.getMeta('phone_app_signed_until')),
       }
     }
     case 'read': {
@@ -621,11 +638,24 @@ const STALE_DATA_FLOOR_MS = 90 * 60_000
 // grace); that failure mode needs an EXTERNAL monitor and is out of scope.
 const WATCHDOG_UPTIME_GRACE_MS = 15 * 60_000
 
+/** The sideload clock, daemon side: the pure logic lives in signing.ts
+ *  (tested); this is the glue to the store and the engine. bypassCooldown:
+ *  self-throttled by the day-scoped key and bounded by the nag window. */
+function phoneSigningWatchdog(now = Date.now()): void {
+  const nag = signingNag(store.getMeta('phone_app_signed_until'), now)
+  if (nag) engine.systemProblem(nag.problem, nag.key, { bypassCooldown: true })
+}
+
 setInterval(() => {
   try {
     engine.tick()
   } catch (err) {
     log(`tick failed: ${err}`)
+  }
+  try {
+    phoneSigningWatchdog()
+  } catch (err) {
+    log(`signing watchdog failed: ${err}`)
   }
   try {
     // Anchor on the last successful poll; an install that has NEVER polled

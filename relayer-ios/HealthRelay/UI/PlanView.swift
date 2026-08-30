@@ -17,6 +17,109 @@ struct PlanView: View {
     var onEndSession: () -> Void = {}
     @State private var expanded: Set<Int>
     @State private var seededExpansion = false
+    @StateObject private var routes = RouteStore()
+    /// An explicit toggle tap, keyed to the plan it was made on so a new
+    /// day's plan goes back to the time-of-day default.
+    @State private var chosenFace: (key: String, face: Face)?
+
+    enum Face: Hashable { case ride, lift }
+    enum DayShape { case both, rideOnly, liftOnly, neither }
+
+    private func dayShape(_ plan: Plan) -> DayShape {
+        if plan.rest == true { return .neither }
+        let ride = plan.ride != nil
+        let lifts = !(plan.lifts ?? []).isEmpty
+        switch (ride, lifts) {
+        case (true, true): return .both
+        case (true, false): return .rideOnly
+        case (false, true): return .liftOnly
+        // rest:false with nothing in it: a plan with no session is a rest
+        // day in all but name, never a blank page.
+        case (false, false): return .neither
+        }
+    }
+
+    /// Which face shows. Single-sport days have no choice. Double days: an
+    /// explicit tap wins for that plan; otherwise the ride until an hour
+    /// after it should have ended (05:00 + 2 h -> ride until 08:00), then
+    /// the lift. A plan for a later date shows the ride, the first thing
+    /// coming up.
+    private func activeFace(_ plan: Plan, shape: DayShape) -> Face {
+        switch shape {
+        case .rideOnly: return .ride
+        case .liftOnly, .neither: return .lift
+        case .both: break
+        }
+        // A live gym session owns the tab: its End capsule, checkmarks and
+        // rest rungs must stay reachable whatever the clock says.
+        if armed { return .lift }
+        if let chosen = chosenFace, chosen.key == planKey(plan) { return chosen.face }
+        if Demo.active, let raw = ProcessInfo.processInfo.environment["HR_DEMO_FACE"] {
+            return raw == "lift" ? .lift : .ride
+        }
+        guard planIsToday, let ride = plan.ride, let slot = ride.slot else { return .ride }
+        let parts = slot.split(separator: ":").compactMap { Int($0) }
+        guard parts.count == 2 else { return .ride }
+        let rideOver = parts[0] * 60 + parts[1] + (ride.duration_min ?? 120) + 60
+        let now = Calendar.current.dateComponents([.hour, .minute], from: Date())
+        let minutes = (now.hour ?? 0) * 60 + (now.minute ?? 0)
+        return minutes >= rideOver ? .lift : .ride
+    }
+
+    private func planKey(_ plan: Plan) -> String {
+        [plan.date, plan.generated_at].compactMap { $0 }.joined(separator: "|")
+    }
+
+    /// "The coach named a route but the map is not here" must look different
+    /// from "no route was planned": one quiet line says which.
+    private func routeNote(_ ride: Plan.Ride) -> String? {
+        guard let file = ride.route?.file, !file.isEmpty else { return nil }
+        if routes.route(for: file) != nil { return nil }
+        switch routes.status(for: file) {
+        case .loading: return "route loading"
+        case .failed: return "route unavailable, pull to refresh"
+        case .idle: return nil
+        }
+    }
+
+    /// The toggle: one glass capsule, two halves, the live half raised a
+    /// step. Same grammar as the tab pill so it reads as navigation, not as
+    /// a control that does something to the session.
+    private func segmentToggle(_ plan: Plan) -> some View {
+        let face = activeFace(plan, shape: .both)
+        return HStack(spacing: 2) {
+            segmentHalf("Ride", icon: "bicycle", on: face == .ride) {
+                chosenFace = (planKey(plan), .ride)
+            }
+            segmentHalf("Lift", icon: "dumbbell.fill", on: face == .lift) {
+                chosenFace = (planKey(plan), .lift)
+            }
+        }
+        .padding(3)
+        .glassCapsule()
+        .animation(.easeOut(duration: 0.22), value: face)
+    }
+
+    private func segmentHalf(_ title: String, icon: String, on: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: .semibold))
+                Text(title)
+                    .font(Theme.rounded(14, .semibold))
+            }
+            .foregroundStyle(on ? Theme.textPrimary : Theme.textTertiary)
+            .frame(maxWidth: .infinity)
+            .frame(height: 38)
+            .background {
+                if on {
+                    Capsule().fill(Color.white.opacity(0.10))
+                }
+            }
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+    }
 
     private var armed: Bool { progress.sessionActive }
 
@@ -40,24 +143,63 @@ struct PlanView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     if let plan = store.plan {
                         header(plan)
+                        // Double days (Mon/Tue/Thu) split into two faces
+                        // behind one toggle; single-sport days show their
+                        // one face with no toggle; rest days show rest.
+                        let shape = dayShape(plan)
+                        if shape == .both {
+                            segmentToggle(plan)
+                        }
                         if let note = plan.recovery_note, !note.isEmpty {
-                            guardrailCard(note)
+                            guardrailLine(note, recovery: plan.recovery)
                         }
-                        if plan.rest == true {
-                            restCard(plan)
+                        if shape == .neither {
+                            restBlock(plan)
+                            // A rest day still carries the day's habits
+                            // (creatine, chalk for tomorrow): never drop them.
+                            if let reminders = plan.reminders, !reminders.isEmpty {
+                                quietSection("REMINDERS", items: reminders)
+                            }
                         } else {
-                            if let warmup = plan.warmup, !warmup.isEmpty {
-                                quietCard("WARMUP", items: warmup)
+                            // ONE card per face. The session (or the ride,
+                            // with its route and clock inside it) is the only
+                            // raised surface; warmup, notes, reminders and the
+                            // coach's margin note sit on the base layer.
+                            let face = activeFace(plan, shape: shape)
+                            Group {
+                                if face == .ride, let ride = plan.ride {
+                                    // On a ride-only day the warmup is the
+                                    // pre-ride prep (race-day wake/fuel steps
+                                    // live there), so it renders above the
+                                    // ride. On a double day it is the lift's.
+                                    if shape == .rideOnly, let warmup = plan.warmup, !warmup.isEmpty {
+                                        quietSection("BEFORE THE RIDE", items: warmup)
+                                            .padding(.top, -6)
+                                    }
+                                    RideCard(
+                                        ride: ride,
+                                        liftsLater: shape == .both,
+                                        route: routes.route(for: ride.route?.file),
+                                        routeNote: routeNote(ride))
+                                        .id("ride")
+                                } else if let lifts = plan.lifts, !lifts.isEmpty {
+                                    sessionCard(lifts, warmup: plan.warmup ?? [])
+                                }
+                                // Notes and reminders belong to the lift half
+                                // when there is one (chalk, creatine, bar
+                                // speed); on a ride-only day they are the
+                                // ride's.
+                                if face == .lift || shape == .rideOnly {
+                                    if let notes = plan.session_notes, !notes.isEmpty {
+                                        quietSection("NOTES", items: notes)
+                                    }
+                                    if let reminders = plan.reminders, !reminders.isEmpty {
+                                        quietSection("REMINDERS", items: reminders)
+                                    }
+                                }
                             }
-                            if let lifts = plan.lifts, !lifts.isEmpty {
-                                sessionCard(lifts)
-                            }
-                            if let notes = plan.session_notes, !notes.isEmpty {
-                                quietCard("NOTES", items: notes)
-                            }
-                        }
-                        if let reminders = plan.reminders, !reminders.isEmpty {
-                            quietCard("REMINDERS", items: reminders)
+                            .id(face)
+                            .transition(.opacity)
                         }
                         freshness(plan)
                     } else {
@@ -70,17 +212,26 @@ struct PlanView: View {
             }
             .scrollIndicators(.hidden)
             .background(AmbientBackground())
-            .refreshable { store.refresh() }
+            .refreshable {
+                store.refresh()
+                routes.load(file: store.plan?.ride?.route?.file, name: store.plan?.ride?.route?.name, retry: true)
+            }
             .onAppear {
                 seedExpansion()
                 attachProgress()
+                routes.load(file: store.plan?.ride?.route?.file, name: store.plan?.ride?.route?.name)
                 // Screenshot hook: HR_DEMO_SCROLL=<index> parks a lift at the
                 // top of the frame so audits can capture a whole ladder.
+                // Also accepts a card name (ride, route, clock) with an
+                // optional ":bottom" suffix, for cards taller than a frame.
                 if Demo.active,
                    let raw = ProcessInfo.processInfo.environment["HR_DEMO_SCROLL"],
-                   let index = Int(raw) {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
-                        proxy.scrollTo("lift-\(index)", anchor: .top)
+                   let first = raw.split(separator: ":").first {
+                    let parts = raw.split(separator: ":").map(String.init)
+                    let target = Int(first).map { "lift-\($0)" } ?? String(first)
+                    let anchor: UnitPoint = parts.count > 1 && parts[1] == "bottom" ? .bottom : .top
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+                        proxy.scrollTo(target, anchor: anchor)
                     }
                 }
             }
@@ -88,6 +239,7 @@ struct PlanView: View {
                 seededExpansion = false
                 seedExpansion()
                 attachProgress()
+                routes.load(file: store.plan?.ride?.route?.file, name: store.plan?.ride?.route?.name, retry: true)
             }
         }
     }
@@ -149,30 +301,89 @@ struct PlanView: View {
 
     // ── Guardrail: the coach's margin note ───────────────────────────
 
-    private func guardrailCard(_ note: String) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: "moon.fill")
+    /// The coach's margin note, at the base layer. The recovery score is
+    /// system data and the sentence is coaching, so they get different
+    /// voices: a band-coloured dot + the number as the lead, the prose
+    /// after it one register quieter. Falls back to plain prose when the
+    /// note does not open with a score.
+    private func guardrailLine(_ note: String, recovery: Plan.Recovery?) -> some View {
+        // Structured data first; the regex is the fallback for plans that
+        // predate the field. Either way the number appears once.
+        let parsed = Self.recoveryLead(note)
+        let lead: RecoveryLead? = {
+            if let score = recovery?.score {
+                // A structured score without a band still takes the band
+                // the prose named, so the dot is never grey by accident.
+                return RecoveryLead(
+                    score: score,
+                    band: recovery?.band?.lowercased() ?? parsed?.band,
+                    rest: parsed?.rest ?? note)
+            }
+            return parsed
+        }()
+        return HStack(alignment: .firstTextBaseline, spacing: 9) {
+            if let lead = lead {
+                Circle()
+                    .fill(bandColor(lead.band))
+                    .frame(width: 7, height: 7)
+                    .offset(y: -1)
+                Text("\(lead.score)%")
+                    .font(Theme.rounded(15, .semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.textPrimary)
+            }
+            Text(lead?.rest ?? note)
                 .font(.system(size: 13))
-                .foregroundStyle(Theme.textTertiary)
-                .padding(.top, 2)
-            Text(note)
-                .font(.footnote)
                 .lineSpacing(2)
                 .foregroundStyle(Theme.textSecondary)
             Spacer(minLength: 0)
         }
-        .padding(16)
-        .glassCard()
+        .padding(.horizontal, 2)
+    }
+
+    private struct RecoveryLead {
+        let score: Int
+        let band: String?
+        let rest: String
+    }
+
+    /// "Recovery 74%, green. Full volume..." -> 74 / green / "Full volume..."
+    /// Only a note that OPENS with the score is tokenised; a score quoted
+    /// mid-sentence ("Sunday was 51% amber") is history, not today's lead.
+    private static func recoveryLead(_ note: String) -> RecoveryLead? {
+        let pattern = "^\\s*(?:recovery\\s+)?(\\d{1,3})\\s*%\\s*,?\\s*(green|amber|red)?\\s*[.,:;]?\\s*"
+        guard let re = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { return nil }
+        let ns = note as NSString
+        guard let m = re.firstMatch(in: note, range: NSRange(location: 0, length: ns.length)),
+              let score = Int(ns.substring(with: m.range(at: 1))) else { return nil }
+        let band = m.range(at: 2).location == NSNotFound
+            ? nil : ns.substring(with: m.range(at: 2)).lowercased()
+        var rest = ns.substring(from: m.range.location + m.range.length)
+            .trimmingCharacters(in: .whitespaces)
+        if let first = rest.first { rest = first.uppercased() + rest.dropFirst() }
+        return RecoveryLead(score: score, band: band, rest: rest)
+    }
+
+    /// Green stays the quiet link-dot green; amber is a desaturated warm
+    /// tone that cannot outshout the accent; red IS the accent, because a
+    /// red morning is the one that earns attention.
+    private func bandColor(_ band: String?) -> Color {
+        switch band {
+        case "green": return Theme.okDim
+        case "amber": return Color(red: 0.86, green: 0.66, blue: 0.36)
+        case "red": return Theme.accent
+        default: return Theme.textTertiary
+        }
     }
 
     // ── The session: ordered rows, expandable ladders ────────────────
 
-    private func sessionCard(_ lifts: [Plan.Lift]) -> some View {
+    private func sessionCard(_ lifts: [Plan.Lift], warmup: [String]) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
                 label(armed
                     ? "SESSION · LIVE"
-                    : (lifts.count == 1 ? "SESSION" : "SESSION · \(lifts.count) LIFTS · IN ORDER"))
+                    : (lifts.count == 1 ? "SESSION" : "SESSION · \(lifts.count) LIFTS"))
                 Spacer(minLength: 8)
                 if !armed && planIsToday {
                     Button(action: onStartSession) {
@@ -207,6 +418,18 @@ struct PlanView: View {
                 }
             }
             .padding(.bottom, 4)
+            // The warmup is the same four lines every session and he knows
+            // them: one quiet run-on line inside the card, not a card of
+            // its own with four bullets.
+            if !warmup.isEmpty {
+                Text(warmup.joined(separator: "  ·  "))
+                    .font(.system(size: 12))
+                    .lineSpacing(2.5)
+                    .foregroundStyle(Theme.textTertiary)
+                    .padding(.top, 6)
+                    .padding(.bottom, 10)
+                Rectangle().fill(Theme.hairline).frame(height: 1)
+            }
             ForEach(Array(lifts.enumerated()), id: \.offset) { index, lift in
                 liftRow(lift, index: index)
                     .id("lift-\(index)")
@@ -671,10 +894,12 @@ struct PlanView: View {
             .foregroundStyle(Theme.textTertiary)
     }
 
-    private func quietCard(_ title: String, items: [String]) -> some View {
-        VStack(alignment: .leading, spacing: 9) {
+    /// Notes and reminders: base layer, same left edge as the card's
+    /// content, no container. They are margin notes, not sessions.
+    private func quietSection(_ title: String, items: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
             label(title)
-                .padding(.bottom, 1)
+                .padding(.bottom, 2)
             ForEach(items, id: \.self) { item in
                 HStack(alignment: .firstTextBaseline, spacing: 9) {
                     Circle()
@@ -682,7 +907,7 @@ struct PlanView: View {
                         .frame(width: 3, height: 3)
                         .offset(y: -3)
                     Text(item)
-                        .font(.system(size: 14))
+                        .font(.system(size: 13.5))
                         .lineSpacing(2)
                         .foregroundStyle(Theme.textSecondary)
                 }
@@ -690,17 +915,16 @@ struct PlanView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 18)
-        .padding(.vertical, 16)
-        .glassCard()
+        .padding(.top, 8)
     }
 
-    private func restCard(_ plan: Plan) -> some View {
+    private func restBlock(_ plan: Plan) -> some View {
         VStack(spacing: 12) {
             Image(systemName: "moon.fill")
                 .font(.system(size: 30, weight: .light))
                 .foregroundStyle(Theme.textTertiary)
                 .padding(.bottom, 2)
-            Text("No gym today")
+            Text("No training today")
                 .font(.system(.title2, design: .rounded).weight(.semibold))
                 .foregroundStyle(Theme.textPrimary)
             if let notes = plan.session_notes, !notes.isEmpty {
@@ -715,9 +939,7 @@ struct PlanView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.horizontal, 18)
-        .padding(.vertical, 40)
-        .glassCard()
-        .padding(.top, 6)
+        .padding(.top, 70)
     }
 
     private func freshness(_ plan: Plan) -> some View {

@@ -34,6 +34,9 @@ struct LiveView: View {
                     .transition(.opacity)
             }
 
+            signingLine
+                .padding(.bottom, 10)
+
             Group {
                 if la.sessionUp {
                     sessionBar
@@ -57,6 +60,57 @@ struct LiveView: View {
             if Demo.active, ProcessInfo.processInfo.environment["HR_DEMO_SHEET"] != nil {
                 showIntent = true
             }
+        }
+    }
+
+    // ── The sideload clock: a whisper until it matters ───────────────
+
+    /// A free-team signature dies after seven days with no warning from
+    /// iOS. Tertiary and small while there is time, brighter inside two
+    /// days, accent inside twelve hours. Tapping opens Settings, where the
+    /// exact date lives. Absent entirely when no profile is embedded.
+    @ViewBuilder
+    private var signingLine: some View {
+        if Signing.expiresAt != nil {
+            TimelineView(.periodic(from: .now, by: 60)) { context in
+                let urgency = Signing.urgency(at: context.date) ?? .calm
+                Button(action: onSettings) {
+                    HStack(spacing: 5) {
+                        Image(systemName: urgency == .calm ? "signature" : "exclamationmark.triangle.fill")
+                            .font(.system(size: 9.5, weight: .semibold))
+                        Text(Signing.line(at: context.date) ?? "")
+                            .font(Theme.rounded(11.5))
+                            .monospacedDigit()
+                    }
+                    .foregroundStyle(signingTint(urgency))
+                    .padding(.horizontal, 11)
+                    .frame(height: 26)
+                    .contentShape(Capsule())
+                }
+                .background {
+                    if urgency != .calm {
+                        Capsule().fill(
+                            urgency == .critical
+                                ? Theme.accent.opacity(0.14)
+                                : Color.white.opacity(0.055))
+                    }
+                }
+                .overlay {
+                    if urgency != .calm {
+                        Capsule().strokeBorder(
+                            urgency == .critical ? Theme.accent.opacity(0.35) : Theme.hairline,
+                            lineWidth: 1)
+                    }
+                }
+            }
+        }
+    }
+
+    private func signingTint(_ urgency: Signing.Urgency) -> Color {
+        switch urgency {
+        case .critical: return Theme.accent
+        case .soon: return Theme.textSecondary
+        case .calm: return Theme.textTertiary
         }
     }
 
@@ -142,15 +196,18 @@ struct LiveView: View {
 
     private var statusRow: some View {
         HStack(spacing: 8) {
-            chip(
-                on: relay.socketConnected,
-                label: relay.socketConnected ? "Daemon" : "No daemon"
-            )
-            .layoutPriority(1)
-            chip(
-                on: relay.bandConnected,
-                label: relay.bandConnected ? (relay.bandName ?? "Band") : "No band"
-            )
+            // One status capsule, two links inside it: daemon and band are
+            // siblings, so they share a surface instead of two chips.
+            HStack(spacing: 12) {
+                link(on: relay.socketConnected,
+                     label: relay.socketConnected ? "Daemon" : "No daemon")
+                    .layoutPriority(1)
+                link(on: relay.bandConnected,
+                     label: relay.bandConnected ? (relay.bandName ?? "Band") : "No band")
+            }
+            .padding(.horizontal, 13)
+            .frame(height: 32)
+            .glassCapsule()
             Spacer(minLength: 8)
             yieldToggle
             Button(action: onSettings) {
@@ -202,7 +259,7 @@ struct LiveView: View {
         }
     }
 
-    private func chip(on: Bool, label: String) -> some View {
+    private func link(on: Bool, label: String) -> some View {
         HStack(spacing: 7) {
             Circle()
                 .fill(on ? Theme.okDim : Theme.textTertiary)
@@ -213,9 +270,6 @@ struct LiveView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
         }
-        .padding(.horizontal, 13)
-        .frame(height: 32)
-        .glassCapsule()
     }
 
     // ── The hero: one face per state ─────────────────────────────────

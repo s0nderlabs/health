@@ -156,7 +156,14 @@ plan your main session's coach writes to `plan.json` (tap-to-expand ladders
 where every working, back-off, and bodyweight set is its own checkmark;
 checking a set starts its prescribed rest, with an audible chime when rest
 ends: in-app it beats the mute switch and ducks your music, locked it rides
-the rest-over notification),
+the rest-over notification). Double days split into a Ride / Lift toggle;
+the ride face is a read-only viewer (steps, cues, an HR readout in words,
+an optional route preview from a GPX the daemon serves out of its `routes/`
+dir, an optional fuelling clock) that never touches the band, so a head
+unit can hold it on the road. A sideload clock reads the embedded
+provisioning profile and counts down to the free-team signature expiry
+(in-app, a notification the day before, and up to the daemon so
+`/health status` reports the real date),
 a one-tap workout intent that lands in your live Claude session (while a
 session runs, the start button becomes a live session bar with an elapsed
 timer and an in-app End, mirrored in the Plan header), a

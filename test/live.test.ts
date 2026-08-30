@@ -2,7 +2,7 @@ import { describe, expect, test, afterEach } from 'bun:test'
 import { mkdtempSync, writeFileSync, renameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { LiveListener, type LiveListenerOpts } from '../src/live.js'
+import { LiveListener, parseSignedUntil, type LiveListenerOpts } from '../src/live.js'
 import { LiveState } from '../src/livestate.js'
 
 const TOKEN = 'test-token-1234'
@@ -769,6 +769,30 @@ describe('phone surfaces (steps, intent, plan, watchdog)', () => {
     expect((await fetch(`http://127.0.0.1:${port}/plan?token=${TOKEN}`)).status).toBe(503)
   })
 
+  test('GET /route: auth, bare .gpx names only, 404 missing, serves the file', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'health-routes-'))
+    const { listener, port } = makeArbListener({ getRoutesDir: () => dir })
+    cleanup.push(() => listener.stop())
+    const base = `http://127.0.0.1:${port}/route`
+    expect((await fetch(`${base}?file=loop.gpx`)).status).toBe(401)
+    expect((await fetch(`${base}?file=loop.gpx&token=${TOKEN}`)).status).toBe(404)
+    // Traversal and non-GPX names never reach the filesystem.
+    for (const bad of ['../plan.json', 'a/b.gpx', '..%2Fx.gpx', 'loop.json', '', '.gpx', 'x'.repeat(130) + '.gpx']) {
+      const res = await fetch(`${base}?file=${encodeURIComponent(bad)}&token=${TOKEN}`)
+      expect(res.status).toBe(400)
+    }
+    const gpx = '<?xml version="1.0"?><gpx><trk><name>Loop</name><trkseg><trkpt lat="-6.2" lon="106.8"/><trkpt lat="-6.21" lon="106.81"/></trkseg></trk></gpx>'
+    writeFileSync(join(dir, 'loop.gpx'), gpx)
+    const res = await fetch(`${base}?file=loop.gpx&token=${TOKEN}`)
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toBe('application/gpx+xml')
+    expect(await res.text()).toBe(gpx)
+    // Disabled when no dir is configured.
+    const off = makeArbListener({})
+    cleanup.push(() => off.listener.stop())
+    expect((await fetch(`http://127.0.0.1:${off.port}/route?file=loop.gpx&token=${TOKEN}`)).status).toBe(404)
+  })
+
   test('plan file change pushes plan_updated to connected relayers (atomic rename included)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'health-plan-'))
     const planPath = join(dir, 'plan.json')
@@ -793,6 +817,52 @@ describe('phone surfaces (steps, intent, plan, watchdog)', () => {
     expect(seen.length).toBe(1) // mac hello never counts as the phone
     phone.ws.close()
     mac.ws.close()
+  })
+
+  test('phone hello reports its build + signature expiry; status carries it', async () => {
+    const apps: Array<{ version: string | null; signedUntil: string | null }> = []
+    const { listener, port } = makeArbListener({ onPhoneApp: (info) => apps.push(info) })
+    cleanup.push(() => listener.stop())
+    const until = new Date(Date.now() + 3 * 86_400_000).toISOString()
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/stream?token=${TOKEN}`)
+    const msgs: string[] = []
+    ws.onmessage = (e) => msgs.push(String(e.data))
+    await new Promise<void>((resolve) => (ws.onopen = () => resolve()))
+    ws.send(
+      JSON.stringify({
+        type: 'hello',
+        source: 'phone',
+        device: 'phone-test',
+        app_version: '0.10.0 (1)',
+        signed_until: until,
+      }),
+    )
+    await waitFor(() => msgs.length > 0)
+    expect(apps).toEqual([{ version: '0.10.0 (1)', signedUntil: until }])
+    const leg = listener.status().relayers.find((r) => r.source === 'phone')
+    expect(leg?.app_version).toBe('0.10.0 (1)')
+    expect(leg?.signed_until).toBe(until)
+    ws.close()
+
+    // A build without the field (or the mac relay) reports nulls, never throws.
+    const mac = await relayer(port, 'mac')
+    expect(apps.length).toBe(1)
+    const macLeg = listener.status().relayers.find((r) => r.source === 'mac')
+    expect(macLeg?.signed_until).toBeNull()
+    mac.ws.close()
+  })
+
+  test('parseSignedUntil rejects garbage and out-of-range dates', () => {
+    const soon = new Date(Date.now() + 5 * 86_400_000)
+    expect(parseSignedUntil(soon.toISOString())).toBe(soon.toISOString())
+    expect(parseSignedUntil(undefined)).toBeNull()
+    expect(parseSignedUntil(42)).toBeNull()
+    expect(parseSignedUntil('not a date')).toBeNull()
+    expect(parseSignedUntil('2019-01-01T00:00:00Z')).toBeNull() // long dead
+    expect(parseSignedUntil('2099-01-01T00:00:00Z')).toBeNull() // no 7-day profile lives there
+    // A recently expired profile still parses: the daemon wants to say "died 3h ago".
+    const justDied = new Date(Date.now() - 3 * 3_600_000)
+    expect(parseSignedUntil(justDied.toISOString())).toBe(justDied.toISOString())
   })
 })
 

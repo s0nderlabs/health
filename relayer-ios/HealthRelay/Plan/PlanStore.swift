@@ -32,6 +32,55 @@ struct Plan: Codable {
         let notes: String?
     }
 
+    /// The ride half of a training day. A VIEWER, never an instrument: no
+    /// checkboxes, no Start, nothing that touches the band (the head unit
+    /// owns it on the road). Emitted by /gym on Mon/Tue/Thu/Sat.
+    struct Ride: Codable {
+        struct Step: Codable {
+            let order: Int?
+            let name: String?
+            let detail: String?
+            let target: String?
+            let rest: String?
+        }
+
+        /// One clock entry on a long ride: a gel, a drink, a checkpoint.
+        struct Moment: Codable {
+            let at: String?     // "06:45"
+            let km: Double?     // course km, optional
+            let what: String?   // "Gel (EJ)"
+            let kind: String?   // gel | drink | cp | note
+        }
+
+        /// A route file the daemon serves from its routes dir. Only ever
+        /// present once a route is actually decided; nothing renders until
+        /// the file exists.
+        struct Route: Codable {
+            let file: String?
+            let name: String?
+        }
+
+        let slot: String?          // "05:00"
+        let kind: String?          // easy | quality | long | race
+        let title: String?
+        let duration_min: Int?
+        let venue: String?
+        let segments: [String]?
+        let structure: [Step]?
+        let hr_readout: String?
+        let cues: [String]?
+        let notes: String?
+        let route: Route?
+        let timeline: [Moment]?
+    }
+
+    /// Today's score as data, so the phone never has to parse it out of the
+    /// coach's prose. Optional: older plans carry only recovery_note.
+    struct Recovery: Codable {
+        let score: Int?
+        let band: String?
+    }
+
     let generated_at: String?
     let date: String?
     let title: String?
@@ -39,8 +88,10 @@ struct Plan: Codable {
     let week: Int?
     let day: Int?
     let rest: Bool?
+    let recovery: Recovery?
     let recovery_note: String?
     let warmup: [String]?
+    let ride: Ride?
     let lifts: [Lift]?
     let session_notes: [String]?
     let reminders: [String]?

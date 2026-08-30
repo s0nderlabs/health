@@ -43,6 +43,18 @@ final class Settings: ObservableObject {
         return comps.url
     }
 
+    /// A route file (GPX) the daemon serves from its routes directory.
+    func routeURL(file: String) -> URL? {
+        guard configured,
+              var comps = URLComponents(string: "https://\(host)/route")
+        else { return nil }
+        comps.queryItems = [
+            URLQueryItem(name: "file", value: file),
+            URLQueryItem(name: "token", value: token),
+        ]
+        return comps.url
+    }
+
     var planURL: URL? {
         guard configured,
               var comps = URLComponents(string: "https://\(host)/plan")

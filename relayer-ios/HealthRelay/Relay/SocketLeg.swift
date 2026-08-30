@@ -109,11 +109,16 @@ final class SocketLeg: NSObject, URLSessionWebSocketDelegate {
         connected = true
         backoff = 1
         rlog("socket up")
-        sendJSON([
+        var hello: [String: Any] = [
             "type": "hello", "source": "phone",
             "device": deviceName ?? "iphone", "transport": transport,
             "caps": ["release", "battery", "disarm"],
-        ])
+            "app_version": Signing.appVersion,
+        ]
+        // The sideload clock rides up so the daemon reports the real expiry
+        // instead of inferring it from when the phone was last seen.
+        if let until = Signing.signedUntilISO { hello["signed_until"] = until }
+        sendJSON(hello)
         flush()
         schedulePing(webSocketTask)
         delegate?.socketDidConnect()

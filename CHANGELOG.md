@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.10.0 - 2026-08-30
+
+### Added
+
+- **Ride face on the Plan tab.** The phone now renders the `ride` block the
+  coach writes into plan.json: kind, slot and duration, a derived "back by"
+  line, the session steps in order, the HR readout as words, cues, venue and
+  segments. It is a viewer by design: no checkboxes, no Start, no rest timers,
+  nothing that opens a session or holds a connection while riding, because
+  the head unit pairs with the band on the road and that link is
+  contention-sensitive. Double days split behind a Ride / Lift toggle
+  (default Ride until an hour after the ride should be over, then Lift; a
+  live gym session always wins); ride-only and lift-only days show their one
+  face with no toggle; a plan with nothing in it renders as rest, never blank.
+- **Route preview and fuelling clock.** When the plan names `ride.route.file`
+  the daemon serves that GPX from its `routes/` dir (`GET /route?file=`,
+  token-gated, bare `.gpx` file names only, no paths) and the card draws the line, start and
+  finish, and the length as its top edge, with a full-screen map on tap; no
+  elevation on purpose (planned-route GPX elevation is modelled and missed
+  every real wall). `ride.timeline` renders as a time-ordered clock of gels,
+  drinks and checkpoints inside the same card. The plan's `route.name` labels
+  the map; a named route that has not arrived yet says so instead of
+  looking like no route.
+- **Sideload clock.** The app reads its own embedded provisioning profile and
+  counts down to the free-team signature expiry: a whisper line on the Live
+  tab (louder inside two days, accent inside twelve hours), a Settings section
+  with version, exact date and ticking countdown, and local notifications
+  the day before and three hours out (armed only once notification
+  permission already exists, so the rest timer keeps owning the prompt).
+  The hello now carries `app_version` and `signed_until`; the daemon
+  persists them, `health__status` reports the real expiry and hours left,
+  and a daily `system.health` nag fires inside 48 h and for a bounded week
+  after death.
+- **Structured recovery.** plan.json may carry `recovery: {score, band}`
+  next to the prose note; the phone renders the score as a band-coloured
+  lead with the coaching sentence after it, and falls back to parsing a note
+  that opens with "Recovery NN%, band." when the field is absent.
+
+### Changed
+
+- **One card per face.** The Plan tab lost its stack of same-weight glass
+  containers: the recovery note is a base-layer line under the title, the
+  warmup is one quiet line inside the session card (or a section above the
+  ride on ride-only days), notes and reminders are plain sections below the
+  card (rest days keep their reminders), the route map and the clock live
+  inside the ride card, and the Live tab's daemon and band chips merged into
+  one status capsule.
+- Bundle version now comes from `project.yml` (`MARKETING_VERSION` 0.10.0,
+  build 2) instead of a hard-coded 1.0 in Info.plist.
+
+### Fixed
+
+- A transient route fetch failure (tailnet not up yet at 05:00) no longer
+  disables the map for the rest of the app session: every foreground, plan
+  change and pull-to-refresh retries.
+- A hello from a build without an embedded profile no longer wipes a
+  known-good signature expiry from the daemon.
+- The HR_DEMO_SCROLL screenshot hook no longer crashes on an empty value.
+
 ## 0.9.3 - 2026-08-16
 
 ### Fixed

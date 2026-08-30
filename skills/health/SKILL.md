@@ -119,6 +119,12 @@ record counts, whether this session receives events, live feed state (which
 relayers are connected and which one owns the band). If the daemon is down:
 `launchctl kickstart -k gui/$UID/com.s0nderlabs.health`.
 
-Watchdog: if `phone_relayer_last_seen` exists and is older than 5 days, warn
-that the phone relayer may be near its 7-day sideload-signature expiry and
-needs a reinstall from Xcode (or an AltStore refresh) before it dies silently.
+Sideload clock: `phone_app_signed_until` + `phone_app_signed_hours_left` are
+the phone build's self-reported signature expiry (read off its embedded
+provisioning profile at hello). Report the countdown as "signed for Nd Nh
+more"; if under 48h, or negative (expired), tell the user to re-sign and
+reinstall from Xcode (`scripts/build-phone.sh install`, cable in, cached
+profiles deleted first). The daemon also nags once per day inside 48h.
+Fallback for builds that predate the field (`phone_app_signed_until` null):
+if `phone_relayer_last_seen` is older than 5 days, warn that the phone
+relayer may be near its 7-day expiry.

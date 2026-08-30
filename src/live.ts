@@ -47,12 +47,25 @@
 // next eligible window. Legacy pause-probes remain for clients without caps.
 
 import { readFileSync, statSync, watch, type FSWatcher } from 'node:fs'
-import { dirname } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import type { LiveState, RejectReason } from './livestate.js'
 import { parseBase64Frame } from './hrparse.js'
 
 function log(msg: string): void {
   process.stderr.write(`healthd live: ${msg}\n`)
+}
+
+/** The phone's self-reported signature expiry: an ISO timestamp, sanity
+ *  bounded (a free-team profile lives 7 days; anything more than 30 days in
+ *  the past or 400 days ahead is garbage, not a date). Normalised to ISO so
+ *  status consumers never see the client's own formatting. */
+export function parseSignedUntil(v: unknown): string | null {
+  if (typeof v !== 'string' || v.length > 40) return null
+  const t = Date.parse(v)
+  if (!Number.isFinite(t)) return null
+  const now = Date.now()
+  if (t < now - 30 * 86_400_000 || t > now + 400 * 86_400_000) return null
+  return new Date(t).toISOString()
 }
 
 function parseTransport(v: unknown): 'wifi' | 'cellular' | 'unknown' {
@@ -73,8 +86,16 @@ export interface LiveListenerOpts {
   onSteps?: (samples: StepsSample[], deletedUuids: string[]) => { added: number; deleted: number }
   /** Path of the workout-plan JSON served at GET /plan (empty = disabled). */
   getPlanPath?: () => string
+  /** Directory of route files (GPX) served at GET /route?file= (empty =
+   *  disabled). The plan's ride.route.file names one of them; the phone
+   *  draws the line as a preview. */
+  getRoutesDir?: () => string
   /** Persist "a phone relayer was alive at <iso>" (cert-expiry watchdog). */
   onPhoneSeen?: (atIso: string) => void
+  /** The phone's self-reported build: version + sideload signature expiry
+   *  (ISO, or null when the build carries no profile). Fires on every phone
+   *  hello so the daemon can count down the real date. */
+  onPhoneApp?: (info: { version: string | null; signedUntil: string | null }) => void
   /** Yield state changed: untilIso to persist, null on reclaim. The reclaim
    *  reason rides along so the daemon can surface auto-reclaims. */
   onYieldChange?: (untilIso: string | null, reason?: YieldReclaimReason, sinceIso?: string) => void
@@ -146,6 +167,9 @@ interface RelayerData {
   transport: Transport
   caps: string[]
   battery: { level: number; charging: boolean } | null
+  /// Self-reported by the phone build: its version and the date its
+  /// free-team signature dies (read off embedded.mobileprovision).
+  app: { version: string | null; signed_until: string | null }
 }
 
 interface RelayerWs {
@@ -163,6 +187,8 @@ export interface LiveFeedStatus {
     transport: Transport
     battery: { level: number; charging: boolean } | null
     band_seen_ago_s: number | null
+    app_version: string | null
+    signed_until: string | null
   }>
   active_source: string | null
   dual: boolean
@@ -260,6 +286,10 @@ export class LiveListener {
           if (!self.authorized(req, url)) return new Response('unauthorized', { status: 401 })
           return self.servePlan()
         }
+        if (req.method === 'GET' && url.pathname === '/route') {
+          if (!self.authorized(req, url)) return new Response('unauthorized', { status: 401 })
+          return self.serveRoute(url.searchParams.get('file') ?? '')
+        }
         if (url.pathname !== '/stream') return new Response('not found', { status: 404 })
         if (!self.authorized(req, url)) {
           log('rejected stream connection (bad token)')
@@ -274,6 +304,7 @@ export class LiveListener {
               transport: 'unknown',
               caps: [],
               battery: null,
+              app: { version: null, signed_until: null },
             },
           })
         ) {
@@ -741,6 +772,10 @@ export class LiveListener {
         ws.data.caps = Array.isArray(msg.caps)
           ? msg.caps.filter((c): c is string => typeof c === 'string').slice(0, 16)
           : []
+        ws.data.app = {
+          version: typeof msg.app_version === 'string' ? msg.app_version.slice(0, 32) : null,
+          signed_until: parseSignedUntil(msg.signed_until),
+        }
         // A relayer reconnect changes the topology: give dual-up a new epoch.
         this.dualAttempts = 0
         // And a new battery episode: an app restart can race its old socket's
@@ -750,7 +785,17 @@ export class LiveListener {
         log(
           `hello from ${ws.data.source}${ws.data.device ? ` (${ws.data.device})` : ''}${ws.data.transport !== 'unknown' ? ` via ${ws.data.transport}` : ''}${ws.data.caps.length ? ` caps=[${ws.data.caps.join(',')}]` : ''}`,
         )
-        if (ws.data.source !== 'mac' && ws.data.source !== 'unknown') this.phoneSeen(true)
+        if (ws.data.source !== 'mac' && ws.data.source !== 'unknown') {
+          this.phoneSeen(true)
+          try {
+            this.opts.onPhoneApp?.({
+              version: ws.data.app.version,
+              signedUntil: ws.data.app.signed_until,
+            })
+          } catch (err) {
+            log(`phone-app persist failed: ${err}`)
+          }
+        }
         // Yield outranks every hello verdict: a leg reconnecting mid-yield
         // (reopened app, relay restart) must not re-arm its anchor. This is
         // also half of the rearm self-heal: when NOT yielded, the ok/standdown
@@ -989,6 +1034,27 @@ export class LiveListener {
     }
   }
 
+  /** GET /route?file=<name>.gpx: one file out of the routes dir, by bare
+   *  name only. Anything with a path separator, a dot-segment, or the wrong
+   *  extension is refused before the filesystem is touched, so the token
+   *  holder can read routes and nothing else. */
+  private serveRoute(file: string): Response {
+    const dir = this.opts.getRoutesDir?.() ?? ''
+    if (!dir) return Response.json({ error: 'route delivery disabled' }, { status: 404 })
+    if (!/^[A-Za-z0-9._ -]{1,120}\.gpx$/i.test(file) || file.includes('..') || basename(file) !== file) {
+      return Response.json({ error: 'bad route name' }, { status: 400 })
+    }
+    try {
+      const data = readFileSync(join(dir, file))
+      return new Response(data, { headers: { 'content-type': 'application/gpx+xml' } })
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        return Response.json({ error: 'no such route' }, { status: 404 })
+      }
+      return Response.json({ error: 'route unreadable' }, { status: 503 })
+    }
+  }
+
   private planMtime(path: string): number {
     try {
       return statSync(path).mtimeMs
@@ -1067,6 +1133,8 @@ export class LiveListener {
         band_seen_ago_s: this.bandSeen.has(r.data.source)
           ? Math.round((now - (this.bandSeen.get(r.data.source) as number)) / 1000)
           : null,
+        app_version: r.data.app.version,
+        signed_until: r.data.app.signed_until,
       })),
       active_source: active,
       dual: this.isDual(now),

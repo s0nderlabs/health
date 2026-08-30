@@ -17,8 +17,13 @@ export const SOCKET_PATH = join(RUNTIME_DIR, 'daemon.sock')
 export const PID_PATH = join(RUNTIME_DIR, 'daemon.pid')
 export const LOG_PATH = join(RUNTIME_DIR, 'daemon.log')
 
+/** Route files (GPX) the phone's ride card previews, served at GET /route.
+ *  Drop a file here and name it in plan.json's ride.route.file. */
+export const ROUTES_DIR = join(RUNTIME_DIR, 'routes')
+
 export function ensureRuntimeDir(): void {
   mkdirSync(RUNTIME_DIR, { recursive: true })
+  mkdirSync(ROUTES_DIR, { recursive: true })
 }
 
 export function loadConfig(): HealthConfig {
