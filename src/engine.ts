@@ -270,6 +270,9 @@ export class Engine {
       'live.confirm': 1,
       'live.zone': 1,
       'live.rest': 6,
+      // Past this, the deterministic fallback has long since named the ride;
+      // the composition request is stale even if the loop-closing news is not.
+      'ride.landed': 12,
     })
   }
 
@@ -305,6 +308,15 @@ export class Engine {
       fmt.systemHealth(problem),
       opts,
     )
+  }
+
+  /** Entry point for the Strava ride watcher. notable: it is the signal the
+   *  gym protocol acts on (the "wait for Strava" step ends here). Deduped by
+   *  activity id, one per ride ever; bypassCooldown also exempts it from the
+   *  daily budget, correctly: ~4 rides/week must never lose their loop-closer
+   *  to a chatty day. */
+  rideEvent(dedupeKey: string, payload: { content: string; meta: Record<string, string> }): boolean {
+    return this.emit('ride.landed', 'notable', dedupeKey, payload, { bypassCooldown: true })
   }
 
   /** Entry point for the live HR state machine (pre-throttled per-session). */

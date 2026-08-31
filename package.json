@@ -1,6 +1,6 @@
 {
   "name": "health",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "type": "module",
   "description": "WHOOP channel plugin for Claude Code. Recovery, sleep, and strain stream into Claude as events; Claude becomes your health instructor.",
   "main": "src/index.ts",
@@ -8,6 +8,7 @@
     "start": "bun run src/index.ts",
     "daemon": "bun run src/daemon.ts",
     "setup": "bun run setup/onboarding.ts",
+    "setup:strava": "bun run setup/strava.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },

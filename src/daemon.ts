@@ -18,6 +18,8 @@ import { startWebhookReceiver } from './webhook.js'
 import { isWakeSignal, wakeReleaseActive } from './wake.js'
 import { LiveState } from './livestate.js'
 import { LiveListener, parseYieldMinutes } from './live.js'
+import { StravaWatch } from './strava-watch.js'
+import { api as stravaApi, stravaConfigured, StravaAuthError, type PlanRide } from './strava.js'
 
 function log(msg: string): void {
   process.stderr.write(`healthd: ${new Date().toISOString()} ${msg}\n`)
@@ -223,6 +225,48 @@ const liveListener = new LiveListener(liveState, () => config().live.token, {
   },
 })
 
+// ── Strava ride watcher ───────────────────────────────────────────
+// Dormant until setup:strava has stored tokens; the webhook path still
+// answers its challenge either way (subscription creation precedes traffic).
+
+/** The plan's ride block, only when the given ride actually started on the
+ *  plan's own date (local calendar): a stale plan must never name a ride. */
+function planRideFor(rideStartIso: string): PlanRide | null {
+  const plan = readPlanToday(resolvePlanPath(config()))
+  if (!plan || typeof plan.date !== 'string') return null
+  const startMs = Date.parse(rideStartIso)
+  if (!Number.isFinite(startMs)) return null
+  if (new Date(startMs).toLocaleDateString('sv') !== plan.date) return null
+  const ride = plan.ride
+  if (ride == null || typeof ride !== 'object') return null
+  const r = ride as Record<string, unknown>
+  return {
+    title: typeof r.title === 'string' ? r.title : undefined,
+    duration_min: typeof r.duration_min === 'number' ? r.duration_min : undefined,
+  }
+}
+
+const stravaWatch = new StravaWatch({
+  api: stravaApi,
+  store,
+  emit: (key, payload) => engine.rideEvent(key, payload),
+  getPlanRide: planRideFor,
+  getWatermark: () => config().strava.watermark,
+  log,
+})
+
+/** Shared error funnel for every Strava-touching background task: an auth
+ *  break nags once per broken day; anything else just logs (the reconcile
+ *  sweep retries on its own cadence). */
+function stravaGuard(label: string, err: unknown): void {
+  if (err instanceof StravaAuthError) {
+    engine.systemProblem(err.message, `strava-auth-broken:${new Date().toISOString().slice(0, 10)}`, {
+      bypassCooldown: true,
+    })
+  }
+  log(`${label} failed: ${err}`)
+}
+
 // Re-apply a persisted yield window (daemon restarted mid-yield). Legs are
 // not connected yet; each gets its disarm from the hello-during-yield path.
 {
@@ -367,6 +411,11 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
         phone_app_version: store.getMeta('phone_app_version') || null,
         phone_app_signed_until: store.getMeta('phone_app_signed_until') || null,
         phone_app_signed_hours_left: signedHoursLeft(store.getMeta('phone_app_signed_until')),
+        strava: {
+          configured: stravaConfigured(),
+          webhook_armed: !!(config().strava.webhook_path && config().strava.verify_token),
+          webhook_last_rx: store.getMeta('strava_webhook_last_rx') || null,
+        },
       }
     }
     case 'read': {
@@ -467,15 +516,32 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
           : 'No yield was active.',
       }
     }
+    case 'strava_annotate': {
+      if (!stravaConfigured()) {
+        throw new Error('the Strava leg is not set up (no tokens); run: bun run setup:strava')
+      }
+      const id = Number(params.activity_id)
+      if (!Number.isFinite(id) || id <= 0) throw new Error('activity_id must be a positive number')
+      return stravaWatch.annotate(id, {
+        title: typeof params.title === 'string' ? params.title : undefined,
+        description: typeof params.description === 'string' ? params.description : undefined,
+        overwrite: params.overwrite === true,
+      })
+    }
     case 'config_get':
       return redactConfig(config())
     case 'config_set': {
       const current = config()
       const patch = params as Partial<ReturnType<typeof loadConfig>>
-      // The token is redacted in config_get output; a patch echoing that
-      // placeholder back must not overwrite the real secret.
+      // Secrets are redacted in config_get output; a patch echoing those
+      // placeholders back must not overwrite the real values.
       if (patch.live && (patch.live as Record<string, unknown>).token === REDACTED) {
         delete (patch.live as Record<string, unknown>).token
+      }
+      if (patch.strava) {
+        const s = patch.strava as Record<string, unknown>
+        if (s.webhook_path === REDACTED) delete s.webhook_path
+        if (s.verify_token === REDACTED) delete s.verify_token
       }
       const merged = {
         ...current,
@@ -485,6 +551,7 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
         thresholds: { ...current.thresholds, ...patch.thresholds },
         cooldown_minutes: { ...current.cooldown_minutes, ...patch.cooldown_minutes },
         webhook: { ...current.webhook, ...patch.webhook },
+        strava: { ...current.strava, ...patch.strava },
         // Deep-merge or a partial patch (e.g. {live:{max_hr:190}}) would wipe
         // the generated live.token and lock every relayer out.
         live: { ...current.live, ...patch.live },
@@ -529,9 +596,19 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
 
 // The live-ingest token is a secret; RPC responses land in session transcripts
 // that leave this machine. Relayers read it from the config FILE, never RPC.
+// The Strava webhook path IS the shared secret for its endpoint (and the
+// verify_token authenticates the challenge), so both redact too.
 const REDACTED = '<redacted>'
 function redactConfig(cfg: ReturnType<typeof loadConfig>): ReturnType<typeof loadConfig> {
-  return { ...cfg, live: { ...cfg.live, token: cfg.live.token ? REDACTED : '' } }
+  return {
+    ...cfg,
+    live: { ...cfg.live, token: cfg.live.token ? REDACTED : '' },
+    strava: {
+      ...cfg.strava,
+      webhook_path: cfg.strava.webhook_path ? REDACTED : '',
+      verify_token: cfg.strava.verify_token ? REDACTED : '',
+    },
+  }
 }
 
 // ── Startup ───────────────────────────────────────────────────────
@@ -539,11 +616,22 @@ function redactConfig(cfg: ReturnType<typeof loadConfig>): ReturnType<typeof loa
 ipc.start()
 log(`ipc listening on ${SOCKET_PATH}`)
 
+const stravaCfg = config().strava
 const webhookServer = startWebhookReceiver(
   store,
   config().webhook.port,
   config().webhook.path,
   onFact,
+  stravaCfg.webhook_path && stravaCfg.verify_token
+    ? {
+        path: stravaCfg.webhook_path,
+        verifyToken: stravaCfg.verify_token,
+        onEvent: (e) => {
+          if (!stravaConfigured()) return // subscribed but tokens gone: stay quiet
+          stravaWatch.onWebhookEvent(e).catch((err) => stravaGuard('strava webhook', err))
+        },
+      }
+    : undefined,
 )
 
 // Live ingest is OPTIONAL: a bind failure (port taken) must degrade to
@@ -657,6 +745,9 @@ setInterval(() => {
   } catch (err) {
     log(`signing watchdog failed: ${err}`)
   }
+  if (stravaConfigured()) {
+    stravaWatch.fallbackTick().catch((err) => stravaGuard('strava fallback', err))
+  }
   try {
     // Anchor on the last successful poll; an install that has NEVER polled
     // successfully (backfill done, then every poll failing on some non-auth
@@ -688,6 +779,17 @@ setInterval(() => {
 // Delivery heartbeat: picks up TTL-expired in-flight events (failed handler,
 // suspended session) within a minute instead of waiting for the 5-min tick.
 setInterval(scheduleDelivery, 60_000)
+
+// Strava reconcile: the webhook is the primary signal (delivery caps at 3
+// attempts with no replay), this sweep is the guarantee. 15 min keeps the
+// whole leg under ~100 read calls/day on the shared clawdrunner app.
+if (stravaConfigured()) {
+  stravaWatch.reconcile().catch((err) => stravaGuard('strava reconcile', err))
+}
+setInterval(() => {
+  if (!stravaConfigured()) return
+  stravaWatch.reconcile().catch((err) => stravaGuard('strava reconcile', err))
+}, 15 * 60_000)
 
 log(`up: poll every ${config().poll_interval_minutes}min, webhook :${config().webhook.port}${config().webhook.path}, events push to every connected session`)
 

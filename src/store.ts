@@ -104,6 +104,17 @@ CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT
 );
+CREATE TABLE IF NOT EXISTS strava_activities (
+  id INTEGER PRIMARY KEY,
+  discovered_at TEXT NOT NULL,
+  start TEXT,
+  sport_type TEXT,
+  name_at_discovery TEXT,
+  our_title TEXT,
+  desc_written INTEGER NOT NULL DEFAULT 0,
+  annotated_by TEXT,
+  owner_named INTEGER NOT NULL DEFAULT 0
+);
 `
 
 export class Store {
@@ -540,6 +551,78 @@ export class Store {
     const table = kind === 'recovery' ? 'recoveries' : `${kind}s`
     const row = this.db.query(`SELECT MAX(updated_at) AS m FROM ${table}`).get() as { m: string | null }
     return row.m
+  }
+
+  // ── Strava ride watcher (deliberately NOT an archive) ─────────
+  // Strava's API terms cap retention, and the watcher only needs enough
+  // state to dedupe discoveries, guard the rename, and detect its own
+  // webhook echo: ids and what WE wrote, never activity data.
+
+  stravaSeen(id: number): boolean {
+    return !!this.db.query('SELECT 1 FROM strava_activities WHERE id = ?').get(id)
+  }
+
+  insertStravaActivity(row: {
+    id: number
+    start: string | null
+    sport_type: string
+    name_at_discovery: string
+  }): void {
+    this.db.run(
+      `INSERT INTO strava_activities (id, discovered_at, start, sport_type, name_at_discovery)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO NOTHING`,
+      [row.id, new Date().toISOString(), row.start, row.sport_type, row.name_at_discovery],
+    )
+  }
+
+  getStravaActivity(id: number): Record<string, unknown> | null {
+    return this.db.query('SELECT * FROM strava_activities WHERE id = ?').get(id) as
+      | Record<string, unknown>
+      | null
+  }
+
+  setStravaAnnotation(
+    id: number,
+    a: { our_title?: string; desc_written?: boolean; annotated_by: 'session' | 'fallback' },
+  ): void {
+    this.db.run(
+      `UPDATE strava_activities SET
+         our_title = COALESCE(?, our_title),
+         desc_written = CASE WHEN ? THEN 1 ELSE desc_written END,
+         annotated_by = ?
+       WHERE id = ?`,
+      [a.our_title ?? null, a.desc_written ? 1 : 0, a.annotated_by, id],
+    )
+  }
+
+  setStravaOwnerNamed(id: number): void {
+    this.db.run('UPDATE strava_activities SET owner_named = 1 WHERE id = ?', [id])
+  }
+
+  /** Rides discovered before the cutoff that no session has annotated (and
+   *  the owner has not renamed): the deterministic fallback's work list. */
+  stravaPendingFallback(cutoffIso: string): Array<{ id: number }> {
+    return this.db
+      .query(
+        `SELECT id FROM strava_activities
+         WHERE annotated_by IS NULL AND owner_named = 0 AND discovered_at < ?
+         ORDER BY discovered_at ASC`,
+      )
+      .all(cutoffIso) as Array<{ id: number }>
+  }
+
+  /** SCORED WHOOP cycling workouts overlapping the ride window (WHOOP may
+   *  fragment one outdoor ride into several auto-detects: N:1 is normal). */
+  whoopCyclingOverlapping(startIso: string, endIso: string): Array<Record<string, unknown>> {
+    return this.db
+      .query(
+        `SELECT id, start, end, strain, average_heart_rate, max_heart_rate FROM workouts
+         WHERE score_state = 'SCORED' AND start <= ? AND end >= ?
+           AND lower(sport_name) LIKE '%cycl%'
+         ORDER BY start ASC`,
+      )
+      .all(endIso, startIso) as Array<Record<string, unknown>>
   }
 
   // ── event queue ───────────────────────────────────────────────

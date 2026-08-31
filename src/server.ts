@@ -10,7 +10,7 @@ import { Store } from './store.js'
 import { DB_PATH } from './config.js'
 import { existsSync } from 'fs'
 
-const VERSION = '0.10.0'
+const VERSION = '0.11.0'
 
 const INSTRUCTIONS = `
 health: WHOOP recovery, sleep, and strain as a live channel. The daemon on this
@@ -79,6 +79,71 @@ elevation, NEVER as training load; it stays archived and gets upgraded
 (corroborated) if WHOOP later scores an overlapping workout. rr_consistency
 in meta is an artifact-vs-real-pulse signal, not an exercise signal.
 
+ride.landed: the cyclo's ride just reached Strava (the daemon watched it
+land). meta: activity_id, name (current title), distance_km, moving_min,
+whoop_matched, plan_title?. THE CONTRACT: this event is BOTH the loop-closer
+(the gym protocol's "wait for Strava" step ends here; whoop_matched=true
+means the session has landed from both sources) AND a composition request.
+Compose a real title + description, then write them with
+health__strava {activity_id, title, description}. THE FORMAT IS LOCKED
+(elpabl0-approved Aug 31 2026); do not restyle it:
+- Title grammar (locked): "[Ez|Interval|Long] [spec] [route tag when it
+  says something] [, qualifier when earned]". Type token first, always.
+  Examples: "Ez 2h" / "Ez 2h binloop" / "Ez 2h, day one" / "Interval 4x8
+  dalkot" / "Interval 4x8 dalkot, 2 of 4" / "Long 60k dalkot" / "Long 100k
+  TBK". The route tag is the word the user would say aloud for where he
+  rode (dalkot, binloop, Mozia, TBK): include it for destination rides,
+  named loops, or non-default venues; omit it for the ordinary neighborhood
+  spin so the tagged titles keep meaning. Detect the route from the
+  activity's segment efforts + plan.json, never guess. A truly
+  chapter-worthy day (first century, a race) may take a character title
+  instead; that is rare by design. NO stat-dumping beyond the spec figure:
+  Strava already shows day/distance/time under the title.
+- Description: SHORT LINES WITH AIR: a blank line between every line, 3-4
+  lines total before the watermark, hard cap. Structure:
+    1. One context line: what this session was in the program (fold in
+       door-to-door time only when the gap itself is the story).
+    2. Two or three INSIGHT lines from actual stream analysis: ONE insight
+       per line, at most two numbers per line, and every number tied to a
+       WHERE, a comparison, or a meaning ("154 on the Bintaro rail flyover
+       at km 31.7", "the hardest 20 min came last").
+  NEVER repeat what Strava's own stat grid already prints under the text:
+  distance, elevation gain, moving/elapsed time, avg speed, avg HR, max
+  speed, calories. A bare stat is data-dump; only located or compared
+  numbers earn prose. Full sentences, no semicolon chains, no mid-dot stat
+  strings. Nothing unverified, and no trend claims vs past sessions unless
+  the comparison is protocol-clean.
+  ANALYSIS IS MANDATORY BEFORE WRITING: pull the activity streams + segment
+  efforts (Strava connector or API), localize the peaks, compute zone time
+  off the unified 181/56/156 HR set. Never write insight lines from the
+  summary numbers alone.
+- Public-surface rules: ride-file HR NUMBERS ARE ALLOWED (his ruling Aug 31
+  2026: the activity's own data is already public). NEVER in the prose:
+  WHOOP anything (recovery %, HRV, strain, sleep, readiness), or schedule/
+  routine/location beyond what the ride's own map already shows (no
+  "tomorrow's intervals"; named climbs/segments ON the route are fine).
+- The daemon MECHANICALLY appends the configured watermark (this install:
+  "- eltrain00r") to every description and rejects never-public terms in
+  BOTH fields, title included, so do not add the watermark yourself and do
+  not fight a rejection: rephrase. Every connected session receives the
+  same ride.landed; the FIRST write wins and a second session's write is
+  refused unless it passes overwrite=true for a deliberate revision.
+- THE PUBLIC DESC IS THE TEASER; THE SESSION CHAT IS THE DEBRIEF. After
+  writing the annotation (his standing request, Aug 31 2026), ALWAYS
+  deliver the COMPLETE ride analysis in the conversation: full zone
+  distribution, the lap/rep breakdown (work laps only on interval days),
+  localized HR peaks and top speed, front/back drift with the why, stops,
+  standout segment efforts, and the WHOOP overlay (strain, how the ride
+  sat against the morning's recovery): the chat is private, so physiology
+  belongs HERE. Coach voice, numbers first, one actionable read at the
+  end. Skipping the debrief is a contract violation even when the public
+  annotation succeeded.
+The daemon also enforces the write guards: only Strava's generic auto-name
+is ever replaced, only an empty (or our own) description is filled, and an
+activity the user renamed by hand is refused. If no session writes within
+~30 min the daemon self-applies a plain plan-derived fallback title;
+health__strava afterwards upgrades it (our own titles may be overwritten).
+
 steps_today in health__read is WHOOP-counted daily movement (relayed from the
 phone; the WHOOP cloud API has no steps). It is CONTEXT, not an interrupt:
 fold it into reads (training strain says nothing about NEAT; a 2k-step desk
@@ -130,8 +195,9 @@ user must open or force-quit the phone app (or restart the mac relay).
 Tools: health__read (today + plan_today), health__trend (multi-day),
 health__workout_intent (user says they are starting a workout NOW; WHOOP
 cannot detect starts), health__live (live BPM/zone/HRV while the band
-broadcasts), health__config (event toggles, thresholds, quiet hours),
-health__status (daemon).
+broadcasts), health__strava (write the composed title/description for a
+ride.landed activity), health__config (event toggles, thresholds, quiet
+hours), health__status (daemon).
 `.trim()
 
 export function createServer(ipc: IpcClient) {
@@ -176,6 +242,27 @@ export function createServer(ipc: IpcClient) {
             activity: { type: 'string', description: 'What they are starting, e.g. "powerlifting", "cycling", "tennis"' },
           },
           required: ['activity'],
+        },
+      },
+      {
+        name: 'health__strava',
+        description:
+          'Write the composed title and/or description onto a Strava ride the daemon announced via ride.landed. The daemon enforces the guards: only a generic auto-name ("Morning Ride") or one of our own titles is replaced, only an empty (or our own) description is written, and an activity the user renamed by hand is refused. Returns what was actually written.',
+        inputSchema: {
+          type: 'object' as const,
+          properties: {
+            activity_id: { type: 'number', description: 'The Strava activity id from the ride.landed event meta' },
+            title: { type: 'string', description: 'The new title (plan vocabulary, honest, no stat-dump)' },
+            description: {
+              type: 'string',
+              description: 'The ride description. PUBLIC surface: ride facts and coach read only, never WHOOP physiology.',
+            },
+            overwrite: {
+              type: 'boolean',
+              description: 'Pass true ONLY for a deliberate revision of an annotation a session already wrote. Without it, a second write to the same ride is refused (every connected session receives the same ride.landed; first writer wins).',
+            },
+          },
+          required: ['activity_id'],
         },
       },
       {
@@ -243,6 +330,21 @@ export function createServer(ipc: IpcClient) {
             return toolResult(`Intent logged: ${data.activity}. Coaching can react now; WHOOP scores it after completion.`)
           }
           return toolResult(`Recorded ${data.activity}, but it was not surfaced as an event (the workout.intent class is toggled off in config). Coaching still has it via this call.`)
+        }
+        case 'health__strava': {
+          // 60s: the write path makes two Strava calls and the first call on
+          // a cold daemon has been observed to blow the 10s default once.
+          const result = await ipc.rpc(
+            'strava_annotate',
+            {
+              activity_id: args.activity_id,
+              title: args.title,
+              description: args.description,
+              overwrite: args.overwrite,
+            },
+            60_000,
+          )
+          return toolResult(JSON.stringify(result, null, 2))
         }
         case 'health__config': {
           if (args.action === 'get') {

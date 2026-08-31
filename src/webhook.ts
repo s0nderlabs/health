@@ -1,14 +1,15 @@
-// WHOOP webhook receiver (daemon-side). Listens on localhost behind a
-// Tailscale Funnel; verifies HMAC before trusting a byte; payload is a
-// pointer, so it fetches the real resource and upserts it, which routes the
-// change through the same fact path the poller uses (idempotent by design).
+// Webhook receiver (daemon-side). Listens on localhost behind a Tailscale
+// Funnel and serves TWO producers on one port: WHOOP (HMAC-verified pointer
+// events) and Strava (challenge echo + pointer events on an unguessable
+// path). Payloads are pointers, so handlers fetch the real resource, which
+// routes every change through the same idempotent paths polling uses.
 
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import { readClientSecret } from './auth.js'
 import * as whoop from './whoop.js'
 import type { Store } from './store.js'
 import type { FactHandler } from './poller.js'
-import type { WhoopWebhookPayload } from './types.js'
+import type { StravaWebhookEvent, WhoopWebhookPayload } from './types.js'
 
 function log(msg: string): void {
   process.stderr.write(`healthd webhook: ${msg}\n`)
@@ -88,11 +89,23 @@ export async function handleWebhookEvent(
   }
 }
 
+/** Strava's side of the receiver. The path is unguessable and acts as the
+ *  shared secret: Strava's event POSTs carry no documented, verifiable
+ *  signature (the X-Strava-Signature scheme exists only in their example
+ *  server, with no published signing-secret source), so possession of the
+ *  path plus the verify_token on the challenge is the authenticity story. */
+export interface StravaWebhookOpts {
+  path: string
+  verifyToken: string
+  onEvent: (e: StravaWebhookEvent) => void
+}
+
 export function startWebhookReceiver(
   store: Store,
   port: number,
   path: string,
   onFact: FactHandler,
+  strava?: StravaWebhookOpts,
 ): ReturnType<typeof Bun.serve> {
   const clientSecret = readClientSecret()
 
@@ -104,6 +117,33 @@ export function startWebhookReceiver(
       if (req.method === 'GET' && url.pathname === '/healthz') {
         return new Response('ok', { status: 200 })
       }
+
+      if (strava && url.pathname === strava.path) {
+        // Subscription validation: echo hub.challenge as JSON within 2s.
+        if (req.method === 'GET') {
+          if (url.searchParams.get('hub.verify_token') !== strava.verifyToken) {
+            log('strava: rejected challenge with wrong verify_token')
+            return new Response('forbidden', { status: 403 })
+          }
+          return Response.json({ 'hub.challenge': url.searchParams.get('hub.challenge') ?? '' })
+        }
+        if (req.method === 'POST') {
+          let event: StravaWebhookEvent
+          try {
+            event = (await req.json()) as StravaWebhookEvent
+          } catch {
+            return new Response('bad payload', { status: 400 })
+          }
+          store.setMeta('strava_webhook_last_rx', new Date().toISOString())
+          // Ack inside Strava's 2s deadline; process async (3-attempt retry
+          // policy upstream makes slow handlers into missed events).
+          queueMicrotask(() => strava.onEvent(event))
+          log(`strava: accepted ${event.aspect_type} ${event.object_type} ${event.object_id}`)
+          return new Response('ok', { status: 200 })
+        }
+        return new Response('method not allowed', { status: 405 })
+      }
+
       if (req.method !== 'POST' || url.pathname !== path) {
         return new Response('not found', { status: 404 })
       }

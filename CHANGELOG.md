@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.11.0 - 2026-08-31
+
+### Added
+
+- **Strava ride watcher.** The daemon now watches for the head unit's ride
+  upload to reach Strava: a webhook subscription (challenge echo + pointer
+  events on an unguessable path, riding the existing funnel and port) with a
+  15-minute reconcile sweep as the guarantee. Each new ride emits a
+  `ride.landed` channel event that closes the "did my ride sync yet" loop,
+  correlates the ride with any overlapping scored WHOOP cycling records
+  (N:1: outdoor rides fragment), and asks the live session to compose a real
+  title and description in place of Strava's generic auto-name.
+- **`health__strava` tool + guarded write path.** The session's composed
+  title/description are applied by the daemon through strict guards: only
+  Strava's generic auto-names are ever replaced, only an empty (or our own)
+  description is filled, anything the owner renamed by hand is hands-off
+  forever (both fields), WHOOP-pushed and non-ride activities are never
+  touched, and the first session to write wins (revisions need an explicit
+  `overwrite`). A never-public term filter runs over BOTH fields in code,
+  and the configured watermark is appended to descriptions daemon-side. If
+  no session composes within 30 minutes, a deterministic plan-derived
+  fallback title lands so nothing stays "Morning Ride" overnight.
+- **`bun run setup:strava`**: OAuth consent (CSRF state check, scope
+  verification) with tokens in the Keychain under their own service, plus
+  `--subscribe`/`--unsubscribe` webhook subscription management that
+  validates every prerequisite before touching the app's single
+  subscription slot.
+- Locked composition contract in the plugin instructions: title grammar,
+  air-and-subtraction description format, mandatory stream analysis before
+  writing, and the mandatory in-session full debrief after every ride.
+
+### Changed
+
+- `health__status` reports the Strava leg (`configured`, `webhook_armed`,
+  `webhook_last_rx`); the config surface gains `strava.webhook_path`,
+  `strava.verify_token` (both redacted like the live token) and
+  `strava.watermark`.
+
+### Fixed
+
+- The first Strava reconcile seeds pre-existing history as hands-off
+  instead of announcing and renaming days-old rides; background loops are
+  re-entrancy-guarded; a 401 forces a real token refresh; post-retry
+  401/403 classify as auth-broken so the daemon nags instead of dying
+  silently; deleted activities are closed instead of retried forever.
+
 ## 0.10.0 - 2026-08-30
 
 ### Added

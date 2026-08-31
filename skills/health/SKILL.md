@@ -128,3 +128,11 @@ profiles deleted first). The daemon also nags once per day inside 48h.
 Fallback for builds that predate the field (`phone_app_signed_until` null):
 if `phone_relayer_last_seen` is older than 5 days, warn that the phone
 relayer may be near its 7-day expiry.
+
+Strava leg: `status.strava` reports `configured` (tokens present),
+`webhook_armed` (path + verify token in config), and `webhook_last_rx`.
+When a `ride.landed` event arrives, follow the composition contract in the
+plugin instructions (title + description via `health__strava`); the daemon
+self-applies a plain fallback title if no session answers within ~30 min.
+Not configured = the leg is off, never an error: it needs
+`bun run setup:strava` once.

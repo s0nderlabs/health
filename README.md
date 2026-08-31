@@ -102,6 +102,19 @@ Register `https://<your-funnel-host>/whoop` as a webhook URL (Model Version
 v2) in your WHOOP dashboard. The receiver verifies every request's HMAC
 signature against your client secret; everything else is rejected.
 
+### Ride watcher (optional)
+
+If your rides are recorded by a bike computer and uploaded to a training
+platform, the daemon can watch for each upload, announce it into your
+sessions the moment it lands (closing the "did my ride sync yet" loop), and
+give the activity a real title and description in place of the generic
+auto-name. Claude composes the text in-session from your training plan and
+the ride data; a deterministic plan-derived fallback covers the case where
+no session is live. Strict guards: only generic auto-names are ever
+replaced, only an empty description is filled, and anything you rename by
+hand is left alone forever. Bring your own API app and run
+`bun run setup:strava` (consent + webhook subscription) to enable it.
+
 ### Live heart rate (optional)
 
 Enable **Broadcast Heart Rate** in the WHOOP app, then build and install the

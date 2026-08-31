@@ -39,6 +39,7 @@ export function loadConfig(): HealthConfig {
       cooldown_minutes: { ...DEFAULT_CONFIG.cooldown_minutes, ...parsed.cooldown_minutes },
       poll_interval_minutes: parsed.poll_interval_minutes ?? DEFAULT_CONFIG.poll_interval_minutes,
       webhook: { ...DEFAULT_CONFIG.webhook, ...parsed.webhook },
+      strava: { ...DEFAULT_CONFIG.strava, ...parsed.strava },
       live: { ...DEFAULT_CONFIG.live, ...parsed.live },
       plan_path: parsed.plan_path ?? DEFAULT_CONFIG.plan_path,
     }
