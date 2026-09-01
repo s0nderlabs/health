@@ -10,7 +10,7 @@ import { Store } from './store.js'
 import { DB_PATH } from './config.js'
 import { existsSync } from 'fs'
 
-const VERSION = '0.12.0'
+const VERSION = '0.12.1'
 
 const INSTRUCTIONS = `
 health: WHOOP recovery, sleep, and strain as a live channel. The daemon on this
@@ -161,19 +161,29 @@ main, Sep 1 2026); do not restyle it:
   (8s) / Tue "Medium day" (6s) / Thu "Intensity day" (4s + AMRAP) / Fri
   "Deadlift day" / test days "Test day". Shape: "<Day type>, <headline lift
   + load>": "Volume day, squat 112.5" / "Deadlift day, 145 single" / "Test
-  day, deadlift 170". Bare day type when no number earns the slot. On PR
-  days the number goes IN the title. "Pana" is internal coaching
+  day, deadlift 170". Bare day type when no number earns the slot. The
+  headline is the session's DEFINING lift, whichever lift that is (a bench
+  PR headlines bench), never squat by default. On PR days the number goes
+  IN the title. "Pana" is internal coaching
   vocabulary, NEVER public: Fridays publish as "Deadlift day".
-- Description: DATA-FIRST, same air format as rides: 2-3 lines, a blank
-  line between, watermark auto-appended. EVERY line opens with load x reps
-  or a delta ("Squat 112.5x2 + 90 2x8, heaviest of the cycle"); at least
-  ONE comparison per description (vs the last comparable day, last cycle,
-  or the written plan, sourced from the gym tracker, never invented). Color
-  words only ride at the END of a data line, never carry a line alone. Bad
-  sets appear SAME-DAY, stated flat with the qualifier, exactly like his
-  own log voice ("Bench 60 broke at rep 3, banked the 50s"); NEVER build a
-  comeback-arc narrative. No full exercise inventory: 2-3 lines that carry
-  the session's actual story.
+- ANALYSIS IS MANDATORY BEFORE WRITING (the ride mandate's analogue, his
+  ruling Sep 1 2026). Compute from the gym tracker + debrief, never invent:
+  (1) per-lift deltas vs the last SAME day-type session (Day N inherits
+  from Day N); (2) working-set tonnage vs that day; (3) the headline
+  lift's cycle-wave position (% of 1RM, week station); (4) cost
+  localization from his debrief (which set/rep it got hard on, what was
+  held or cut): the lift version of "154 on the flyover at km 31.7";
+  (5) bar-speed numbers when a film review ran ("145 at 1.04s, same as
+  140 two weeks back").
+- Description: up to 3 SHORT lines, blank line between, watermark
+  auto-appended. Each line = ONE analyzed metric WITH its comparison or
+  location, max TWO numbers per line, no explainer sentences (the why
+  stays in the private session; "held at 52.5, on purpose" is the entire
+  permitted flavor). The title's headline lift may reappear ONLY carrying
+  NEW numbers (its delta or speed, never its load again). Bad sets appear
+  SAME-DAY, stated flat in his own log voice ("Bench 60 broke at rep 3,
+  banked the 50s"); NEVER a comeback-arc narrative. No full exercise
+  inventory: the lines carry the session's story, not its contents.
 - Public-surface rules for lifts: loads, weights and reps ARE the content
   (his ruling Sep 1 2026). NO HR numbers in lift prose (his ruling: the
   grid already shows them and they mean little under a bar). NEVER:

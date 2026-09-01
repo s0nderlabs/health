@@ -64,7 +64,13 @@ const DEEP_ZONE = 2
 const DEEP_SUSTAIN_S = 300 // continuous depth this long = steady-cardio
 const HARD_ZONE = 3
 const HARD_SUSTAIN_S = 60 // one continuous hard minute = unambiguous effort
-const INTENT_MATCH_BEFORE_MS = 30 * 60_000 // declared-intent lookback (mirrors engine claim window)
+export const INTENT_MATCH_BEFORE_MS = 30 * 60_000 // declared-intent lookback (mirrors engine claim window)
+// How long after a daemon restart a re-armed CLAIMED intent stays valid. A
+// restart's re-detection arrives in seconds-to-~3min (relayer reconnect +
+// 90s hot sustain), so 5 minutes is generous for the real case while a
+// post-workout shower ~10 min later can no longer inherit the intent (the
+// Sep 1 2026 review's phantom-session scenario).
+export const INTENT_REARM_FUSE_MS = 5 * 60_000
 // RR-vs-bpm consistency: the band emits RR only with beat-level confidence, so
 // a frame's implied rate (60000/meanRR) matching its bpm field proves a real
 // pulse; a mismatch is the cadence-lock signature (bpm reads step rate, RR
@@ -99,6 +105,16 @@ export interface LiveDeps {
     opts?: { bypassCooldown?: boolean },
   ) => void
   onSessionEnd?: (summary: SessionSummary) => void
+  /** Has WHOOP already SCORED a workout overlapping this window? A confirm
+   *  after the scored card shipped would trail the conclusion (Sep 1 2026:
+   *  confirmed 2.5 min after workout.card), so it stays silent. */
+  hasScoredOverlap?: (startIso: string, endIso: string) => boolean
+  /** An open session claimed the declared intent / that session ended.
+   *  The daemon persists this so a mid-workout restart can re-arm the
+   *  intent instead of re-detecting the same workout as an unknown
+   *  low-confidence elevation (the Sep 1 2026 double-restart lesson). */
+  onIntentClaim?: (startedIso: string) => void
+  onIntentRelease?: () => void
 }
 
 export interface SessionSummary {
@@ -189,8 +205,7 @@ export class LiveState {
       // that session's start.
       const { level } = this.confidenceOf(this.session, this.lastTs || ts)
       if (level !== 'low') {
-        this.session.intentMatched = true
-        this.lastIntentTs = 0
+        this.claimIntent(this.session)
         this.maybeConfirm(this.lastTs || ts)
         return
       }
@@ -200,6 +215,14 @@ export class LiveState {
     // never drift apart on an absorbed retry press.
     if (this.lastIntentTs > 0 && ts - this.lastIntentTs <= 3 * 60_000) return
     this.lastIntentTs = ts
+  }
+
+  /** The claim triple, one place: mark the session, consume the armed
+   *  window (claim-once), persist for restart survival. */
+  private claimIntent(s: Session): void {
+    s.intentMatched = true
+    this.lastIntentTs = 0
+    this.deps.onIntentClaim?.(new Date(s.startTs).toISOString())
   }
 
   /** Karvonen zone 0-5: % of heart-rate reserve above resting HR, edges
@@ -383,11 +406,26 @@ export class LiveState {
       ts - this.lastIntentTs <= INTENT_MATCH_BEFORE_MS &&
       this.confidenceOf(s, ts).level !== 'low'
     ) {
-      s.intentMatched = true
-      this.lastIntentTs = 0
+      this.claimIntent(s)
     }
     const { level, reasons } = this.confidenceOf(s, ts)
     if (level === 'low') return
+    // A confirm after WHOOP already scored a workout COVERING this session's
+    // start would trail the conclusion (the workout.card shipped; consumers
+    // acted). Cover-the-start on purpose, not any-overlap: a separate earlier
+    // workout that merely touches this window's edge must not silence a
+    // legitimately new session. Latch silently; the session is already
+    // non-low here and confidence latches never un-latch, so this changes
+    // no downstream verdicts, only the redundant announcement.
+    if (
+      this.deps.hasScoredOverlap?.(
+        new Date(s.startTs - 60_000).toISOString(),
+        new Date(s.startTs + 60_000).toISOString(),
+      )
+    ) {
+      s.confirmAnnounced = true
+      return
+    }
     // Latch before emitting so a re-entrant call cannot double-fire, but
     // un-latch on an emit failure (a store hiccup must cost one retry on the
     // next sample, not the whole session's confirm, and must never bubble up
@@ -455,7 +493,7 @@ export class LiveState {
     // Claim-once (mirrors the engine's intent stapling): one tap elevates one
     // session. Without this, the post-workout hot shower 20 min after a
     // declared lift would inherit the same intent and read as high confidence.
-    if (this.session.intentMatched) this.lastIntentTs = 0
+    if (this.session.intentMatched) this.claimIntent(this.session)
     // The session began when the hot streak began, and those ~90 detection
     // seconds are in the ring: seed the stats so duration, average, and zone
     // time all describe the same span. (The current sample is excluded here
@@ -696,6 +734,7 @@ export class LiveState {
     } catch {
       // The summary below still persists; the event is the lossy half.
     }
+    if (s.intentMatched) this.deps.onIntentRelease?.()
     this.deps.onSessionEnd?.(summary)
   }
 
@@ -792,4 +831,51 @@ function fmtMinSec(totalS: number): string {
   const m = Math.floor(totalS / 60)
   const sec = Math.round(totalS % 60)
   return m > 0 ? `${m}m${String(sec).padStart(2, '0')}s` : `${sec}s`
+}
+
+// ── Restart re-arm policy (pure; the daemon's boot guard calls this) ──
+//
+// A daemon restart wipes the in-memory intent state. Two cases survive on
+// disk and each gets its own honest semantics:
+//   CLAIMED (live_intent_open): an intent-claimed session was open at
+//     shutdown. Re-arm ONLY when no scored workout covers that session's
+//     start (a covering score means the declared workout concluded), and
+//     with a short fuse: the re-detection of a genuinely-running workout
+//     arrives within minutes, while anything later (the post-workout
+//     shower) must not inherit a consumed intent.
+//   UNCLAIMED (the engine's intent_log): the tap landed but no session had
+//     started yet. Restore the ORIGINAL tap timestamp so the standard
+//     30-minute window expires exactly as if the restart never happened.
+
+export interface RearmInputs {
+  /** meta live_intent_open: ISO start of the intent-claimed open session. */
+  openSessionIso: string | null
+  /** Newest tap in the engine's intent_log (any claim state). */
+  lastTapIso: string | null
+  now: number
+  /** Does a SCORED workout cover the open session's start (+-60s)? */
+  scoredCoveringOpen: boolean
+}
+
+export function intentRearmPlan(i: RearmInputs): { armAt: number | null; clearOpen: boolean } {
+  if (i.openSessionIso) {
+    const started = Date.parse(i.openSessionIso)
+    const age = i.now - started
+    if (!Number.isFinite(age) || age < 0 || age >= 4 * 3600_000 || i.scoredCoveringOpen) {
+      // Concluded, ancient, or garbage: consume the key, arm nothing.
+      return { armAt: null, clearOpen: true }
+    }
+    // Backdated so only (INTENT_REARM_FUSE_MS) of the standard window
+    // remains: a session detected within the fuse inherits, later ones do
+    // not. The key stays until that session ends (claim/release run again).
+    return { armAt: i.now - (INTENT_MATCH_BEFORE_MS - INTENT_REARM_FUSE_MS), clearOpen: false }
+  }
+  if (i.lastTapIso) {
+    const tapped = Date.parse(i.lastTapIso)
+    const age = i.now - tapped
+    if (Number.isFinite(age) && age >= 0 && age < INTENT_MATCH_BEFORE_MS) {
+      return { armAt: tapped, clearOpen: false }
+    }
+  }
+  return { armAt: null, clearOpen: false }
 }

@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.12.1 - 2026-09-01
+
+### Fixed
+
+- **Live sessions now survive daemon restarts.** A restart wiped the
+  in-memory session state, so a declared workout got re-detected as an
+  unknown low-confidence elevation with its intent already consumed (two
+  mid-workout restarts on Sep 1 produced exactly this). The daemon now
+  persists both an intent-claimed open session and the raw declared tap,
+  and a boot guard re-arms them honestly: a claimed session only when no
+  scored workout covers its start, with a 5-minute fuse so a later passive
+  elevation (the post-workout shower) can never inherit the consumed
+  intent; an unclaimed tap with its original timestamp so the standard
+  30-minute window expires as if the restart never happened. The guard
+  runs before live ingest binds, ahead of any buffer replay.
+- **`live.confirm` goes silent once WHOOP has scored a workout covering
+  the session's start**: a confirmation trailing the scored card was
+  noise. Cover-the-start semantics on purpose, so a merely adjacent
+  earlier workout cannot silence a genuinely new session.
+
+### Changed
+
+- Lift composition contract v2 in the plugin instructions: a mandatory
+  analysis pass (day-type-anchored deltas, tonnage, wave position, cost
+  localization, film bar-speed), descriptions of up to 3 short lines each
+  carrying one analyzed metric with its comparison (max two numbers per
+  line, no explainer sentences), and the title's headline defined as the
+  session's defining lift rather than squat by default.
+
 ## 0.12.0 - 2026-09-01
 
 ### Added

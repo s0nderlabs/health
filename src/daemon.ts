@@ -16,7 +16,7 @@ import { InFlightTracker } from './delivery.js'
 import { backfill, pollOnce, type Fact } from './poller.js'
 import { startWebhookReceiver } from './webhook.js'
 import { isWakeSignal, wakeReleaseActive } from './wake.js'
-import { LiveState } from './livestate.js'
+import { LiveState, intentRearmPlan } from './livestate.js'
 import { LiveListener, parseYieldMinutes } from './live.js'
 import { StravaWatch } from './strava-watch.js'
 import { api as stravaApi, stravaConfigured, StravaAuthError, type PlanRide } from './strava.js'
@@ -105,6 +105,18 @@ function cached<T>(fn: () => T, ttlMs = 30_000): () => T {
   }
 }
 
+/** One failure-tolerant scored-workout probe for every live-side caller
+ *  (the confirm gate, restart re-arm, end-of-session corroboration): a
+ *  lookup hiccup must read as "no scored workout", never break the caller. */
+function scoredOverlapSafe(startIso: string, endIso: string): boolean {
+  try {
+    return store.hasScoredWorkoutOverlapping(startIso, endIso)
+  } catch (err) {
+    log(`scored-overlap lookup failed: ${err}`)
+    return false
+  }
+}
+
 const liveState = new LiveState({
   // Canon (his ruling, Jul 9 2026): config override first, else the WHOOP
   // profile max HR (187) auto-raised by any higher observed workout max.
@@ -136,6 +148,21 @@ const liveState = new LiveState({
   emit: (cls, dedupeKey, payload, opts) => {
     engine.liveEvent(cls, dedupeKey, payload, opts)
   },
+  hasScoredOverlap: scoredOverlapSafe,
+  onIntentClaim: (startedIso) => {
+    try {
+      store.setMeta('live_intent_open', startedIso)
+    } catch (err) {
+      log(`live intent persist failed: ${err}`)
+    }
+  },
+  onIntentRelease: () => {
+    try {
+      store.setMeta('live_intent_open', '')
+    } catch (err) {
+      log(`live intent release failed: ${err}`)
+    }
+  },
   onSessionEnd: (summary) => {
     // Reverse corroboration at insert: a workout can SCORE while the live
     // session is still running (no row to stamp yet) and never re-scores,
@@ -143,15 +170,10 @@ const liveState = new LiveState({
     // scoring that lands after this row exists. 60s slack, matching the
     // forward pass: adjacency is not overlap. The lookup gets its own guard:
     // a corroboration failure must never cost the archive row itself.
-    let corroborated = false
-    try {
-      corroborated = store.hasScoredWorkoutOverlapping(
-        new Date(Date.parse(summary.started_at) - 60_000).toISOString(),
-        new Date(Date.parse(summary.ended_at) + 60_000).toISOString(),
-      )
-    } catch (err) {
-      log(`live session corroboration lookup failed: ${err}`)
-    }
+    const corroborated = scoredOverlapSafe(
+      new Date(Date.parse(summary.started_at) - 60_000).toISOString(),
+      new Date(Date.parse(summary.ended_at) + 60_000).toISOString(),
+    )
     try {
       store.insertLiveSession({ ...summary, corroborated })
     } catch (err) {
@@ -633,6 +655,48 @@ const webhookServer = startWebhookReceiver(
       }
     : undefined,
 )
+
+// Restart amnesia guard, BEFORE live ingest binds: a reconnecting relayer
+// replays its offline buffer within seconds, and re-detection must find the
+// intent already re-armed (Sep 1 2026: two mid-workout restarts decapitated
+// a declared session; the review then showed the naive re-arm would hand a
+// consumed intent to the post-workout shower, hence intentRearmPlan's
+// cover-the-start probe + 5-min fuse, and the tap restore for the
+// declared-but-not-yet-detected window).
+try {
+  let lastTapIso: string | null = null
+  try {
+    const raw = store.getMeta('intent_log')
+    const parsed = raw ? (JSON.parse(raw) as Array<{ ts?: string }>) : []
+    lastTapIso = parsed.length ? (parsed[parsed.length - 1]?.ts ?? null) : null
+  } catch {
+    // Unreadable log = no unclaimed restore; the claimed path still runs.
+  }
+  const openIso = store.getMeta('live_intent_open') || null
+  const openStart = openIso ? Date.parse(openIso) : NaN
+  const plan = intentRearmPlan({
+    openSessionIso: openIso,
+    lastTapIso,
+    now: Date.now(),
+    scoredCoveringOpen: Number.isFinite(openStart)
+      ? scoredOverlapSafe(
+          new Date(openStart - 60_000).toISOString(),
+          new Date(openStart + 60_000).toISOString(),
+        )
+      : false,
+  })
+  if (plan.armAt != null) {
+    liveState.noteIntent(plan.armAt)
+    log(
+      `live: re-armed declared intent across restart (${
+        openIso ? `claimed session open since ${openIso}, 5-min fuse` : `unclaimed tap at ${lastTapIso}`
+      })`,
+    )
+  }
+  if (plan.clearOpen) store.setMeta('live_intent_open', '')
+} catch (err) {
+  log(`live intent re-arm failed: ${err}`)
+}
 
 // Live ingest is OPTIONAL: a bind failure (port taken) must degrade to
 // no-live-feed, never take the poller/webhooks/delivery down with it.

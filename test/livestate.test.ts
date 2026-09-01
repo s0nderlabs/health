@@ -1,5 +1,11 @@
 import { describe, expect, test } from 'bun:test'
-import { LiveState, RING_CAP } from '../src/livestate.js'
+import {
+  LiveState,
+  RING_CAP,
+  INTENT_MATCH_BEFORE_MS,
+  INTENT_REARM_FUSE_MS,
+  intentRearmPlan,
+} from '../src/livestate.js'
 import type { SessionSummary } from '../src/livestate.js'
 import { parseBase64Frame } from '../src/hrparse.js'
 
@@ -12,17 +18,35 @@ interface Emitted {
   meta: Record<string, string>
 }
 
-function harness(opts: { maxHr?: number; restHr?: number; hotBpm?: number | null } = {}) {
+function harness(
+  opts: {
+    maxHr?: number
+    restHr?: number
+    hotBpm?: number | null
+    hasScoredOverlap?: (startIso: string, endIso: string) => boolean
+  } = {},
+) {
   const events: Emitted[] = []
   const summaries: SessionSummary[] = []
+  const intentClaims: string[] = []
+  const overlapProbes: Array<[string, string]> = []
+  let intentReleases = 0
   const state = new LiveState({
     getMaxHr: () => opts.maxHr ?? 190,
     getRestHr: () => opts.restHr ?? 56,
     getHotBpm: () => opts.hotBpm ?? null,
     emit: (cls, key, payload) => events.push({ cls, key, ...payload }),
     onSessionEnd: (s) => summaries.push(s),
+    hasScoredOverlap: opts.hasScoredOverlap
+      ? (a, b) => {
+          overlapProbes.push([a, b])
+          return opts.hasScoredOverlap!(a, b)
+        }
+      : undefined,
+    onIntentClaim: (iso) => intentClaims.push(iso),
+    onIntentRelease: () => intentReleases++,
   })
-  return { state, events, summaries }
+  return { state, events, summaries, intentClaims, overlapProbes, releases: () => intentReleases }
 }
 
 // With maxHr 190 / restHr 56: hot = 116, cool = 90 (Karvonen 45% / 25%).
@@ -817,5 +841,129 @@ describe('snapshot', () => {
     const snap = state.snapshot(T0 + 95_000) as { session: { max_bpm: number } | null }
     expect(snap.session).not.toBeNull()
     expect(snap.session!.max_bpm).toBe(125)
+  })
+})
+
+describe('Sep 1 batch: post-score silence + restart intent persistence', () => {
+  test('confirm stays silent once WHOOP scored a workout covering the start', () => {
+    const { state, events, summaries, overlapProbes } = harness({ hasScoredOverlap: () => true })
+    feed(state, 0, 400, 145) // hot + zone-2 depth: evidence latches at ~300s
+    expect(events.filter((e) => e.cls === 'live.confirm').length).toBe(0)
+    // The probe asks about the session START (+-60s), not any-overlap of the
+    // whole window: adjacency to some other workout must not silence us.
+    expect(overlapProbes.length).toBeGreaterThan(0)
+    expect(overlapProbes[0][0]).toBe(new Date(T0 - 60_000).toISOString())
+    expect(overlapProbes[0][1]).toBe(new Date(T0 + 60_000).toISOString())
+    feed(state, 400, 320, 70) // sustained cool: session ends normally
+    expect(summaries.length).toBe(1)
+    // The silence changes no verdicts: the session was already non-low when
+    // the latch fired, and confidence latches never un-latch.
+    expect(summaries[0].confidence).toBe('medium')
+    expect(summaries[0].demoted).toBe(false)
+  })
+
+  test('the same evidence without a scored overlap still confirms (control)', () => {
+    const { state, events } = harness()
+    feed(state, 0, 400, 145)
+    expect(events.filter((e) => e.cls === 'live.confirm').length).toBe(1)
+  })
+
+  test('intent claim and release round-trip (the restart-persistence hooks)', () => {
+    const { state, events, summaries, intentClaims, releases } = harness()
+    state.noteIntent(T0)
+    feed(state, 0, 120, 130) // session starts ~90s in, intent-matched at start
+    expect(intentClaims.length).toBe(1)
+    // The persisted value is the SESSION START iso: the daemon's re-arm age
+    // arithmetic depends on exactly this being the claimed session's start.
+    expect(intentClaims[0]).toBe(new Date(T0).toISOString())
+    expect(events.find((e) => e.cls === 'live.session')?.meta.confidence).toBe('high')
+    expect(releases()).toBe(0) // still open
+    feed(state, 120, 320, 70) // cool to the end
+    expect(summaries[0]?.intent_matched).toBe(true)
+    expect(releases()).toBe(1)
+  })
+
+  test('a plain undeclared session never touches the intent hooks', () => {
+    const { state, summaries, intentClaims, releases } = harness()
+    feed(state, 0, 200, 130)
+    feed(state, 200, 320, 70)
+    expect(summaries.length).toBe(1)
+    expect(intentClaims.length).toBe(0)
+    expect(releases()).toBe(0)
+  })
+})
+
+describe('intentRearmPlan (the boot-guard policy, pure)', () => {
+  const NOW = T0 + 3600_000
+
+  test('claimed open session, unscored and fresh: arms with the 5-min fuse', () => {
+    const plan = intentRearmPlan({
+      openSessionIso: new Date(NOW - 45 * 60_000).toISOString(),
+      lastTapIso: null,
+      now: NOW,
+      scoredCoveringOpen: false,
+    })
+    expect(plan.clearOpen).toBe(false)
+    expect(plan.armAt).toBe(NOW - (INTENT_MATCH_BEFORE_MS - INTENT_REARM_FUSE_MS))
+  })
+
+  test('a scored workout covering the open start consumes the key, arms nothing', () => {
+    const plan = intentRearmPlan({
+      openSessionIso: new Date(NOW - 45 * 60_000).toISOString(),
+      lastTapIso: null,
+      now: NOW,
+      scoredCoveringOpen: true,
+    })
+    expect(plan).toEqual({ armAt: null, clearOpen: true })
+  })
+
+  test('ancient or garbage open keys are consumed without arming', () => {
+    expect(
+      intentRearmPlan({
+        openSessionIso: new Date(NOW - 5 * 3600_000).toISOString(),
+        lastTapIso: null,
+        now: NOW,
+        scoredCoveringOpen: false,
+      }),
+    ).toEqual({ armAt: null, clearOpen: true })
+    expect(
+      intentRearmPlan({ openSessionIso: 'garbage', lastTapIso: null, now: NOW, scoredCoveringOpen: false }),
+    ).toEqual({ armAt: null, clearOpen: true })
+  })
+
+  test('an unclaimed tap restores its ORIGINAL timestamp (natural expiry)', () => {
+    const tap = new Date(NOW - 10 * 60_000).toISOString()
+    expect(
+      intentRearmPlan({ openSessionIso: null, lastTapIso: tap, now: NOW, scoredCoveringOpen: false }),
+    ).toEqual({ armAt: Date.parse(tap), clearOpen: false })
+    const stale = new Date(NOW - 40 * 60_000).toISOString()
+    expect(
+      intentRearmPlan({ openSessionIso: null, lastTapIso: stale, now: NOW, scoredCoveringOpen: false })
+        .armAt,
+    ).toBe(null)
+  })
+
+  test('a claimed open session outranks a fresher unclaimed tap', () => {
+    const plan = intentRearmPlan({
+      openSessionIso: new Date(NOW - 45 * 60_000).toISOString(),
+      lastTapIso: new Date(NOW - 60_000).toISOString(),
+      now: NOW,
+      scoredCoveringOpen: false,
+    })
+    expect(plan.armAt).toBe(NOW - (INTENT_MATCH_BEFORE_MS - INTENT_REARM_FUSE_MS))
+  })
+
+  test('the fuse holds: a session detected past 5 min does NOT inherit', () => {
+    const { state, events } = harness()
+    state.noteIntent(T0 - (INTENT_MATCH_BEFORE_MS - INTENT_REARM_FUSE_MS)) // as the boot guard arms at T0
+    feed(state, 360, 120, 130) // hot from +6min: start lands past the fuse
+    expect(events.find((e) => e.cls === 'live.session')?.meta.confidence).toBe('low')
+  })
+
+  test('the fuse admits: a session detected within 5 min inherits', () => {
+    const { state, events } = harness()
+    state.noteIntent(T0 - (INTENT_MATCH_BEFORE_MS - INTENT_REARM_FUSE_MS))
+    feed(state, 0, 120, 130) // hot immediately: start at +90s, inside the fuse
+    expect(events.find((e) => e.cls === 'live.session')?.meta.confidence).toBe('high')
   })
 })
