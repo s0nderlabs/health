@@ -273,6 +273,7 @@ export class Engine {
       // Past this, the deterministic fallback has long since named the ride;
       // the composition request is stale even if the loop-closing news is not.
       'ride.landed': 12,
+      'lift.landed': 12,
     })
   }
 
@@ -310,13 +311,17 @@ export class Engine {
     )
   }
 
-  /** Entry point for the Strava ride watcher. notable: it is the signal the
-   *  gym protocol acts on (the "wait for Strava" step ends here). Deduped by
-   *  activity id, one per ride ever; bypassCooldown also exempts it from the
-   *  daily budget, correctly: ~4 rides/week must never lose their loop-closer
-   *  to a chatty day. */
-  rideEvent(dedupeKey: string, payload: { content: string; meta: Record<string, string> }): boolean {
-    return this.emit('ride.landed', 'notable', dedupeKey, payload, { bypassCooldown: true })
+  /** Entry point for the Strava watcher (rides AND lift cards). notable: it
+   *  is the signal the gym protocol acts on (the "wait for Strava" step ends
+   *  here). Deduped by activity id, one per activity ever; bypassCooldown
+   *  also exempts it from the daily budget, correctly: ~4 rides + ~4 lifts a
+   *  week must never lose their loop-closer to a chatty day. */
+  stravaEvent(
+    cls: 'ride.landed' | 'lift.landed',
+    dedupeKey: string,
+    payload: { content: string; meta: Record<string, string> },
+  ): boolean {
+    return this.emit(cls, 'notable', dedupeKey, payload, { bypassCooldown: true })
   }
 
   /** Entry point for the live HR state machine (pre-throttled per-session). */

@@ -249,7 +249,7 @@ function planRideFor(rideStartIso: string): PlanRide | null {
 const stravaWatch = new StravaWatch({
   api: stravaApi,
   store,
-  emit: (key, payload) => engine.rideEvent(key, payload),
+  emit: (cls, key, payload) => engine.stravaEvent(cls, key, payload),
   getPlanRide: planRideFor,
   getWatermark: () => config().strava.watermark,
   log,

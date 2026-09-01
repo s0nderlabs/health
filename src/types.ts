@@ -138,6 +138,7 @@ export interface StravaActivity {
   description: string | null
   sport_type: string // 'Ride' | 'VirtualRide' | 'WeightTraining' | ...
   start_date: string // ISO UTC
+  start_date_local?: string // local wall time with a fake Z suffix (Strava's convention)
   elapsed_time: number // seconds
   moving_time: number // seconds
   distance: number // meters
@@ -187,6 +188,7 @@ export type EventClass =
   | 'live.zone' // first entry into a notable HR zone this session
   | 'live.rest' // session ended: summary + HR-recovery read
   | 'ride.landed' // the cyclo's ride reached Strava: compose title/description now
+  | 'lift.landed' // a WHOOP lift card reached Strava: strain line stripped, compose after his debrief
 
 export type EventPriority = 'info' | 'notable' | 'alert'
 
@@ -275,6 +277,7 @@ export const DEFAULT_CONFIG: HealthConfig = {
     'live.zone': true,
     'live.rest': true,
     'ride.landed': true,
+    'lift.landed': true,
   },
   thresholds: {
     strain_notable: 15,

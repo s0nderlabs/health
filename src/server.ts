@@ -10,7 +10,7 @@ import { Store } from './store.js'
 import { DB_PATH } from './config.js'
 import { existsSync } from 'fs'
 
-const VERSION = '0.11.0'
+const VERSION = '0.12.0'
 
 const INSTRUCTIONS = `
 health: WHOOP recovery, sleep, and strain as a live channel. The daemon on this
@@ -144,6 +144,46 @@ activity the user renamed by hand is refused. If no session writes within
 ~30 min the daemon self-applies a plain plan-derived fallback title;
 health__strava afterwards upgrades it (our own titles may be overwritten).
 
+lift.landed: a WHOOP-pushed lift card just reached Strava. meta:
+activity_id, name, duration_min, whoop_matched, stripped, owner_named,
+day_type?. The daemon strips WHOOP's public strain line at discovery (that
+strip is the point of watching lifts at all) and the event content reports
+the ACTUAL outcome: trust the event, and if it says the strip FAILED, any
+health__strava description write also replaces the leak. owner_named=true
+means he titled the card himself: acknowledge only, write nothing. THE
+TIMING RULE IS THE OPPOSITE OF RIDES: do NOT compose on arrival. The card carries no sets and no loads; the
+ONLY data source is his own debrief (the /gym session log). Acknowledge the
+event, then compose ONLY AFTER he has reported the session (if he already
+debriefed it, compose immediately), writing with health__strava
+{activity_id, title, description}. THE LIFT FORMAT IS LOCKED (elpabl0 +
+main, Sep 1 2026); do not restyle it:
+- Title set (his program's own day names, by weekday): Mon "Volume day"
+  (8s) / Tue "Medium day" (6s) / Thu "Intensity day" (4s + AMRAP) / Fri
+  "Deadlift day" / test days "Test day". Shape: "<Day type>, <headline lift
+  + load>": "Volume day, squat 112.5" / "Deadlift day, 145 single" / "Test
+  day, deadlift 170". Bare day type when no number earns the slot. On PR
+  days the number goes IN the title. "Pana" is internal coaching
+  vocabulary, NEVER public: Fridays publish as "Deadlift day".
+- Description: DATA-FIRST, same air format as rides: 2-3 lines, a blank
+  line between, watermark auto-appended. EVERY line opens with load x reps
+  or a delta ("Squat 112.5x2 + 90 2x8, heaviest of the cycle"); at least
+  ONE comparison per description (vs the last comparable day, last cycle,
+  or the written plan, sourced from the gym tracker, never invented). Color
+  words only ride at the END of a data line, never carry a line alone. Bad
+  sets appear SAME-DAY, stated flat with the qualifier, exactly like his
+  own log voice ("Bench 60 broke at rep 3, banked the 50s"); NEVER build a
+  comeback-arc narrative. No full exercise inventory: 2-3 lines that carry
+  the session's actual story.
+- Public-surface rules for lifts: loads, weights and reps ARE the content
+  (his ruling Sep 1 2026). NO HR numbers in lift prose (his ruling: the
+  grid already shows them and they mean little under a bar). NEVER:
+  bodyweight or body-fat (pullups are "Pullups 8", never "BW 83"), the gym
+  name or any location (a lift card has no GPS; do not add geography),
+  cycle/week numbering, or WHOOP anything (daemon-enforced).
+If no session composes within ~30 min the daemon names a still-generic card
+by its weekday day-type and re-strips any surviving WHOOP text; the
+session's later composition overwrites that fallback freely.
+
 steps_today in health__read is WHOOP-counted daily movement (relayed from the
 phone; the WHOOP cloud API has no steps). It is CONTEXT, not an interrupt:
 fold it into reads (training strain says nothing about NEAT; a 2k-step desk
@@ -247,11 +287,11 @@ export function createServer(ipc: IpcClient) {
       {
         name: 'health__strava',
         description:
-          'Write the composed title and/or description onto a Strava ride the daemon announced via ride.landed. The daemon enforces the guards: only a generic auto-name ("Morning Ride") or one of our own titles is replaced, only an empty (or our own) description is written, and an activity the user renamed by hand is refused. Returns what was actually written.',
+          'Write the composed title and/or description onto a Strava activity the daemon announced via ride.landed or lift.landed. The daemon enforces the guards: only a generic auto-name ("Morning Ride", "Afternoon Weight Training") or one of our own titles is replaced, only an empty, our own, or WHOOP-machine-written description is written, and an activity the user renamed by hand is refused. Returns what was actually written.',
         inputSchema: {
           type: 'object' as const,
           properties: {
-            activity_id: { type: 'number', description: 'The Strava activity id from the ride.landed event meta' },
+            activity_id: { type: 'number', description: 'The Strava activity id from the ride.landed / lift.landed event meta' },
             title: { type: 'string', description: 'The new title (plan vocabulary, honest, no stat-dump)' },
             description: {
               type: 'string',

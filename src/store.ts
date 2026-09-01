@@ -625,6 +625,19 @@ export class Store {
       .all(endIso, startIso) as Array<Record<string, unknown>>
   }
 
+  /** SCORED WHOOP strength workouts overlapping a lift card's window (his
+   *  WHOOP sport is 'powerlifting'; 'weightlifting' also carries 'lift'). */
+  whoopLiftingOverlapping(startIso: string, endIso: string): Array<Record<string, unknown>> {
+    return this.db
+      .query(
+        `SELECT id, start, end, strain, average_heart_rate, max_heart_rate FROM workouts
+         WHERE score_state = 'SCORED' AND start <= ? AND end >= ?
+           AND lower(sport_name) LIKE '%lift%'
+         ORDER BY start ASC`,
+      )
+      .all(endIso, startIso) as Array<Record<string, unknown>>
+  }
+
   // ── event queue ───────────────────────────────────────────────
 
   /** Insert an event; an undelivered event with the same dedupe_key is superseded (expired). */

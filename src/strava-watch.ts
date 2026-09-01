@@ -1,14 +1,17 @@
-// The Strava ride watcher: turns a webhook pointer (or reconcile discovery)
-// into ONE ride.landed event, guards the rename PUT, runs the deterministic
-// fallback when no session answers, and swallows our own webhook echo.
+// The Strava watcher: turns a webhook pointer (or reconcile discovery) into
+// ONE ride.landed or lift.landed event, guards the rename PUT, runs the
+// deterministic fallback when no session answers, and swallows our own
+// webhook echo.
 //
 // Ownership rules, in priority order (the polite-tenant contract):
 //   1. A title the OWNER typed is never touched, and once he renames anything
 //      by hand that activity is hands-off forever (owner_named).
-//   2. Only Strava's generic auto-names are ever replaced, only on rides, and
-//      a WHOOP-pushed activity is never renamed OR announced.
-//   3. The description is only ever written into an empty field (or over one
-//      we wrote ourselves).
+//   2. Only Strava's generic auto-names are ever replaced, and only on two
+//      shapes: the cyclo's rides (never WHOOP-pushed) and WHOOP-pushed lift
+//      cards. Any other WHOOP-pushed activity is never renamed OR announced.
+//   3. The description is only ever written into an empty field, over one we
+//      wrote ourselves, or (lifts) over WHOOP's machine-written strain line,
+//      which the daemon strips at discovery because it is a privacy leak.
 //   4. The in-session composition (Claude) is the product; the fallback title
 //      exists so nothing stays "Morning Ride" overnight when no session is up.
 
@@ -18,9 +21,13 @@ import {
   assertPublicText,
   fallbackTitle,
   fmtRideDuration,
+  isGenericLiftName,
   isGenericRideName,
+  isLiftType,
   isRideType,
+  isWhoopAutoDescription,
   isWhoopSourced,
+  liftDayTitle,
   prepareDescription,
   StravaNotFoundError,
   type PlanRide,
@@ -35,7 +42,11 @@ export const FALLBACK_AFTER_MS = 30 * 60_000
 export interface StravaWatchDeps {
   api: StravaApi
   store: Store
-  emit: (dedupeKey: string, payload: { content: string; meta: Record<string, string> }) => void
+  emit: (
+    cls: 'ride.landed' | 'lift.landed',
+    dedupeKey: string,
+    payload: { content: string; meta: Record<string, string> },
+  ) => void
   /** Today's planned ride when the given ride start falls on the plan's date. */
   getPlanRide: (rideStartIso: string) => PlanRide | null
   /** The description sign-off ('' = none). Config, not code: an installer's
@@ -106,6 +117,10 @@ export class StravaWatch {
       name_at_discovery: a.name,
     })
 
+    if (isLiftType(a) && isWhoopSourced(a)) {
+      await this.discoverLift(a)
+      return
+    }
     if (!isRideType(a) || isWhoopSourced(a)) {
       // Seen (so reconcile stops refetching) but permanently hands-off.
       store.setStravaOwnerNamed(a.id)
@@ -120,17 +135,103 @@ export class StravaWatch {
     this.emitRideLanded(a)
   }
 
+  /**
+   * A WHOOP-pushed lift card. Two-stage by design: WHOOP's auto-description
+   * publishes his strain, so the daemon strips it SECONDS after upload with
+   * no session in the loop, while the real title/description wait, because
+   * the card itself carries no sets or loads. The session that coached the
+   * lift composes AFTER his debrief; that conversation is the data source.
+   */
+  private async discoverLift(a: StravaActivity): Promise<void> {
+    const { store, api } = this.deps
+    let stripped: 'stripped' | 'failed' | 'clean' = 'clean'
+    if (isWhoopAutoDescription(a.description)) {
+      try {
+        await api.updateActivity(a.id, { description: '' })
+        stripped = 'stripped'
+        this.log(`stripped WHOOP auto-description from lift ${a.id}`)
+      } catch (err) {
+        stripped = 'failed'
+        this.log(`strip for lift ${a.id} failed (fallback re-strips): ${err}`)
+      }
+    }
+    const ownerNamed = !isGenericLiftName(a.name)
+    if (ownerNamed && stripped !== 'failed') {
+      // He named it in-app already: title is his, forever. On a FAILED strip
+      // the row deliberately stays pending instead (setting owner_named here
+      // would drop it from stravaPendingFallback and the leak would never be
+      // retried); liftFallback re-strips first and applies this policy after.
+      store.setStravaOwnerNamed(a.id)
+    }
+    this.emitLiftLanded(a, stripped, ownerNamed)
+  }
+
+  /** Overlapping scored WHOOP workouts for an activity window, as event
+   *  prose inputs (shared by the ride and lift emitters). */
+  private whoopOverlap(
+    a: StravaActivity,
+    query: (startIso: string, endIso: string) => Array<Record<string, unknown>>,
+  ): { count: number; strains: string } {
+    const startMs = Date.parse(a.start_date)
+    if (!Number.isFinite(startMs)) return { count: 0, strains: '' }
+    const endMs = startMs + a.elapsed_time * 1000
+    const matches = query(
+      new Date(startMs - 10 * 60_000).toISOString(),
+      new Date(endMs + 10 * 60_000).toISOString(),
+    )
+    return {
+      count: matches.length,
+      strains: matches
+        .map((m) => (typeof m.strain === 'number' ? (m.strain as number).toFixed(1) : '?'))
+        .join(', '),
+    }
+  }
+
+  private emitLiftLanded(
+    a: StravaActivity,
+    stripped: 'stripped' | 'failed' | 'clean',
+    ownerNamed: boolean,
+  ): void {
+    const { store, emit } = this.deps
+    const overlap = this.whoopOverlap(a, (s, e) => store.whoopLiftingOverlapping(s, e))
+    const dur = fmtRideDuration(a.elapsed_time)
+    const day = liftDayTitle(a.start_date_local)
+    const whoopLine = overlap.count
+      ? ` Matches ${overlap.count} scored WHOOP strength record${overlap.count > 1 ? 's' : ''} (strain ${overlap.strains}).`
+      : ''
+    const stripLine =
+      stripped === 'stripped'
+        ? " The daemon already stripped WHOOP's public strain line."
+        : stripped === 'failed'
+          ? " WARNING: stripping WHOOP's public strain line FAILED, so it is still live on the public page; the daemon retries within ~35 min, and any health__strava description write also replaces it."
+          : ' The card arrived with no WHOOP auto-description.'
+    const action = ownerNamed
+      ? ' He titled this card himself, so both fields are hands-off: acknowledge only, do not compose or write anything.'
+      : ` Do NOT compose from this card alone: it carries no sets or loads. Acknowledge it, wait for his debrief, then compose the title and description per the lift contract and write them with health__strava activity_id=${a.id}.`
+    emit('lift.landed', `lift.landed:${a.id}`, {
+      content:
+        `Lift card landed on Strava as "${a.name}": ${dur}, started ${a.start_date}.` +
+        (day ? ` By weekday this is ${day}.` : '') +
+        whoopLine +
+        stripLine +
+        action,
+      meta: {
+        class: 'lift.landed',
+        activity_id: String(a.id),
+        sport_type: a.sport_type,
+        name: a.name,
+        duration_min: String(Math.round(a.elapsed_time / 60)),
+        whoop_matched: overlap.count ? 'true' : 'false',
+        stripped,
+        owner_named: ownerNamed ? 'true' : 'false',
+        ...(day ? { day_type: day } : {}),
+      },
+    })
+  }
+
   private emitRideLanded(a: StravaActivity): void {
     const { store, emit, getPlanRide } = this.deps
-    const startMs = Date.parse(a.start_date)
-    const endMs = startMs + a.elapsed_time * 1000
-    let matches: Array<Record<string, unknown>> = []
-    if (Number.isFinite(startMs)) {
-      matches = store.whoopCyclingOverlapping(
-        new Date(startMs - 10 * 60_000).toISOString(),
-        new Date(endMs + 10 * 60_000).toISOString(),
-      )
-    }
+    const overlap = this.whoopOverlap(a, (s, e) => store.whoopCyclingOverlapping(s, e))
 
     const km = (a.distance / 1000).toFixed(1)
     const dur = fmtRideDuration(a.moving_time)
@@ -142,13 +243,11 @@ export class StravaWatch {
     const climb = a.total_elevation_gain ? ` +${Math.round(a.total_elevation_gain)}m,` : ''
     const plan = getPlanRide(a.start_date)
     const planLine = plan?.title ? ` Today's planned ride: "${plan.title}".` : ''
-    const whoopLine = matches.length
-      ? ` Overlaps ${matches.length} scored WHOOP cycling record${matches.length > 1 ? 's' : ''} (strain ${matches
-          .map((m) => (typeof m.strain === 'number' ? (m.strain as number).toFixed(1) : '?'))
-          .join(', ')}): the session has now landed from BOTH sources.`
+    const whoopLine = overlap.count
+      ? ` Overlaps ${overlap.count} scored WHOOP cycling record${overlap.count > 1 ? 's' : ''} (strain ${overlap.strains}): the session has now landed from BOTH sources.`
       : ' No scored WHOOP cycling record overlaps yet (its card may still be pending).'
 
-    emit(`ride.landed:${a.id}`, {
+    emit('ride.landed', `ride.landed:${a.id}`, {
       content:
         `Ride landed on Strava as "${a.name}": ${km}km in ${dur},${speed}${hr}${climb} started ${a.start_date}.` +
         planLine +
@@ -161,7 +260,7 @@ export class StravaWatch {
         name: a.name,
         distance_km: km,
         moving_min: String(Math.round(a.moving_time / 60)),
-        whoop_matched: matches.length ? 'true' : 'false',
+        whoop_matched: overlap.count ? 'true' : 'false',
         ...(plan?.title ? { plan_title: plan.title } : {}),
       },
     })
@@ -223,6 +322,11 @@ export class StravaWatch {
       for (const { id } of store.stravaPendingFallback(cutoff)) {
         try {
           const a = await api.getActivity(id)
+          const lift = isLiftType(a) && isWhoopSourced(a)
+          if (lift) {
+            await this.liftFallback(a)
+            continue
+          }
           if (!isRideType(a) || isWhoopSourced(a)) {
             store.setStravaOwnerNamed(id)
             continue
@@ -258,6 +362,40 @@ export class StravaWatch {
     }
   }
 
+  /** The lift fallback never invents content: it re-strips a WHOOP
+   *  auto-description that survived discovery (rate limit, daemon restart)
+   *  and names a still-generic card by its locked weekday day-type. The
+   *  strip comes FIRST, before any ownership verdict: an owner-renamed card
+   *  still gets its leak killed, then goes hands-off; a lift on a day with
+   *  no day-type name just closes, still stripped. The session's later
+   *  composition may revise anything we wrote. */
+  private async liftFallback(a: StravaActivity): Promise<void> {
+    const { store, api } = this.deps
+    const put: { name?: string; description?: string } = {}
+    if (isWhoopAutoDescription(a.description)) put.description = ''
+    if (!isGenericLiftName(a.name)) {
+      // Renamed by him (mid-window, or at a discovery whose strip failed):
+      // kill any surviving leak, then hands-off forever.
+      if (put.description !== undefined) await api.updateActivity(a.id, put)
+      store.setStravaOwnerNamed(a.id)
+      this.log(
+        `lift fallback for ${a.id}: owner-named` +
+          (put.description !== undefined ? ', re-stripped description' : ''),
+      )
+      return
+    }
+    const title = liftDayTitle(a.start_date_local)
+    if (title) put.name = title
+    if (put.name !== undefined || put.description !== undefined) {
+      await api.updateActivity(a.id, put)
+    }
+    store.setStravaAnnotation(a.id, { our_title: put.name, annotated_by: 'fallback' })
+    this.log(
+      `lift fallback for ${a.id}: ${put.name ? `named "${put.name}"` : 'no day-type name'}` +
+        (put.description !== undefined ? ', re-stripped description' : ''),
+    )
+  }
+
   /**
    * The session's write path (health__strava). Applies the same guards
    * against the LIVE activity and reports exactly what happened. Every
@@ -286,12 +424,16 @@ export class StravaWatch {
       }
     }
     const a = await api.getActivity(id)
-    // The announce guards, re-checked at write time: reconcile also seeds
-    // rows for lifts and WHOOP-pushed activities, and none of those may ever
-    // be written to, description included.
-    if (!isRideType(a) || isWhoopSourced(a)) {
-      throw new Error(`activity ${id} is not an annotatable ride (type/source guard); nothing written`)
+    // The announce guards, re-checked at write time. Exactly two writable
+    // shapes exist: the cyclo's rides (never WHOOP-pushed) and WHOOP-pushed
+    // lift cards. Everything else reconcile ever seeded stays read-only.
+    const lift = isLiftType(a) && isWhoopSourced(a)
+    if (!lift && (!isRideType(a) || isWhoopSourced(a))) {
+      throw new Error(
+        `activity ${id} is not an annotatable ride or lift card (type/source guard); nothing written`,
+      )
     }
+    const generic = lift ? isGenericLiftName(a.name) : isGenericRideName(a.name)
     const notes: string[] = []
     const put: { name?: string; description?: string } = {}
 
@@ -303,7 +445,7 @@ export class StravaWatch {
       assertPublicText(title, 'title')
       // Writable when the live title is still Strava's generic one, or is a
       // title WE wrote earlier (session revision over the fallback is fine).
-      if (isGenericRideName(a.name) || (row.our_title != null && a.name === row.our_title)) {
+      if (generic || (row.our_title != null && a.name === row.our_title)) {
         if (row.owner_named && !(row.our_title != null && a.name === row.our_title)) {
           notes.push(`title NOT written: the owner named this activity himself ("${a.name}")`)
         } else {
@@ -320,7 +462,11 @@ export class StravaWatch {
       // never gets our description either (unless revising one we wrote).
       if (row.owner_named && !row.desc_written) {
         notes.push('description NOT written: this activity is owner-claimed (hands-off)')
-      } else if ((a.description ?? '').trim() === '' || row.desc_written) {
+      } else if (
+        (a.description ?? '').trim() === '' ||
+        row.desc_written ||
+        (lift && isWhoopAutoDescription(a.description))
+      ) {
         // prepareDescription throws on never-public terms and appends the
         // configured watermark, so neither depends on any session's memory.
         put.description = prepareDescription(description, this.deps.getWatermark())
@@ -329,7 +475,15 @@ export class StravaWatch {
       }
     }
 
-    if (!put.name && !put.description) {
+    if (lift && put.description === undefined && isWhoopAutoDescription(a.description)) {
+      // Never leave the leak behind on our own write: a title-only session
+      // write sets annotated_by and drops the row from the fallback list, so
+      // the strip must ride along here or nothing would ever retry it.
+      put.description = ''
+      notes.push("stripped WHOOP's leftover auto-description")
+    }
+
+    if (put.name === undefined && put.description === undefined) {
       return { renamed: false, described: false, notes: notes.length ? notes : ['nothing to write'] }
     }
 

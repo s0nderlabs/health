@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.12.0 - 2026-09-01
+
+### Added
+
+- **WHOOP lift-card watcher.** The Strava watcher now also owns the lift
+  cards WHOOP itself pushes (WeightTraining, WHOOP-sourced). Two-stage by
+  design: the daemon strips WHOOP's public strain auto-description seconds
+  after upload with no session in the loop (the strip is the point: that
+  line published his strain score on every lift), then emits a
+  `lift.landed` channel event instructing the session to HOLD composition
+  until the user's gym debrief, because the card itself carries no sets or
+  loads. The strip outcome (stripped / failed / nothing to strip) is
+  reported honestly in the event, and a failed strip always retries: via
+  the fallback tick, and by riding along any later `health__strava` write.
+- **Weekday day-type fallback titles.** A lift card no session composes
+  within 30 minutes is named by the program's own day vocabulary (Volume /
+  Medium / Intensity / Deadlift day by local weekday); a day with no
+  day-type name closes stripped but unnamed. Session compositions
+  overwrite the fallback freely.
+- **Locked lift composition contract** in the plugin instructions: day-type
+  titles with a headline lift + load, data-first descriptions (every line
+  opens with load x reps or a delta, at least one comparison, color only as
+  a tail), bad sets stated same-day in his own log voice, and
+  lift-specific public-surface rules (loads are the content; no HR in lift
+  prose; never bodyweight/body-fat, gym name, location, or cycle/week
+  numbering).
+
+### Changed
+
+- The WHOOP-machine-written description detector matches only WHOOP's
+  exact one-line auto-description shape, never a word list, so a note the
+  owner typed by hand in Strava (even one using words like "strain" or
+  "sleep") is never misclassified and wiped or overwritten.
+- The never-public term filter additionally bans the gym name, its
+  location, and internal coaching vocabulary ("Pana") on every public
+  write, ride and lift alike.
+- Owner-renamed lift cards are announced acknowledge-only (never as a
+  composition request the write path would refuse), and the leak strip
+  still applies to them before they go hands-off.
+
 ## 0.11.0 - 2026-08-31
 
 ### Added

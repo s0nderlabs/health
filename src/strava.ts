@@ -1,6 +1,7 @@
-// Strava client + token rotator + the naming rules for the ride watcher.
+// Strava client + token rotator + the naming rules for the activity watcher.
 //
-// The rename PUT is the ONLY write this plugin ever makes to any external
+// The activity PUT (rename, describe, or strip WHOOP's leaked strain line
+// from a lift card) is the ONLY write this plugin ever makes to any external
 // service. Everything else here is read or auth plumbing. Tokens follow the
 // WHOOP discipline (persist-before-use, single-flight, Keychain), though
 // Strava's rotation is gentler: refresh tokens are reusable until a refresh
@@ -232,8 +233,23 @@ export function isRideType(a: Pick<StravaActivity, 'sport_type'>): boolean {
   return a.sport_type === 'Ride' || a.sport_type === 'VirtualRide' || a.sport_type === 'GravelRide'
 }
 
-/** A WHOOP-pushed activity must never be renamed OR announced (the WHOOP
- *  side of the session already has its own card; a second ping is noise). */
+/** WHOOP pushes strength work to Strava as WeightTraining; that is the only
+ *  activity shape the lift path handles. */
+export function isLiftType(a: Pick<StravaActivity, 'sport_type'>): boolean {
+  return a.sport_type === 'WeightTraining'
+}
+
+/** Strava's auto-titles for WHOOP-pushed lifts, same shape as the ride set. */
+const GENERIC_LIFT_NAME = /^(Morning|Lunch|Afternoon|Evening|Night) Weight Training$/
+
+export function isGenericLiftName(name: string): boolean {
+  return GENERIC_LIFT_NAME.test(name.trim())
+}
+
+/** WHOOP-pushed activities are hands-off EXCEPT lift cards (WeightTraining),
+ *  which the lift path owns because WHOOP's auto-description leaks strain
+ *  publicly. Every other WHOOP-pushed shape is never renamed or announced
+ *  (the WHOOP side of the session already has its own card). */
 export function isWhoopSourced(a: Pick<StravaActivity, 'device_name' | 'external_id'>): boolean {
   const hay = `${a.device_name ?? ''} ${a.external_id ?? ''}`.toLowerCase()
   return hay.includes('whoop')
@@ -256,6 +272,13 @@ const BANNED_PUBLIC = [
   /\bstrain\b/i,
   /\breadiness\b/i,
   /\bsleep\b/i,
+  // A lift card has no GPS, so geography must never be added to it: the gym
+  // name pins his schedule to a place (rides show the map anyway; the ban
+  // costs them nothing).
+  /\bftl\b/i,
+  /pondok indah/i,
+  // Internal coaching vocabulary the lift contract promises never publishes.
+  /\bpana\b/i,
 ]
 
 /** Throws when text carries a never-public term. Guards BOTH public fields:
@@ -269,6 +292,19 @@ export function assertPublicText(text: string, field: string): void {
       )
     }
   }
+}
+
+/** WHOOP's auto-description is one sentence of the exact shape "14.7 Strain
+ *  amounts to strenuous exertion today." Only that whole-string shape is
+ *  treated as machine-written and replaceable. Deliberately NOT the banned
+ *  word list: the owner typing his own note directly in Strava is a third
+ *  writer, and prose like "felt a strain in the hamstring" must never be
+ *  classified as WHOOP's and wiped. */
+const WHOOP_AUTO_DESC = /^\s*\d+(?:\.\d+)?\s+strain amounts to[^\n]*$/i
+
+export function isWhoopAutoDescription(desc: string | null | undefined): boolean {
+  if (!desc) return false
+  return WHOOP_AUTO_DESC.test(desc.trim())
 }
 
 /** Validate + sign a public description. Throws on banned terms; appends the
@@ -287,6 +323,32 @@ export function prepareDescription(desc: string, watermark: string): string {
 export interface PlanRide {
   title?: string
   duration_min?: number
+}
+
+/** The locked day-type names for the lift fallback, keyed by the weekday of
+ *  the LOCAL start time (his program trains Mon/Tue/Thu/Fri; the labels are
+ *  the program's own: Day 1 volume 8s / Day 2 medium 6s / Day 3 intensity
+ *  4s+AMRAP / Day 4 deadlift specialization). Test days float onto these
+ *  weekdays, which is one more reason the session's composition outranks
+ *  this; a stray weekend lift has no honest deterministic name and gets
+ *  null. start_date_local carries local wall time behind a fake Z, so the
+ *  UTC accessors read the local weekday. */
+export function liftDayTitle(startDateLocal: string | undefined): string | null {
+  if (!startDateLocal) return null
+  const d = new Date(startDateLocal)
+  if (Number.isNaN(d.getTime())) return null
+  switch (d.getUTCDay()) {
+    case 1:
+      return 'Volume day'
+    case 2:
+      return 'Medium day'
+    case 4:
+      return 'Intensity day'
+    case 5:
+      return 'Deadlift day'
+    default:
+      return null
+  }
 }
 
 export function fmtRideDuration(seconds: number): string {

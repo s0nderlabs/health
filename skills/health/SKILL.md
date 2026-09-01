@@ -134,5 +134,9 @@ Strava leg: `status.strava` reports `configured` (tokens present),
 When a `ride.landed` event arrives, follow the composition contract in the
 plugin instructions (title + description via `health__strava`); the daemon
 self-applies a plain fallback title if no session answers within ~30 min.
+A `lift.landed` event (a WHOOP-pushed lift card) is the opposite timing:
+the daemon strips WHOOP's public strain line at discovery and the event
+reports the outcome; acknowledge, wait for the user's session debrief,
+THEN compose per the lift contract in the plugin instructions.
 Not configured = the leg is off, never an error: it needs
 `bun run setup:strava` once.

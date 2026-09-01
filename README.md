@@ -115,6 +115,14 @@ replaced, only an empty description is filled, and anything you rename by
 hand is left alone forever. Bring your own API app and run
 `bun run setup:strava` (consent + webhook subscription) to enable it.
 
+The same watcher also covers the lift cards WHOOP itself pushes to the
+platform. WHOOP's auto-description publishes your strain score on every
+one; the daemon strips that line seconds after upload, no session needed,
+and announces the card so Claude can title it and write a real training
+note after you debrief the session (the card alone carries no sets or
+loads, so composition deliberately waits for your report). A weekday
+fallback names anything no session gets to.
+
 ### Live heart rate (optional)
 
 Enable **Broadcast Heart Rate** in the WHOOP app, then build and install the
