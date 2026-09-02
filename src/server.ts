@@ -90,9 +90,9 @@ health__strava {activity_id, title, description}. THE FORMAT IS LOCKED
 - Title grammar (locked): "[Ez|Interval|Long] [spec] [route tag when it
   says something] [, qualifier when earned]". Type token first, always.
   Examples: "Ez 2h" / "Ez 2h binloop" / "Ez 2h, day one" / "Interval 4x8
-  dalkot" / "Interval 4x8 dalkot, 2 of 4" / "Long 60k dalkot" / "Long 100k
-  TBK". The route tag is the word the user would say aloud for where he
-  rode (dalkot, binloop, Mozia, TBK): include it for destination rides,
+  Sudirman" / "Interval 4x8 Sudirman, 2 of 4" / "Long 60k Sudirman" / "Long
+  100k TBK". The route tag is the word the user would say aloud for where he
+  rode (Sudirman, binloop, Mozia, TBK): include it for destination rides,
   named loops, or non-default venues; omit it for the ordinary neighborhood
   spin so the tagged titles keep meaning. Detect the route from the
   activity's segment efforts + plan.json, never guess. A truly
