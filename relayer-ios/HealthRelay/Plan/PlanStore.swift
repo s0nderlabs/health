@@ -132,7 +132,8 @@ final class PlanStore: ObservableObject {
     func refresh() {
         guard let url = Settings.shared.planURL else { return }
         loading = true
-        URLSession.shared.dataTask(with: url) { [weak self] data, response, err in
+        // Per fetch (never URLSession.shared): takes the current tunnel route.
+        Settings.shared.fetch(url) { [weak self] data, response, err in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.loading = false
@@ -156,6 +157,6 @@ final class PlanStore: ObservableObject {
                 self.error = nil
                 UserDefaults.standard.set(data, forKey: Self.cacheKey)
             }
-        }.resume()
+        }
     }
 }

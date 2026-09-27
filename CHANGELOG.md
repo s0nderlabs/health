@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.13.0 - 2026-09-27
+
+### Fixed
+
+- **The iPhone app reaches the daemon with iCloud Private Relay on.**
+  With Private Relay on, iOS resolved the daemon's `ts.net` name outside
+  Tailscale's MagicDNS, so the lookup failed or returned the name's public
+  Funnel address, and the socket, plan and route fetches never arrived.
+  Every daemon request now goes through a tiny in-app HTTP CONNECT tunnel
+  on the loopback interface that splices raw TCP to the Mac's tailnet IP.
+  URLSession still speaks TLS end to end to the `ts.net` name (same SNI,
+  same certificate check, default trust), so nothing resolves the name and
+  no resolver can misroute it. Nothing new is exposed: no daemon, serve or
+  Funnel change.
+
+### Added
+
+- The Mac's tailnet IP is learned automatically from Tailscale's own
+  resolver (100.100.100.100, queried directly), or with a Find button in
+  Settings, or typed by hand. A learned IP is stored only after a
+  `/healthz` probe through the tunnel passes TLS verification for the
+  `ts.net` name, so a spoofed or stale answer is never kept. Learning runs
+  at launch, on every foreground (at most once a minute), after two
+  straight socket failures and after Save, so a lookup that missed or a
+  re-added node heals without a cold launch. Only 100.64.0.0/10 addresses
+  are accepted. A typed or deliberately cleared value is never
+  overwritten, an auto IP is dropped when the host changes, and an empty
+  field falls back to the plain hostname path.
+- The socket ignores completion and close callbacks from a cancelled
+  earlier attempt, so a redial no longer tears down the attempt that
+  replaced it.
+- A mistyped host port (such as `:84431`) is rejected instead of crashing
+  the app.
+- `scripts/build-phone.sh install` picks the reachable physical device by
+  the id before its `(UDID)` label: real devices now report ECID-style ids
+  that the old UUID-shaped regex missed (it silently targeted a simulator),
+  and an offline device reading `unavailable` no longer passes the
+  `available` filter.
+- Relay log lines for the route each socket attempt takes, and the HTTP
+  status of a rejected stream upgrade (a 401 now reads as a bad token).
+
+### Changed
+
+- Daemon sessions raise URLSession's resource timeout from its 7-day
+  default, which would otherwise end a long-lived socket at exactly 7 days.
+
 ## 0.12.1 - 2026-09-01
 
 ### Fixed

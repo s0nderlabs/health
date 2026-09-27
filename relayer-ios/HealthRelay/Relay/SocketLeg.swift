@@ -95,7 +95,15 @@ final class SocketLeg: NSObject, URLSessionWebSocketDelegate {
         // One session per attempt, invalidated in dropCurrent: URLSession
         // retains its delegate, so never invalidating leaks a session (and a
         // retain on self) per reconnect.
-        let s = URLSession(configuration: .default, delegate: self, delegateQueue: .main)
+        let settings = Settings.shared
+        if let route = settings.tailnetRoute {
+            let source = settings.tailnetIPSource.isEmpty ? "unset" : settings.tailnetIPSource
+            rlog("socket dialing via tunnel \(route.ip) (\(source))")
+        } else {
+            rlog("socket dialing direct (no tailnet IP)")
+        }
+        let s = URLSession(configuration: settings.sessionConfiguration(),
+                           delegate: self, delegateQueue: .main)
         session = s
         let t = s.webSocketTask(with: url)
         task = t
@@ -126,11 +134,23 @@ final class SocketLeg: NSObject, URLSessionWebSocketDelegate {
 
     func urlSession(_ s: URLSession, webSocketTask: URLSessionWebSocketTask,
                     didCloseWith code: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        guard webSocketTask === task else { return } // stale attempt
         dropAndRetry("closed (\(code.rawValue))")
     }
 
     func urlSession(_ s: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        if let error = error { dropAndRetry("errored: \(error.localizedDescription)") }
+        // Stale attempt: start() cancels an attempt still in flight (the
+        // redial after the tailnet IP is learned does this at boot), and its
+        // -999 lands after connect() has set the new task. Without this gate
+        // it would tear the NEW attempt down.
+        guard let error = error, task === self.task else { return }
+        // A rejected upgrade still carries its response: 401 reads as a bad
+        // token instead of a generic network error.
+        if let code = (task.response as? HTTPURLResponse)?.statusCode {
+            dropAndRetry("errored: \(error.localizedDescription), HTTP \(code)")
+        } else {
+            dropAndRetry("errored: \(error.localizedDescription)")
+        }
     }
 
     private func receiveLoop(_ t: URLSessionWebSocketTask) {

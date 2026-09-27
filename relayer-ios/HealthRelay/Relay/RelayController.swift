@@ -58,6 +58,13 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
     private var pauseSafety: DispatchWorkItem?
     private var pauseTask: UIBackgroundTaskIdentifier = .invalid
     private var frames = 0
+    // Tailnet IP learning (learnTailnetIP): the newest lookup's generation,
+    // whether one is in flight, when the last one started, and consecutive
+    // socket failures since the last connect.
+    private var learnGen = 0
+    private var learnInFlight = false
+    private var lastLearnAt: Date?
+    private var socketFailures = 0
 
     init() {
         socket.delegate = self
@@ -110,6 +117,50 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
         socket.stop()
         ble.reset() // settings may now name a different band
         start()
+    }
+
+    /// The daemon route changed under a running app (tailnet IP learned at
+    /// boot): redial a down socket now instead of waiting out its backoff.
+    /// A live socket keeps running and takes the new route on its next
+    /// reconnect. Unlike restart(), the band is never touched.
+    func redialDaemon() {
+        guard Settings.shared.configured, !socketConnected else { return }
+        socket.start()
+    }
+
+    /// Fills Settings.tailnetIP from Tailscale's own resolver, verified by a
+    /// /healthz probe through the tunnel (Quad100.discover), then redials a
+    /// down socket. Runs at boot, on every foreground, after two straight
+    /// socket failures and after Save, so a lookup that missed (Tailscale
+    /// still connecting) or a stale IP (node re-added) heals without a cold
+    /// launch; this app rarely cold-launches. At most once a minute unless
+    /// `force`. A typed (or deliberately cleared) value is never touched; no
+    /// answer keeps whatever is stored.
+    func learnTailnetIP(force: Bool = false) {
+        let settings = Settings.shared
+        guard !Demo.active, settings.configured, settings.tailnetIPSource != "manual",
+              settings.hostName != nil else { return }
+        if !force {
+            if learnInFlight { return }
+            if let last = lastLearnAt, Date().timeIntervalSince(last) < 60 { return }
+        }
+        learnGen += 1
+        let gen = learnGen
+        learnInFlight = true
+        lastLearnAt = Date()
+        let host = settings.host
+        Quad100.discover(host: host, known: settings.tailnetIP) { [weak self] ip in
+            guard let self = self, gen == self.learnGen else { return } // superseded
+            self.learnInFlight = false
+            // Settings may have changed while it ran: a typed value or a new
+            // host wins over this answer.
+            guard let ip = ip, settings.tailnetIPSource != "manual", settings.host == host,
+                  ip != settings.tailnetIP else { return }
+            settings.tailnetIP = ip
+            settings.tailnetIPSource = "auto"
+            rlog("tailnet IP learned from Tailscale DNS")
+            self.redialDaemon() // its connect refreshes the plan too
+        }
     }
 
     /// Foreground nudge (scenePhase active): give a long-stale pending
@@ -233,6 +284,7 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
     func socketDidConnect() {
         guard !Demo.active else { return }
         socketConnected = true
+        socketFailures = 0
         sendBattery() // hello carries caps; this completes the dual-up gate
         // A plan_updated push only reaches CURRENTLY-connected relayers, so a
         // plan rewritten during a socket blip would be missed while the app
@@ -243,6 +295,10 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
     func socketDidDisconnect(reason: String) {
         guard !Demo.active else { return }
         socketConnected = false
+        // Two straight failures: maybe no IP yet or a stale one. One UDP
+        // packet, throttled; it never touches the band.
+        socketFailures += 1
+        if socketFailures >= 2 { learnTailnetIP() }
         // A disarmed leg MUST NOT capture-first: the socket dying is the
         // expected next event after a disarm (radio off -> iOS suspends us),
         // and resuming here would grab the band right out of Strava's hands.

@@ -197,6 +197,20 @@ sideload with a free Apple ID (7-day re-sign; one-time Xcode signing setup):
 scripts/build-phone.sh install   # phone paired + on the same Wi-Fi
 ```
 
+The app never depends on DNS to find the daemon. iCloud Private Relay (and
+any encrypted-DNS app) resolves names outside Tailscale's MagicDNS, and a
+`ts.net` name with Funnel enabled also has public records, so a plain lookup
+can land on the wrong address. Instead, every daemon request goes through a
+small HTTP CONNECT tunnel on the phone's loopback interface that splices
+raw TCP to the Mac's tailnet IP, while URLSession keeps speaking TLS end to
+end to the `ts.net` name (normal SNI and certificate checks). The app
+learns the tailnet IP by asking Tailscale's own resolver (100.100.100.100)
+directly and keeps it only after a `/healthz` check through the tunnel
+passes; it re-learns on foreground and after repeated socket failures.
+Settings has a Find button and accepts a typed IP (`tailscale ip -4` on
+the Mac). Clearing the field by hand switches back to the plain hostname
+path.
+
 ## Sessions and routing
 
 Sessions started with the health channel receive the event stream; every

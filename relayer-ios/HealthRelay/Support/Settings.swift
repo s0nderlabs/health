@@ -27,13 +27,54 @@ final class Settings: ObservableObject {
         didSet { UserDefaults.standard.set(deviceFilter, forKey: "device_filter") }
     }
 
+    /// The Mac's tailnet IPv4 (`tailscale ip -4`). Set: every daemon request
+    /// dials it through the in-app tunnel and `host` is never resolved, so
+    /// iCloud Private Relay or any other resolver cannot misroute it. Empty:
+    /// the plain hostname path (also the rollback lever).
+    @Published var tailnetIP: String {
+        didSet { UserDefaults.standard.set(tailnetIP, forKey: "daemon_ip") }
+    }
+
+    /// Where tailnetIP came from: "auto" (learned from Tailscale DNS, boot
+    /// may refresh it), "manual" (typed or deliberately cleared, never
+    /// overwritten), "" (never set).
+    @Published var tailnetIPSource: String {
+        didSet { UserDefaults.standard.set(tailnetIPSource, forKey: "daemon_ip_source") }
+    }
+
     private init() {
         host = UserDefaults.standard.string(forKey: "daemon_host") ?? ""
         token = Keychain.get("daemon_token") ?? ""
         deviceFilter = UserDefaults.standard.string(forKey: "device_filter") ?? "WHOOP"
+        tailnetIP = UserDefaults.standard.string(forKey: "daemon_ip") ?? ""
+        tailnetIPSource = UserDefaults.standard.string(forKey: "daemon_ip_source") ?? ""
     }
 
     var configured: Bool { !host.isEmpty && !token.isEmpty }
+
+    var tailnetRoute: TailnetTunnel.Route? { .tailnet(host: host, ip: tailnetIP) }
+
+    /// The bare, lower-cased name in `host` (the tunnel route's own parse),
+    /// for the quad-100 lookup.
+    var hostName: String? { Self.hostName(host) }
+
+    static func hostName(_ host: String) -> String? { TailnetTunnel.Route.name(of: host) }
+
+    /// Build every daemon session (socket, plan, route) from this. The URLs
+    /// below stay hostname-based by design: with a route the name only feeds
+    /// SNI, the cert check and the CONNECT line, never a resolver.
+    func sessionConfiguration() -> URLSessionConfiguration {
+        let cfg = TailnetTunnel.shared.configuration(route: tailnetRoute)
+        // URLSession's default is 7 days, which killed the mac relay's
+        // WebSocket at exactly 604800 s. The socket is meant to live forever.
+        cfg.timeoutIntervalForResource = 60 * 60 * 24 * 365
+        return cfg
+    }
+
+    /// One daemon GET (plan, route) on the current route.
+    func fetch(_ url: URL, completion: @escaping (Data?, URLResponse?, Error?) -> Void) {
+        TailnetTunnel.fetch(url, configuration: sessionConfiguration(), completion: completion)
+    }
 
     var streamURL: URL? {
         guard configured,

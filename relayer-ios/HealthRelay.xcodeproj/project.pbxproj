@@ -22,12 +22,14 @@
 		775DC092F6664C2AB6082214 /* HealthRelayWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = C29AC53190A143ED4368A8D4 /* HealthRelayWidgets.swift */; };
 		8410EBDE5E0D970CFD9500BD /* Signing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4225180A8C9439EE70560C8C /* Signing.swift */; };
 		858B13EBBA1D2EB0A5F0DB60 /* RelayController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 860056F69532516604902542 /* RelayController.swift */; };
+		8740C3DDC84972E605E74773 /* Quad100.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB37A401CD942EC5294C469F /* Quad100.swift */; };
 		884152E5D1F5FCC35695A1CC /* PulseActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7857D126E229CA112B2237A3 /* PulseActivity.swift */; };
 		8F119B456B2E6C5A6E5BEF56 /* HealthRelayApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD5742C77ED5B0FE27A6C9A4 /* HealthRelayApp.swift */; };
 		922ADEDC379D9A3D28B03DFE /* BleLeg.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33A0B5A8C357C1E29CC3B4DD /* BleLeg.swift */; };
 		A239F28AA97AD2844BF82AFA /* Settings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48C4EF4AB3A7E881A50E208A /* Settings.swift */; };
 		ABC8D64C5466F7F9F993AF41 /* LiveActivityController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54A8187D9DBB0F6A24ECF7FE /* LiveActivityController.swift */; };
 		AE5A906D6DC070E3693F3897 /* RestChime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D4B7FD975836D714362DE5D /* RestChime.swift */; };
+		B6FE2305C8D8850525F16367 /* TailnetTunnel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0B118E569EC868CBBAF77A4 /* TailnetTunnel.swift */; };
 		BB140371ECD3394B5878D0A9 /* StepsCourier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30521B200C323A43A1C00934 /* StepsCourier.swift */; };
 		C1FDDA7C59C5AB9579A1DB2C /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F51C6B23C65BB01F03022C0C /* SettingsView.swift */; };
 		D2B5E64BDA2FFD33874065A6 /* SessionProgress.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6B8F07C72771C974D660880 /* SessionProgress.swift */; };
@@ -84,8 +86,10 @@
 		9D39E0C8BB06E879B66D6E20 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		A4916F51A132071C8CA442D1 /* HealthRelay.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = HealthRelay.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AD5742C77ED5B0FE27A6C9A4 /* HealthRelayApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthRelayApp.swift; sourceTree = "<group>"; };
+		B0B118E569EC868CBBAF77A4 /* TailnetTunnel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TailnetTunnel.swift; sourceTree = "<group>"; };
 		C29AC53190A143ED4368A8D4 /* HealthRelayWidgets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthRelayWidgets.swift; sourceTree = "<group>"; };
 		C442FDD2C035EFE5F8D0538B /* RouteStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteStore.swift; sourceTree = "<group>"; };
+		DB37A401CD942EC5294C469F /* Quad100.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Quad100.swift; sourceTree = "<group>"; };
 		DF2D996A0FBD15E16A4F283A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		F51C6B23C65BB01F03022C0C /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		F6B8F07C72771C974D660880 /* SessionProgress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionProgress.swift; sourceTree = "<group>"; };
@@ -143,8 +147,10 @@
 			children = (
 				33A0B5A8C357C1E29CC3B4DD /* BleLeg.swift */,
 				71E9733BB5C2DA0304E3FBCC /* HrLocal.swift */,
+				DB37A401CD942EC5294C469F /* Quad100.swift */,
 				860056F69532516604902542 /* RelayController.swift */,
 				0A24BCDD8CFA18FB513E0089 /* SocketLeg.swift */,
+				B0B118E569EC868CBBAF77A4 /* TailnetTunnel.swift */,
 			);
 			path = Relay;
 			sourceTree = "<group>";
@@ -326,6 +332,7 @@
 				457A2BCAC5D39842C51B55BE /* PlanStore.swift in Sources */,
 				558AB8EBDEA37E89C8BFF0DF /* PlanView.swift in Sources */,
 				5E1FFF8CA6502D77E6C0DFAF /* PulseActivity.swift in Sources */,
+				8740C3DDC84972E605E74773 /* Quad100.swift in Sources */,
 				858B13EBBA1D2EB0A5F0DB60 /* RelayController.swift in Sources */,
 				AE5A906D6DC070E3693F3897 /* RestChime.swift in Sources */,
 				EC0C3C59A93EFC151965DDA6 /* RideCard.swift in Sources */,
@@ -336,6 +343,7 @@
 				8410EBDE5E0D970CFD9500BD /* Signing.swift in Sources */,
 				602238A2BDC3C2A896BC6363 /* SocketLeg.swift in Sources */,
 				BB140371ECD3394B5878D0A9 /* StepsCourier.swift in Sources */,
+				B6FE2305C8D8850525F16367 /* TailnetTunnel.swift in Sources */,
 				6AEB5D19F301263AD0119C21 /* Theme.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -358,7 +366,7 @@
 				CODE_SIGN_ENTITLEMENTS = HealthRelay/HealthRelay.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				DEVELOPMENT_TEAM = 4F2SRW2599;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				INFOPLIST_FILE = HealthRelay/Info.plist;
@@ -367,7 +375,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.10.0;
+				MARKETING_VERSION = 0.13.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.s0nderlabs.HealthRelay;
 				PRODUCT_NAME = HealthRelay;
 				SDKROOT = iphoneos;
@@ -380,7 +388,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				DEVELOPMENT_TEAM = 4F2SRW2599;
 				INFOPLIST_FILE = HealthRelayWidgets/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -388,7 +396,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.10.0;
+				MARKETING_VERSION = 0.13.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.s0nderlabs.HealthRelay.widgets;
 				PRODUCT_NAME = HealthRelayWidgets;
 				SDKROOT = iphoneos;
@@ -405,7 +413,7 @@
 				CODE_SIGN_ENTITLEMENTS = HealthRelay/HealthRelay.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				DEVELOPMENT_TEAM = 4F2SRW2599;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				INFOPLIST_FILE = HealthRelay/Info.plist;
@@ -414,7 +422,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.10.0;
+				MARKETING_VERSION = 0.13.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.s0nderlabs.HealthRelay;
 				PRODUCT_NAME = HealthRelay;
 				SDKROOT = iphoneos;
@@ -427,7 +435,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				DEVELOPMENT_TEAM = 4F2SRW2599;
 				INFOPLIST_FILE = HealthRelayWidgets/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -435,7 +443,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.10.0;
+				MARKETING_VERSION = 0.13.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.s0nderlabs.HealthRelay.widgets;
 				PRODUCT_NAME = HealthRelayWidgets;
 				SDKROOT = iphoneos;

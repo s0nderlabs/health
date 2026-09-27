@@ -23,6 +23,9 @@ struct HealthRelayApp: App {
                         plan.refresh()
                         steps.syncNow()
                         relay.kick() // trade a long-stale pending connect for a scan
+                        // Heals a missed boot lookup or a stale tailnet IP
+                        // without a cold launch (throttled, one UDP packet).
+                        relay.learnTailnetIP()
                         // Foreground is the only moment iOS lets us arm the
                         // lock-screen pulse card; every open re-arms it.
                         LiveActivityController.shared.ensurePulse()
@@ -49,6 +52,7 @@ struct HealthRelayApp: App {
         steps.attach(relay)
         steps.startIfAuthorized()
         plan.refresh()
+        relay.learnTailnetIP(force: true)
     }
 }
 

@@ -64,12 +64,13 @@ final class RouteStore: ObservableObject {
             statuses[file] = .idle
             return
         }
-        URLSession.shared.dataTask(with: url) { [weak self] data, response, _ in
+        // Same per-fetch session as PlanStore: takes the tunnel route.
+        Settings.shared.fetch(url) { [weak self] data, response, _ in
             let ok = (response as? HTTPURLResponse)?.statusCode == 200
             DispatchQueue.main.async {
                 self?.finish(file: file, data: ok ? data : nil, name: label)
             }
-        }.resume()
+        }
     }
 
     private func finish(file: String, data: Data?, name: String?) {
