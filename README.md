@@ -62,6 +62,12 @@ WHOOP band ──(BLE Broadcast HR)──> health-relay ──(WS, raw frames)�
   (14 complete days + 8 weigh-ins); protein has a target from day one.
   Photos are converted to plain JPEGs with GPS and all other metadata
   stripped; your originals are never touched.
+- **Money notifications** (optional): an iOS Shortcuts automation forwards
+  bank and wallet notifications (SeaBank, Plasma One, GoPay, ShopeePay,
+  Pintu, any app) to the daemon the moment they land. Amount, currency,
+  merchant and balance are parsed, the raw text is kept, and a `money.notif`
+  event lets your session run its budget flow. One-time codes are dropped
+  before anything is stored. Setup: [guides/money-notifications.md](guides/money-notifications.md).
 - **`/health`**: today's read on demand. `/health trend` for the long view.
 - **A permanent local archive** of your WHOOP data in one SQLite file.
 

@@ -27,6 +27,8 @@ import {
   type Meal,
 } from './meals.js'
 import { ingestPhoto, PHOTO_MAX_PER_MEAL } from './photos.js'
+import { BadRequest, cleanText, jsonBody } from './http.js'
+export { BadRequest } from './http.js'
 import type { HealthConfig } from './types.js'
 
 export const MAX_PHOTOS_PER_MEAL = PHOTO_MAX_PER_MEAL
@@ -504,10 +506,10 @@ export class FoodService {
     const path = url.pathname
     try {
       if (req.method === 'POST' && path === '/meal') {
-        return Response.json(await this.logFromApp(await jsonBody(req)))
+        return Response.json(await this.logFromApp(await jsonBody(req, MAX_JSON_BYTES)))
       }
       if (req.method === 'POST' && path === '/meal/fix') {
-        return Response.json(this.fixFromApp(await jsonBody(req)))
+        return Response.json(this.fixFromApp(await jsonBody(req, MAX_JSON_BYTES)))
       }
       if (req.method === 'GET' && path === '/meals') {
         return Response.json(this.day(url.searchParams.get('date'), { forPhone: true }))
@@ -609,13 +611,7 @@ export class FoodService {
 
 // ── helpers ───────────────────────────────────────────────────────
 
-export class BadRequest extends Error {}
-
-function cleanNote(v: unknown): string | null {
-  if (typeof v !== 'string') return null
-  const s = v.replace(/\s+/g, ' ').trim().slice(0, 300)
-  return s || null
-}
+const cleanNote = (v: unknown) => cleanText(v, 300)
 
 function labelOf(v: unknown, items: Array<{ name: string }>): string {
   if (typeof v === 'string' && v.trim()) return v.trim().slice(0, 80)
@@ -624,18 +620,6 @@ function labelOf(v: unknown, items: Array<{ name: string }>): string {
 
 const MAX_JSON_BYTES = 6 * 12 * 1024 * 1024 // six base64 photos at the phone's cap, plus slack
 
-async function jsonBody(req: Request): Promise<Record<string, unknown>> {
-  const len = Number(req.headers.get('content-length') ?? 0)
-  if (len > MAX_JSON_BYTES) throw new BadRequest('body too large')
-  let body: unknown
-  try {
-    body = await req.json()
-  } catch {
-    throw new BadRequest('body must be JSON')
-  }
-  if (typeof body !== 'object' || body == null || Array.isArray(body)) throw new BadRequest('body must be a JSON object')
-  return body as Record<string, unknown>
-}
 
 function decodePhotos(body: Record<string, unknown>): Uint8Array[] {
   const raw = Array.isArray(body.photos) ? body.photos : body.photo != null ? [body.photo] : []

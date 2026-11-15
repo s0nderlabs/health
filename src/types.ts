@@ -191,14 +191,17 @@ export type EventClass =
   | 'lift.landed' // a WHOOP lift card reached Strava: strain line stripped, compose after his debrief
   | 'meal.logged' // the user logged a meal on the phone: estimate it, write back via health__meal
   | 'meal.amended' // the user sent a correction line for a logged meal from the phone
+  | 'money.notif' // a bank / wallet notification was forwarded from the phone: run the budget flow
 
 export type EventPriority = 'info' | 'notable' | 'alert'
 
 /** Event classes delivered even inside quiet hours (besides priority=alert).
  *  live.*: the user is awake and active RIGHT NOW; holding them would flush a
  *  stale burst at the boundary. meal.*: the user is holding the phone waiting
- *  for an estimate (a 23:30 dinner must be answered tonight, not at 06:00). */
-export const QUIET_PIERCING_PREFIXES = ['live.', 'meal.'] as const
+ *  for an estimate (a 23:30 dinner must be answered tonight, not at 06:00).
+ *  money.*: the user just paid for something; the budget read belongs to
+ *  that moment (and an unexpected charge at 03:00 is exactly what to see). */
+export const QUIET_PIERCING_PREFIXES = ['live.', 'meal.', 'money.'] as const
 
 export function piercesQuietHours(e: { class: string; priority: string; dedupe_key: string }): boolean {
   if (e.priority === 'alert') return true
@@ -305,6 +308,7 @@ export const DEFAULT_CONFIG: HealthConfig = {
     'lift.landed': true,
     'meal.logged': true,
     'meal.amended': true,
+    'money.notif': true,
   },
   thresholds: {
     strain_notable: 15,
@@ -338,6 +342,8 @@ export const DEFAULT_CONFIG: HealthConfig = {
     // meal.* are user-initiated, one per log/fix; never throttled.
     'meal.logged': 0,
     'meal.amended': 0,
+    // One per forwarded transaction, deduped upstream; never throttled.
+    'money.notif': 0,
   },
   poll_interval_minutes: 5,
   webhook: {

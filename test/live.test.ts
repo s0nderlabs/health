@@ -1203,3 +1203,31 @@ describe('food log over the listener', () => {
     mac.ws.close()
   })
 })
+
+describe('money notifications over the listener', () => {
+  const cleanup: Array<() => void> = []
+  afterEach(() => {
+    while (cleanup.length) cleanup.pop()!()
+  })
+
+  test('POST /money-notif requires the token and reaches the handler', async () => {
+    let hits = 0
+    const { listener, port } = makeArbListener({
+      moneyHttp: async () => {
+        hits++
+        return Response.json({ status: 'stored' })
+      },
+    })
+    cleanup.push(() => listener.stop())
+    const body = JSON.stringify({ app: 'SeaBank', body: 'x' })
+    expect((await fetch(`http://127.0.0.1:${port}/money-notif`, { method: 'POST', body })).status).toBe(401)
+    expect(hits).toBe(0)
+    const ok = await fetch(`http://127.0.0.1:${port}/money-notif`, {
+      method: 'POST',
+      body,
+      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+    })
+    expect(ok.status).toBe(200)
+    expect(hits).toBe(1)
+  })
+})

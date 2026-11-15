@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.15.0 - 2026-11-16
+
+### Added
+
+- **Money notifications.** `POST /money-notif` (same tailnet token as the
+  live feed) takes a bank or wallet notification forwarded from the phone,
+  by an iOS Shortcuts "notification received" automation or the HealthRelay
+  app. The daemon parses amount, currency, merchant or counterparty, the
+  balance after, and the transaction time when the text carries one, keeps
+  the raw text, and raises `money.notif` so the session can run its budget
+  flow. Kinds: payment, incoming, transfer out, trade (an exchange order,
+  not spending), unknown.
+- Parsers for SeaBank (QRIS, Bayar Instan, transfers in and out) and Plasma
+  One (paid with USD equivalent, received, balance after); every other app
+  goes through a generic rule that is flagged in the event so the session
+  trusts the raw text over the parsed fields.
+- Privacy gate before storage: notifications in OTP / verification
+  language are dropped with nothing kept (only a per-app count, no text).
+  A real transaction that merely mentions a code (a PLN token, a reference)
+  is kept with those digits redacted. Balance warnings and promos with no
+  transaction are ignored.
+- Idempotent: the app sends a client id; a Shortcuts post dedupes on app +
+  title + body + the minute it was posted.
+- `health__money` lists recent notifications, each app's last report (gaps
+  show up: Shortcuts cannot retry), and the withheld-code counts.
+- `guides/money-notifications.md`: per-app iOS 27 Shortcuts setup, the
+  direct-POST path with the bearer token, the Private Relay caveat, and the
+  gap behaviour.
+
+### Changed
+
+- `money.notif` is notable, never dropped by cooldown or the daily budget,
+  not counted against it, and delivered inside quiet hours.
+- The phone-facing routes share one request-body parser and text cleaner.
+
 ## 0.14.1 - 2026-11-16
 
 ### Fixed

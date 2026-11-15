@@ -10,6 +10,7 @@ import { AuthBrokenError } from './auth.js'
 import { signedHoursLeft, signingNag } from './signing.js'
 import { ensureRuntimeDir, loadConfig, saveConfig, configFileWritable, inQuietHours, resolvePlanPath, PID_PATH, SOCKET_PATH, RUNTIME_DIR, ROUTES_DIR, MEALS_DIR } from './config.js'
 import { FoodService } from './food.js'
+import { MoneyService } from './money.js'
 import { piercesQuietHours } from './types.js'
 import { Store } from './store.js'
 import { Engine } from './engine.js'
@@ -210,8 +211,16 @@ const food = new FoodService({
   log: (msg) => log(`food: ${msg}`),
 })
 
+// Money notifications (bank / wallet alerts forwarded by the phone).
+const money = new MoneyService({
+  db: store.db,
+  emit: (key, payload) => engine.actionEvent('money.notif', key, payload),
+  log: (msg) => log(`money: ${msg}`),
+})
+
 const liveListener = new LiveListener(liveState, () => config().live.token, {
   foodHttp: (req, url) => food.handleHttp(req, url),
+  moneyHttp: (req, url) => money.handleHttp(req, url),
   onBodyMass: (samples, deleted) => food.ingestBodySamples(samples, deleted),
   // Phone-side surfaces: intent taps ride the same event path as the MCP tool,
   // steps land in the archive, plan reads come from the /gym-authored file,
@@ -503,6 +512,8 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
     }
     case 'meal':
       return mealRpc(params)
+    case 'money':
+      return money.recent(params.days ?? 7)
     case 'poll_now': {
       const changes = await pollOnce(store, onFact)
       return { changes }

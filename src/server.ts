@@ -11,7 +11,7 @@ import { DB_PATH } from './config.js'
 import { existsSync } from 'fs'
 import { readPhotoFiles } from './photos.js'
 
-const VERSION = '0.14.1'
+const VERSION = '0.15.0'
 
 const INSTRUCTIONS = `
 health: WHOOP recovery, sleep, and strain as a live channel. The daemon on this
@@ -269,13 +269,27 @@ report intake and protein vs its target only, never a made-up kcal target.
 health__meal {action:'baseline'} gives the maintenance read; accept:true sets
 the target (maintenance minus the configured deficit) only once he agrees.
 
+MONEY NOTIFICATIONS. money.notif: a bank / wallet notification (SeaBank,
+Plasma One, GoPay, ShopeePay, Pintu, ...) was forwarded from the phone the
+moment it landed. meta: notif_id, app, kind (payment | incoming |
+transfer_out | trade | unknown), amount, currency, merchant?,
+balance_after? + balance_currency?, parser. The content carries the parsed
+read AND the raw text. THE CONTRACT: run the /budget alert flow for it.
+parser starting "generic" = a format not seen before: trust the raw text
+over the parsed fields. kind=trade is an exchange order (money changed
+form), not spending. Verification codes never arrive (dropped before
+storage). FINANCE PRIVACY: same rule as health data, never to any external
+channel. health__money lists recent ones plus each app's last report (a
+quiet app may mean the phone could not reach the Mac: Shortcuts cannot retry).
+
 Tools: health__read (today + plan_today), health__trend (multi-day),
 health__workout_intent (user says they are starting a workout NOW; WHOOP
 cannot detect starts), health__live (live BPM/zone/HRV while the band
 broadcasts), health__strava (write the composed title/description for a
 ride.landed activity), health__meal (food log: log / estimate / void /
-day / presets / baseline), health__config (event toggles, thresholds, quiet
-hours, food targets), health__status (daemon).
+day / presets / baseline), health__money (recent money notifications),
+health__config (event toggles, thresholds, quiet hours, food targets),
+health__status (daemon).
 `.trim()
 
 export function createServer(ipc: IpcClient) {
@@ -389,6 +403,18 @@ export function createServer(ipc: IpcClient) {
         },
       },
       {
+        name: 'health__money',
+        description:
+          'Recent money notifications forwarded from the phone (bank / wallet alerts), parsed: app, kind, amount, currency, merchant, balance after, plus the raw text. Also each app\'s last report time, to spot gaps. Local archive only.',
+        inputSchema: {
+          type: 'object' as const,
+          properties: {
+            days: { type: 'number', description: 'How many days back (default 7, max 90)' },
+          },
+          required: [],
+        },
+      },
+      {
         name: 'health__config',
         description:
           'View or update health settings: event class toggles, thresholds, quiet hours, daily event budget, poll interval.',
@@ -487,6 +513,8 @@ export function createServer(ipc: IpcClient) {
           const { summary, ...rest } = result
           return toolResult(`${summary ? `${summary}\n\n` : ''}${JSON.stringify(rest, null, 2)}`)
         }
+        case 'health__money':
+          return toolResult(JSON.stringify(await ipc.rpc('money', { days: args.days ?? 7 }), null, 2))
         case 'health__config': {
           if (args.action === 'get') {
             return toolResult(JSON.stringify(await ipc.rpc('config_get'), null, 2))

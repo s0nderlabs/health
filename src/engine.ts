@@ -278,6 +278,8 @@ export class Engine {
       // lists it); two days on, the per-meal ask is stale.
       'meal.logged': 48,
       'meal.amended': 48,
+      // A budget alert a day late is history, not an alert.
+      'money.notif': 24,
     })
   }
 
@@ -323,7 +325,7 @@ export class Engine {
    *  loop-closer or a meal estimate. Quiet-hours piercing is declared per
    *  class in QUIET_PIERCING (types.ts). */
   actionEvent(
-    cls: 'ride.landed' | 'lift.landed' | 'meal.logged' | 'meal.amended',
+    cls: 'ride.landed' | 'lift.landed' | 'meal.logged' | 'meal.amended' | 'money.notif',
     dedupeKey: string,
     payload: { content: string; meta: Record<string, string> },
   ): boolean {
