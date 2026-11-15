@@ -192,3 +192,17 @@ describe('ipc server/client', () => {
     expect(received[0].id).toBe(9)
   })
 })
+
+describe('LineBuffer', () => {
+  test('reassembles a large frame split across many chunks, plus a trailing partial', async () => {
+    const { LineBuffer } = await import('../src/ipc.js')
+    const lb = new LineBuffer()
+    const big = JSON.stringify({ t: 'rpc', id: 7, method: 'meal', params: { photo_data: ['A'.repeat(3_000_000)] } })
+    const wire = big + '\n' + JSON.stringify({ t: 'ack', id: 1 }) + '\n{"t":"ack",'
+    const out: unknown[] = []
+    for (let i = 0; i < wire.length; i += 65536) out.push(...lb.push(wire.slice(i, i + 65536)))
+    expect(out).toHaveLength(2)
+    expect((out[0] as { params: { photo_data: string[] } }).params.photo_data[0].length).toBe(3_000_000)
+    expect(lb.push('"id":2}\n')).toEqual([{ t: 'ack', id: 2 }])
+  })
+})

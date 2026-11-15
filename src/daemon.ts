@@ -657,6 +657,12 @@ async function mealRpc(p: Record<string, unknown>): Promise<unknown> {
   const action = String(p.action ?? 'day')
   switch (action) {
     case 'log': {
+      // Paths would make THIS launchd process open files in the user's
+      // folders, which TCC parks behind an invisible consent prompt (the
+      // request hangs). The MCP server reads them in-session and sends bytes.
+      if (p.photos != null) {
+        throw new Error('send photos as photo_data (base64 bytes); the daemon does not open files in your folders (macOS privacy control blocks it). health__meal does this conversion for you.')
+      }
       const meal = await food.logFromChat(p)
       return { summary: food.summary(meal), meal: food.mealView(meal) }
     }

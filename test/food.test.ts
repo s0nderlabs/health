@@ -15,7 +15,7 @@ import {
   type BaselineDay,
 } from '../src/meals.js'
 import { DEFAULT_CONFIG } from '../src/types.js'
-import { hasPersonalMetadata } from '../src/photos.js'
+import { hasPersonalMetadata, readPhotoFiles } from '../src/photos.js'
 import { makeJpeg } from './fixtures/images.js'
 
 let dir: string
@@ -284,7 +284,8 @@ describe('food service: chat front door', () => {
     const jpeg = await makeJpeg(dir, 300, 150, 6)
     writeFileSync(src, jpeg)
     const before = readFileSync(src)
-    const m = await food.logFromChat({ photos: [src, src], items: soto, at: '12:00' })
+    // Exactly the MCP server's path: read in-session, ship bytes.
+    const m = await food.logFromChat({ photo_data: await readPhotoFiles([src, src]), items: soto, at: '12:00' })
     expect(m.photos).toHaveLength(2)
     expect(m.photos[1].path).toEndWith(`${m.id}-1.jpg`)
     for (const p of m.photos) expect(hasPersonalMetadata(new Uint8Array(readFileSync(p.path)))).toBe(false)
@@ -296,8 +297,12 @@ describe('food service: chat front door', () => {
 
   test('chat log validates paths and times', async () => {
     const { food } = harness()
-    await expect(food.logFromChat({ photos: ['relative.heic'] })).rejects.toThrow(/absolute/)
-    await expect(food.logFromChat({ photos: ['/nope/IMG_1.HEIC'] })).rejects.toThrow(/not found/)
+    await expect(readPhotoFiles(['relative.heic'])).rejects.toThrow(/absolute/)
+    await expect(readPhotoFiles(['/nope/IMG_1.HEIC'])).rejects.toThrow(/not found/)
+    await expect(readPhotoFiles(Array(7).fill('/nope/x.heic'))).rejects.toThrow(/at most 6/)
+    await expect(readPhotoFiles([dir])).rejects.toThrow(/not a file/)
+    // Raw paths never reach the daemon side (TCC would hang its open()).
+    await expect(food.logFromChat({ photos: ['/tmp/x.heic'], items: soto })).rejects.toThrow(/photo_data/)
     await expect(food.logFromChat({})).rejects.toThrow()
     await expect(food.logFromChat({ note: 'x', at: '2020-01-01T00:00:00Z' })).rejects.toThrow(/14 days/)
   })
@@ -403,5 +408,19 @@ describe('quiet hours policy', () => {
     expect(piercesQuietHours(e('system.health', 'notable', 'system.health:yield-expired:x'))).toBe(true)
     expect(piercesQuietHours(e('recovery.brief', 'info'))).toBe(false)
     expect(piercesQuietHours(e('ride.landed'))).toBe(false)
+  })
+})
+
+describe('chat photos as bytes (launchd TCC safety)', () => {
+  test('photo_data base64 is ingested like a path', async () => {
+    const { food } = harness()
+    const jpeg = await makeJpeg(dir, 300, 150, 6)
+    const m = await food.logFromChat({ photo_data: [Buffer.from(jpeg).toString('base64')], items: soto })
+    expect(m.photos).toHaveLength(1)
+    expect(hasPersonalMetadata(new Uint8Array(readFileSync(m.photos[0].path)))).toBe(false)
+  })
+  test('bad photo_data is rejected', async () => {
+    const { food } = harness()
+    await expect(food.logFromChat({ photo_data: ['nope'], items: soto })).rejects.toThrow(/base64/)
   })
 })

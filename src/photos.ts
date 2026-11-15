@@ -20,6 +20,10 @@ import { dirname } from 'path'
 export const PHOTO_MAX_EDGE = 1568
 export const THUMB_MAX_EDGE = 360
 export const PHOTO_MAX_INPUT_BYTES = 40 * 1024 * 1024
+export const PHOTO_MAX_PER_MEAL = 6
+/** Whole-meal budget for chat photos crossing IPC, matching the phone door's
+ *  body cap (six phone-sized photos, base64, plus slack). */
+export const PHOTO_MAX_TOTAL_BYTES = 54 * 1024 * 1024
 const JPEG_QUALITY = '70'
 const SIPS = '/usr/bin/sips'
 
@@ -143,6 +147,35 @@ export function sniffImage(head: Uint8Array): 'jpeg' | 'png' | 'heic' | null {
     if (/^(heic|heix|hevc|hevx|heim|heis|mif1|msf1|avif)$/.test(brand)) return 'heic'
   }
   return null
+}
+
+// ── reading photo files (the user's own session, never the daemon) ──
+
+/**
+ * Read chat photo paths into base64, every check BEFORE any byte is read:
+ * count, absolute path, regular file, per-file and whole-meal size. Runs in
+ * the MCP server, inside the user's session, because the launchd daemon
+ * opening ~/Downloads hangs on an unseen macOS privacy prompt.
+ */
+export async function readPhotoFiles(paths: unknown): Promise<string[]> {
+  const list = Array.isArray(paths) ? paths : [paths]
+  if (list.length > PHOTO_MAX_PER_MEAL) throw new Error(`at most ${PHOTO_MAX_PER_MEAL} photos per meal`)
+  let total = 0
+  const checked = list.map((x) => {
+    if (typeof x !== 'string' || !x.startsWith('/')) throw new Error('photos must be absolute file paths')
+    let st
+    try {
+      st = statSync(x)
+    } catch {
+      throw new Error(`photo not found: ${x}`)
+    }
+    if (!st.isFile()) throw new Error(`not a file: ${x}`)
+    if (st.size > PHOTO_MAX_INPUT_BYTES) throw new Error(`photo too large: ${x}`)
+    total += st.size
+    return x
+  })
+  if (total > PHOTO_MAX_TOTAL_BYTES) throw new Error(`photos too large together (${Math.round(total / 1048576)} MB, max ${PHOTO_MAX_TOTAL_BYTES / 1048576} MB)`)
+  return Promise.all(checked.map(async (x) => Buffer.from(await Bun.file(x).arrayBuffer()).toString('base64')))
 }
 
 // ── sips (I/O) ────────────────────────────────────────────────────

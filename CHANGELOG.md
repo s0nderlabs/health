@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.14.1 - 2026-11-16
+
+### Fixed
+
+- **Logging a meal with photos from chat no longer hangs.** The daemon runs
+  under launchd, and when it opened a photo in `~/Downloads` macOS privacy
+  control (TCC) parked the open behind a consent prompt nobody could see, so
+  the request never returned. `health__meal` now reads the photos inside
+  your own session (which already has your terminal's file access) and
+  sends the bytes; the daemon never opens files in your folders and refuses
+  raw paths with a clear error.
+- Photo count, per-file size and a whole-meal size budget are checked
+  before a single byte is read, so an oversized batch fails fast instead of
+  being read, encoded and shipped only to be rejected.
+- The daemon's IPC line reader is now linear in frame size. It used to
+  rescan the whole growing buffer on every chunk, which turned a multi-photo
+  frame of tens of MB into seconds of blocked event loop (live heart rate
+  and event delivery stalled with it).
+
+Upgrading: update the plugin and reload the health MCP server in each
+session; the old server still sends paths, which the daemon now refuses
+(text-only logs, estimates, voids and reads are unaffected either way).
+
 ## 0.14.0 - 2026-11-16
 
 ### Added

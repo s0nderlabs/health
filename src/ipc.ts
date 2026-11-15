@@ -58,16 +58,22 @@ function flushWrites(socket: Socket<unknown>): void {
   pendingWrites.delete(socket)
 }
 
-/** Accumulates stream chunks, yields complete newline-terminated JSON messages. */
-class LineBuffer {
-  private buf = ''
+/** Accumulates stream chunks, yields complete newline-terminated JSON messages.
+ *  Linear in the frame size: only the NEW chunk is scanned for a newline and
+ *  partial pieces are joined once, when their frame completes. (The old
+ *  append-then-rescan was quadratic, and a chat meal with several photos is a
+ *  frame of tens of MB arriving in ~64 KB chunks on the daemon's one thread.) */
+export class LineBuffer {
+  private parts: string[] = []
   push(chunk: Buffer | string): IpcMsg[] {
-    this.buf += chunk.toString()
+    let text = chunk.toString()
     const out: IpcMsg[] = []
     let idx: number
-    while ((idx = this.buf.indexOf('\n')) >= 0) {
-      const line = this.buf.slice(0, idx).trim()
-      this.buf = this.buf.slice(idx + 1)
+    while ((idx = text.indexOf('\n')) >= 0) {
+      this.parts.push(text.slice(0, idx))
+      const line = this.parts.join('').trim()
+      this.parts = []
+      text = text.slice(idx + 1)
       if (!line) continue
       try {
         out.push(JSON.parse(line) as IpcMsg)
@@ -75,6 +81,7 @@ class LineBuffer {
         // Skip malformed frames rather than killing the connection.
       }
     }
+    if (text) this.parts.push(text)
     return out
   }
 }

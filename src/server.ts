@@ -9,8 +9,9 @@ import type { IpcClient } from './ipc.js'
 import { Store } from './store.js'
 import { DB_PATH } from './config.js'
 import { existsSync } from 'fs'
+import { readPhotoFiles } from './photos.js'
 
-const VERSION = '0.14.0'
+const VERSION = '0.14.1'
 
 const INSTRUCTIONS = `
 health: WHOOP recovery, sleep, and strain as a live channel. The daemon on this
@@ -473,8 +474,16 @@ export function createServer(ipc: IpcClient) {
           return toolResult(JSON.stringify(result, null, 2))
         }
         case 'health__meal': {
+          // Photo paths are read HERE, inside the user's session (which holds
+          // the terminal's file permissions), and travel as bytes: the launchd
+          // daemon opening ~/Downloads would hang on an unseen privacy prompt.
+          const rpcArgs: Record<string, unknown> = { ...args }
+          if (args.photos != null) {
+            rpcArgs.photo_data = await readPhotoFiles(args.photos)
+            delete rpcArgs.photos
+          }
           // 120s: a log with several HEIC photos runs sips per photo.
-          const result = (await ipc.rpc('meal', args, 120_000)) as Record<string, unknown>
+          const result = (await ipc.rpc('meal', rpcArgs, 120_000)) as Record<string, unknown>
           const { summary, ...rest } = result
           return toolResult(`${summary ? `${summary}\n\n` : ''}${JSON.stringify(rest, null, 2)}`)
         }

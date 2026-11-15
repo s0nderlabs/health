@@ -10,7 +10,7 @@
 // session that made them already knows.
 
 import { join } from 'path'
-import { existsSync, readFileSync, rmSync } from 'fs'
+import { readFileSync, rmSync } from 'fs'
 import type { Database } from 'bun:sqlite'
 import {
   MealBook,
@@ -26,10 +26,10 @@ import {
   type Baseline,
   type Meal,
 } from './meals.js'
-import { ingestPhoto } from './photos.js'
+import { ingestPhoto, PHOTO_MAX_PER_MEAL } from './photos.js'
 import type { HealthConfig } from './types.js'
 
-export const MAX_PHOTOS_PER_MEAL = 6
+export const MAX_PHOTOS_PER_MEAL = PHOTO_MAX_PER_MEAL
 const MAX_BODY_SAMPLES = 5000
 
 type FoodConfig = HealthConfig['food']
@@ -213,16 +213,20 @@ export class FoodService {
 
   // ── front door 2: chat (health__meal) ───────────────────────────
 
+  /**
+   * Chat's log. Photos arrive ONLY as `photo_data` (base64 bytes, read by
+   * readPhotoFiles in the MCP server, inside the user's own session). The
+   * launchd daemon must never be the process that opens files in the user's
+   * folders: macOS privacy control (TCC) parks that open() behind a consent
+   * prompt nobody sees, and the request hangs forever (found live on the
+   * first real backfill, Nov 16).
+   */
   async logFromChat(p: Record<string, unknown>): Promise<Meal> {
     const note = cleanNote(p.note)
-    const paths = Array.isArray(p.photos) ? p.photos : p.photos == null ? [] : [p.photos]
-    if (paths.length > MAX_PHOTOS_PER_MEAL) throw new Error(`at most ${MAX_PHOTOS_PER_MEAL} photos per meal`)
-    for (const x of paths) {
-      if (typeof x !== 'string' || !x.startsWith('/')) throw new Error('photos must be absolute file paths')
-      if (!existsSync(x)) throw new Error(`photo not found: ${x}`)
-    }
+    if (p.photos != null) throw new Error('photos must arrive as photo_data bytes (health__meal converts paths in your session)')
+    const photoSrcs = p.photo_data == null ? [] : decodePhotos({ photos: p.photo_data })
     const items = p.items == null ? null : normalizeItems(p.items, (s) => this.book.getPreset(s))
-    if (!items && !note && paths.length === 0) throw new Error('log needs items, a note, or photos')
+    if (!items && !note && photoSrcs.length === 0) throw new Error('log needs items, a note, or photos')
     const nowIso = new Date(this.now()).toISOString()
     const eaten = this.parseAt(p.at) ?? { iso: nowIso, date: this.today() }
     const id = this.book.insertMeal({
@@ -234,7 +238,7 @@ export class FoodService {
       note,
     })
     try {
-      await this.attachPhotos({ id, date: eaten.date }, paths as string[])
+      await this.attachPhotos({ id, date: eaten.date }, photoSrcs)
       if (items) {
         this.book.setItems(id, {
           label: labelOf(p.label, items),
