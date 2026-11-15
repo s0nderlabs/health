@@ -14,6 +14,8 @@
 //     {type:'battery', level:0..1, charging:bool}       (phone power state changed)
 //     {type:'steps', samples:[{uuid,start,end,count}]}  -> {type:'steps_ack', received, added}
 //     {type:'intent', activity}                         -> {type:'intent_ack', activity, surfaced}
+//     {type:'body_mass', samples:[{uuid,ts,kind:'mass'|'fat',value,source?}], deleted?:[uuid]}
+//                                                       -> {type:'body_mass_ack', received, added, deleted}
 //   daemon -> relayer (arbitration; the band normally serves ONE receiver, but
 //   accepts a second central when two connects land inside its post-drop
 //   advertising window; the daemon exploits that deliberately, see dual-up):
@@ -36,6 +38,10 @@
 //                                 rearm (socket down at reclaim) self-heals on
 //                                 its next reconnect.
 //     {type:'plan_updated'}       the workout plan file changed; refetch GET /plan
+//     {type:'meals_updated', date} the food log changed (an estimate landed, a
+//                                 chat log, a void); refetch GET /meals?date=
+//   HTTP (same token): POST /meal, POST /meal/fix, GET /meals, GET /meal-photo
+//   are the food log's routes, served by FoodService (src/food.ts).
 //
 // DUAL-UP (deterministic-through-retries dual connection): at home, at rest,
 // phone on wifi + power-eligible, the daemon periodically forces the band
@@ -82,6 +88,10 @@ export interface StepsSample {
 export interface LiveListenerOpts {
   /** Phone-side workout intent; returns whether the event surfaced. */
   onIntent?: (activity: string) => boolean
+  /** Food log HTTP routes (POST /meal, GET /meals, ...). Null = not a food route. */
+  foodHttp?: (req: Request, url: URL) => Promise<Response | null>
+  /** HealthKit weigh-ins (body mass / body fat). Null = malformed batch. */
+  onBodyMass?: (samples: unknown, deleted: unknown) => { received: number; added: number; deleted: number } | null
   /** Validated HealthKit steps: new/updated samples + UUIDs deleted upstream. */
   onSteps?: (samples: StepsSample[], deletedUuids: string[]) => { added: number; deleted: number }
   /** Path of the workout-plan JSON served at GET /plan (empty = disabled). */
@@ -290,6 +300,16 @@ export class LiveListener {
           if (!self.authorized(req, url)) return new Response('unauthorized', { status: 401 })
           return self.serveRoute(url.searchParams.get('file') ?? '')
         }
+        if (self.opts.foodHttp && url.pathname.startsWith('/meal')) {
+          if (!self.authorized(req, url)) return new Response('unauthorized', { status: 401 })
+          return self.opts
+            .foodHttp(req, url)
+            .then((res) => res ?? new Response('not found', { status: 404 }))
+            .catch((err) => {
+              log(`food route failed: ${err}`)
+              return new Response('internal error', { status: 500 })
+            })
+        }
         if (url.pathname !== '/stream') return new Response('not found', { status: 404 })
         if (!self.authorized(req, url)) {
           log('rejected stream connection (bad token)')
@@ -418,6 +438,16 @@ export class LiveListener {
     const b = ws.data.battery
     if (!b) return false
     return b.charging || b.level >= 0.4
+  }
+
+  /** Push to every connected relayer (relayers ignore types they do not know). */
+  broadcast(obj: Record<string, unknown>): number {
+    let n = 0
+    for (const ws of this.relayers) {
+      this.push(ws, obj)
+      n++
+    }
+    return n
   }
 
   private push(ws: RelayerWs, obj: Record<string, unknown>): void {
@@ -930,6 +960,25 @@ export class LiveListener {
           log(`steps: ${clean.length} samples (${added} new) + ${deleted.length} deletions (${removed} removed) from ${ws.data.source}`)
         break
       }
+      case 'body_mass': {
+        let res: { received: number; added: number; deleted: number } | null = null
+        try {
+          res = this.opts.onBodyMass?.(msg.samples, msg.deleted) ?? null
+        } catch (err) {
+          log(`body mass persist failed: ${err}`)
+          return // no ack: the phone keeps its anchor and re-sends
+        }
+        if (res == null) {
+          this.countParseError(`bad body_mass payload from ${ws.data.source}`)
+          return
+        }
+        if (ws.data.source !== 'mac' && ws.data.source !== 'unknown') this.phoneSeen()
+        // Ack-gated like steps: the phone advances its HealthKit anchor on this.
+        this.push(ws, { type: 'body_mass_ack', ...res })
+        if (res.added > 0 || res.deleted > 0)
+          log(`body mass: ${res.received} samples (${res.added} new, ${res.deleted} removed) from ${ws.data.source}`)
+        break
+      }
       case 'yield_request': {
         // The phone's one-tap toggle: same yield as the RPC, requested over
         // the relayer socket (the user is standing there with Strava open).
@@ -1080,11 +1129,7 @@ export class LiveListener {
           const mtime = this.planMtime(path)
           if (mtime === lastMtime) return
           lastMtime = mtime
-          let pushed = 0
-          for (const ws of this.relayers) {
-            this.push(ws, { type: 'plan_updated' })
-            pushed++
-          }
+          const pushed = this.broadcast({ type: 'plan_updated' })
           if (pushed > 0) log(`plan changed, notified ${pushed} relayer(s)`)
         }, this.timing.planDebounceMs)
       })

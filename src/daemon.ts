@@ -8,7 +8,9 @@ import { join } from 'path'
 import { randomBytes } from 'node:crypto'
 import { AuthBrokenError } from './auth.js'
 import { signedHoursLeft, signingNag } from './signing.js'
-import { ensureRuntimeDir, loadConfig, saveConfig, configFileWritable, inQuietHours, resolvePlanPath, PID_PATH, SOCKET_PATH, RUNTIME_DIR, ROUTES_DIR } from './config.js'
+import { ensureRuntimeDir, loadConfig, saveConfig, configFileWritable, inQuietHours, resolvePlanPath, PID_PATH, SOCKET_PATH, RUNTIME_DIR, ROUTES_DIR, MEALS_DIR } from './config.js'
+import { FoodService } from './food.js'
+import { piercesQuietHours } from './types.js'
 import { Store } from './store.js'
 import { Engine } from './engine.js'
 import { IpcServer } from './ipc.js'
@@ -188,7 +190,29 @@ function declareIntent(activity: string): boolean {
   return engine.workoutIntent(activity, intentEnrichment(activity))
 }
 
+// The food log. broadcast reaches the listener lazily: it is constructed below.
+const food = new FoodService({
+  db: store.db,
+  photosDir: MEALS_DIR,
+  getConfig: () => config().food,
+  getMeta: (k) => store.getMeta(k),
+  setMeta: (k, v) => store.setMeta(k, v),
+  emit: (cls, key, payload) => engine.actionEvent(cls, key, payload),
+  broadcast: (msg) => {
+    liveListener.broadcast(msg)
+  },
+  whoopKcalSince: (sinceIso) =>
+    (
+      store.db
+        .query('SELECT start, kilojoule FROM cycles WHERE start >= ? AND end IS NOT NULL AND kilojoule IS NOT NULL')
+        .all(sinceIso) as Array<{ start: string; kilojoule: number }>
+    ).map((c) => ({ start: c.start, kcal: c.kilojoule / 4.184 })),
+  log: (msg) => log(`food: ${msg}`),
+})
+
 const liveListener = new LiveListener(liveState, () => config().live.token, {
+  foodHttp: (req, url) => food.handleHttp(req, url),
+  onBodyMass: (samples, deleted) => food.ingestBodySamples(samples, deleted),
   // Phone-side surfaces: intent taps ride the same event path as the MCP tool,
   // steps land in the archive, plan reads come from the /gym-authored file,
   // and phone liveness persists for the cert-expiry watchdog.
@@ -271,7 +295,7 @@ function planRideFor(rideStartIso: string): PlanRide | null {
 const stravaWatch = new StravaWatch({
   api: stravaApi,
   store,
-  emit: (cls, key, payload) => engine.stravaEvent(cls, key, payload),
+  emit: (cls, key, payload) => engine.actionEvent(cls, key, payload),
   getPlanRide: planRideFor,
   getWatermark: () => config().strava.watermark,
   log,
@@ -396,12 +420,7 @@ function deliverPending(): void {
   const cfg = config()
   const quiet = inQuietHours(cfg) && !wakeReleaseActive(cfg, store.getMeta('wake_detected_at'))
   for (const e of store.undeliveredEvents()) {
-    // live.* events prove the user is awake and active RIGHT NOW; holding
-    // them would deliver a stale burst at the quiet-hours boundary instead.
-    // Yield advisories are time-critical (a re-armed relayer can take the
-    // band mid-recording); they ride through quiet hours like live.* does.
-    const yieldAdvisory = e.dedupe_key.startsWith('system.health:yield-')
-    if (quiet && e.priority !== 'alert' && !e.class.startsWith('live.') && !yieldAdvisory) continue // holds until quiet hours end
+    if (quiet && !piercesQuietHours(e)) continue // holds until quiet hours end (policy: types.ts)
     const pushedTo = ipc.pushEvent(e, inFlight.exclusions(e.id))
     inFlight.pushed(e.id, pushedTo) // delivered_at is stamped on ack
   }
@@ -448,6 +467,15 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
         workouts_today: store.recentWorkouts(1),
         body: store.db.query('SELECT * FROM body WHERE id = 1').get(),
         steps_today: store.stepsToday(),
+        // Food log today: intake vs targets + baseline progress (meals via health__meal day).
+        food_today: (() => {
+          try {
+            const d = food.day()
+            return { date: d.date, totals: d.totals, targets: d.targets, baseline: d.baseline, weight: d.weight }
+          } catch (err) {
+            return { error: String(err) }
+          }
+        })(),
         // Today's programmed session from the /gym-authored plan file, so the
         // in-chat coach is never schedule-blind (it used to coach "if you
         // lift today" on programmed rest days). Training data only; is_today
@@ -473,6 +501,8 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
       const surfaced = declareIntent(activity)
       return { activity, surfaced }
     }
+    case 'meal':
+      return mealRpc(params)
     case 'poll_now': {
       const changes = await pollOnce(store, onFact)
       return { changes }
@@ -577,6 +607,7 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
         // Deep-merge or a partial patch (e.g. {live:{max_hr:190}}) would wipe
         // the generated live.token and lock every relayer out.
         live: { ...current.live, ...patch.live },
+        food: { ...current.food, ...patch.food },
         // Same for quiet_hours: a partial patch ({quiet_hours:{start:'22:30'}})
         // must not drop end or the wake_release flag. null still disables.
         quiet_hours:
@@ -586,6 +617,11 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
               ? null
               : { ...current.quiet_hours, ...patch.quiet_hours },
       }
+      const f = merged.food
+      if (!(f.protein_target_g >= 0 && f.protein_target_g <= 400)) throw new Error('food.protein_target_g must be 0-400')
+      if (!(Number.isInteger(f.rollover_hour) && f.rollover_hour >= 0 && f.rollover_hour <= 12))
+        throw new Error('food.rollover_hour must be an integer 0-12')
+      if (!(f.deficit_kcal >= 0 && f.deficit_kcal <= 1500)) throw new Error('food.deficit_kcal must be 0-1500')
       if (merged.quiet_hours && (!merged.quiet_hours.start || !merged.quiet_hours.end)) {
         throw new Error('quiet_hours needs both start and end (or null to disable)')
       }
@@ -613,6 +649,44 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
     }
     default:
       throw new Error(`unknown rpc method: ${method}`)
+  }
+}
+
+// health__meal: chat's front door to the food log (same rules as the phone).
+async function mealRpc(p: Record<string, unknown>): Promise<unknown> {
+  const action = String(p.action ?? 'day')
+  switch (action) {
+    case 'log': {
+      const meal = await food.logFromChat(p)
+      return { summary: food.summary(meal), meal: food.mealView(meal) }
+    }
+    case 'estimate': {
+      const meal = food.estimate(p)
+      return { summary: food.summary(meal), meal: food.mealView(meal) }
+    }
+    case 'void': {
+      const meal = food.void(p)
+      return { summary: food.summary(meal) }
+    }
+    case 'day': {
+      const day = food.day(p.date)
+      return { summary: food.summaryOf(null, day), ...day }
+    }
+    case 'day_complete':
+      return food.setDayComplete(p)
+    case 'preset_save':
+      return { preset: food.presetSave(p) }
+    case 'preset_list':
+      return { presets: food.book.listPresets() }
+    case 'preset_delete': {
+      const slug = String(p.slug ?? '')
+      return { deleted: food.book.deletePreset(slug), slug }
+    }
+    case 'baseline':
+      if (p.accept === true || p.target_kcal != null) return food.acceptTarget(p)
+      return { ...food.baseline(), current_target_kcal: food.targetKcal() }
+    default:
+      throw new Error(`unknown health__meal action: ${action}`)
   }
 }
 

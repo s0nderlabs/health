@@ -1,12 +1,23 @@
 import { describe, expect, test } from 'bun:test'
+import { Database } from 'bun:sqlite'
 import { Store } from '../src/store.js'
 
 // Deterministic local-day anchors: relative-to-now offsets would cross the
-// local midnight boundary depending on when the suite runs.
+// local midnight boundary depending on when the suite runs. Anchored on
+// SQLite's own 'localtime' (what stepsToday() compares against), NOT on JS
+// local time: bun test runs JS in UTC while SQLite keeps the system zone, so
+// a JS-local midnight was a different day for 7 hours a night in WIB.
+const SQLITE_LOCAL_MIDNIGHT_MS = (() => {
+  const db = new Database(':memory:')
+  const r = db
+    .query("SELECT CAST(strftime('%s', date('now', 'localtime')) AS INTEGER) AS d, CAST(strftime('%s', datetime('now', 'localtime')) AS INTEGER) - CAST(strftime('%s', 'now') AS INTEGER) AS off")
+    .get() as { d: number; off: number }
+  db.close()
+  return (r.d - r.off) * 1000 // local midnight, as a real instant
+})()
+
 function localToday(hours: number): string {
-  const d = new Date()
-  d.setHours(0, 0, 0, 0)
-  return new Date(d.getTime() + hours * 3_600_000).toISOString()
+  return new Date(SQLITE_LOCAL_MIDNIGHT_MS + hours * 3_600_000).toISOString()
 }
 
 function sample(uuid: string, startIso: string, count: number, minutes = 60) {

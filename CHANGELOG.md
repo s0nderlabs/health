@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.14.0 - 2026-11-16
+
+### Added
+
+- **Food log: a calorie and protein tracker, baseline first.** Meals come
+  in from two equal front doors. The phone posts a photo and/or a one-line
+  note (`POST /meal`, idempotent on a client id so a retried upload is the
+  same meal), and the daemon raises `meal.logged` so the session estimates
+  it. Chat logs directly with the new `health__meal` tool, typed items
+  and/or photo paths. Both count in the same totals and show on the phone.
+- `health__meal` actions: `log`, `estimate` (a FULL replace of a meal's
+  items with a revision guard, so two sessions cannot silently overwrite
+  each other; every revision is kept), `void`, `day`, `day_complete`,
+  `preset_save` / `preset_list` / `preset_delete` (repeat meals expand
+  from a saved preset instead of being re-estimated), and `baseline`. The
+  daemon computes every total from the items; callers never send totals.
+- Corrections from the phone: `POST /meal/fix` raises `meal.amended` with
+  the current estimate attached.
+- The food day rolls over at 04:00 local (a 00:30 dinner counts toward the
+  previous day). A meal logged late carries an `at` time (ISO or HH:MM) and
+  lands on the day it was eaten.
+- Photo pipeline: HEIC, JPEG or PNG in, one clean JPEG out. sips converts
+  and caps the long edge at 1568 px. The EXIF orientation is baked into
+  the pixels, then every metadata segment except JFIF, ICC and Adobe is
+  dropped (sips alone carries the GPS block through a HEIC conversion).
+  A thumbnail is cut for the phone. Originals are only ever read.
+- Weigh-ins: a `body_mass` relayer message (body mass and body fat % from
+  HealthKit), ack-gated like steps and deduped by sample UUID.
+- Baseline math: maintenance = mean intake on complete days minus the
+  weight trend x 7,700 kcal/kg, with the trend fitted by least squares
+  over daily mean weigh-ins. No kcal target exists until 14 complete days
+  and 8 weigh-ins spanning 14+ days; protein has a configurable target from
+  day one (`food.protein_target_g`). WHOOP energy is shown as a cross-check
+  only. `baseline {accept: true}` sets the target once the user agrees.
+- `GET /meals` and `GET /meal-photo` for the phone, plus a `meals_updated`
+  push whenever the log changes. `health__read` gains `food_today`.
+
+### Changed
+
+- `meal.*` events are notable, never dropped by cooldown or the daily
+  budget, and never counted against it. Like `live.*`, they are delivered
+  inside quiet hours (a meal logged at 23:30 gets estimated that night).
+  Which classes pierce quiet hours is now a declared policy
+  (`piercesQuietHours`) instead of a chain of special cases.
+- The Strava and food events share one notable "act on this" entry point.
+
+### Fixed
+
+- The steps store tests no longer fail between 00:00 and 07:00 WIB: they
+  anchored "today" on JS local time, which bun test runs in UTC, while
+  SQLite's `localtime` stays in the system zone.
+
 ## 0.13.0 - 2026-09-27
 
 ### Fixed

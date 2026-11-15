@@ -4,6 +4,7 @@
 
 import { Database } from 'bun:sqlite'
 import { DB_PATH, ensureRuntimeDir } from './config.js'
+import { MealBook } from './meals.js'
 import type {
   EventClass,
   HealthEvent,
@@ -126,6 +127,7 @@ export class Store {
     if (!readonly_) {
       this.db.run('PRAGMA journal_mode = WAL')
       this.db.run(SCHEMA)
+      MealBook.ensureSchema(this.db)
       this.migrate()
     }
   }
@@ -694,7 +696,7 @@ export class Store {
    */
   /**
    * How many budget-SUBJECT events were created today. Budget-exempt classes
-   * (alerts, user-initiated intents, live.*) are excluded from the count too:
+   * (alerts, user-initiated intents, live.*, meal.*) are excluded from the count too:
    * a training day full of live events must not starve the recovery brief.
    */
   createdToday(): number {
@@ -704,7 +706,8 @@ export class Store {
       this.db
         .query(
           `SELECT COUNT(*) AS n FROM events WHERE created_at >= ? AND expired_at IS NULL
-           AND priority != 'alert' AND class != 'workout.intent' AND class NOT LIKE 'live.%'`,
+           AND priority != 'alert' AND class != 'workout.intent' AND class NOT LIKE 'live.%'
+           AND class NOT LIKE 'meal.%'`,
         )
         .get(dayStart.toISOString()) as { n: number }
     ).n

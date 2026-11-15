@@ -52,6 +52,16 @@ WHOOP band ──(BLE Broadcast HR)──> health-relay ──(WS, raw frames)�
   restarts, and a relayer that misses its disarm is re-pushed and surfaced
   loudly. Live coaching is dark while yielded, by contract; WHOOP's own
   recording and scoring are unaffected.
+- **Food log** (calorie + protein tracker, baseline first): snap a meal or
+  type it ("americano") on the phone, or log it in chat with text or photo
+  paths. Your Claude session estimates each meal per item (grams, kcal with
+  a range, protein) and the number lands back on the phone and in chat.
+  Corrections are a full re-estimate with the history kept; repeat meals
+  become presets. Weigh-ins flow in from Apple Health. There is no calorie
+  target until your own logs and weigh-in trend have measured maintenance
+  (14 complete days + 8 weigh-ins); protein has a target from day one.
+  Photos are converted to plain JPEGs with GPS and all other metadata
+  stripped; your originals are never touched.
 - **`/health`**: today's read on demand. `/health trend` for the long view.
 - **A permanent local archive** of your WHOOP data in one SQLite file.
 
@@ -230,7 +240,9 @@ was around to see (a three-day-old bedtime nudge helps no one).
 
 Talk to it (`/health config`) or edit `~/.config/health/config.json`:
 event class toggles, thresholds, quiet hours, daily event budget, poll
-interval, webhook port/path, live-ingest port/max-HR/session threshold.
+interval, webhook port/path, live-ingest port/max-HR/session threshold, and
+the food log (`food.protein_target_g`, `food.rollover_hour` for when the
+food day ends, `food.deficit_kcal` subtracted from measured maintenance).
 
 ## Data + security posture
 
@@ -241,6 +253,9 @@ interval, webhook port/path, live-ingest port/max-HR/session threshold.
   beside it, regenerated from the archive as a durable memory anchor.
 - Webhook receiver binds 127.0.0.1 only; public exposure is your tunnel's job,
   and every request is HMAC-verified.
+- Meal photos live beside the archive (`meals/`), re-encoded with every
+  metadata segment except color data removed. The phone talks to the daemon
+  only over your tailnet, with the same token as the live feed.
 - The plugin's read scope is exactly WHOOP's six read scopes. It can write
   nothing to your WHOOP account.
 

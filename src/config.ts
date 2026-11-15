@@ -21,9 +21,13 @@ export const LOG_PATH = join(RUNTIME_DIR, 'daemon.log')
  *  Drop a file here and name it in plan.json's ride.route.file. */
 export const ROUTES_DIR = join(RUNTIME_DIR, 'routes')
 
+/** Meal photos, normalised to stripped JPEGs: meals/YYYY-MM-DD/<id>-<n>.jpg. */
+export const MEALS_DIR = join(RUNTIME_DIR, 'meals')
+
 export function ensureRuntimeDir(): void {
   mkdirSync(RUNTIME_DIR, { recursive: true })
   mkdirSync(ROUTES_DIR, { recursive: true })
+  mkdirSync(MEALS_DIR, { recursive: true })
 }
 
 export function loadConfig(): HealthConfig {
@@ -42,6 +46,7 @@ export function loadConfig(): HealthConfig {
       strava: { ...DEFAULT_CONFIG.strava, ...parsed.strava },
       live: { ...DEFAULT_CONFIG.live, ...parsed.live },
       plan_path: parsed.plan_path ?? DEFAULT_CONFIG.plan_path,
+      food: { ...DEFAULT_CONFIG.food, ...parsed.food },
     }
   } catch {
     return structuredClone(DEFAULT_CONFIG)

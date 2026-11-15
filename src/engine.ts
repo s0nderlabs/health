@@ -274,6 +274,10 @@ export class Engine {
       // the composition request is stale even if the loop-closing news is not.
       'ride.landed': 12,
       'lift.landed': 12,
+      // An unestimated meal stays pending in the log either way (the day view
+      // lists it); two days on, the per-meal ask is stale.
+      'meal.logged': 48,
+      'meal.amended': 48,
     })
   }
 
@@ -311,13 +315,15 @@ export class Engine {
     )
   }
 
-  /** Entry point for the Strava watcher (rides AND lift cards). notable: it
-   *  is the signal the gym protocol acts on (the "wait for Strava" step ends
-   *  here). Deduped by activity id, one per activity ever; bypassCooldown
-   *  also exempts it from the daily budget, correctly: ~4 rides + ~4 lifts a
-   *  week must never lose their loop-closer to a chatty day. */
-  stravaEvent(
-    cls: 'ride.landed' | 'lift.landed',
+  /** Entry point for notable events that ask the session to DO something:
+   *  the Strava watcher (rides AND lift cards: the gym protocol's "wait for
+   *  Strava" step ends here, deduped by activity id) and the food log
+   *  (estimate a meal, apply a correction). bypassCooldown also exempts them
+   *  from the daily budget, correctly: a chatty day must never cost a
+   *  loop-closer or a meal estimate. Quiet-hours piercing is declared per
+   *  class in QUIET_PIERCING (types.ts). */
+  actionEvent(
+    cls: 'ride.landed' | 'lift.landed' | 'meal.logged' | 'meal.amended',
     dedupeKey: string,
     payload: { content: string; meta: Record<string, string> },
   ): boolean {

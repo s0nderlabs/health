@@ -1144,3 +1144,62 @@ describe('yield parsing and session close', () => {
     mac.ws.close()
   })
 })
+
+describe('food log over the listener', () => {
+  const cleanup: Array<() => void> = []
+  afterEach(() => {
+    while (cleanup.length) cleanup.pop()!()
+  })
+
+  test('food routes require the token and reach the handler', async () => {
+    const seen: string[] = []
+    const { listener, port } = makeArbListener({
+      foodHttp: async (req, url) => {
+        seen.push(`${req.method} ${url.pathname}`)
+        return url.pathname === '/meals' ? Response.json({ ok: true }) : null
+      },
+    })
+    cleanup.push(() => listener.stop())
+    expect((await fetch(`http://127.0.0.1:${port}/meals`)).status).toBe(401)
+    expect((await fetch(`http://127.0.0.1:${port}/meals?token=wrong`)).status).toBe(401)
+    expect(seen).toHaveLength(0)
+    const ok = await fetch(`http://127.0.0.1:${port}/meals`, { headers: { authorization: `Bearer ${TOKEN}` } })
+    expect(ok.status).toBe(200)
+    expect(await ok.json()).toEqual({ ok: true })
+    // A food-prefixed path the handler does not own falls through to 404.
+    expect((await fetch(`http://127.0.0.1:${port}/meal-nope?token=${TOKEN}`)).status).toBe(404)
+    expect(seen).toEqual(['GET /meals', 'GET /meal-nope'])
+  })
+
+  test('body_mass is acked (anchor gate) and malformed batches are not', async () => {
+    const got: unknown[] = []
+    const { listener, port } = makeArbListener({
+      onBodyMass: (samples) => {
+        if (!Array.isArray(samples)) return null
+        got.push(...samples)
+        return { received: samples.length, added: samples.length, deleted: 0 }
+      },
+    })
+    cleanup.push(() => listener.stop())
+    const phone = await relayer(port, 'phone')
+    phone.ws.send(JSON.stringify({ type: 'body_mass', samples: 'junk' }))
+    phone.ws.send(JSON.stringify({ type: 'body_mass', samples: [{ uuid: 'hk-0001-aaaa', kind: 'mass', value: 83.2, ts: new Date().toISOString() }] }))
+    await waitFor(() => has(phone.msgs, 'body_mass_ack'))
+    const acks = parsed(phone.msgs).filter((m) => m.type === 'body_mass_ack') as Array<{ received: number; added: number }>
+    expect(acks).toHaveLength(1)
+    expect(acks[0]).toMatchObject({ received: 1, added: 1 })
+    expect(got).toHaveLength(1)
+    phone.ws.close()
+  })
+
+  test('broadcast reaches every connected relayer', async () => {
+    const { listener, port } = makeArbListener()
+    cleanup.push(() => listener.stop())
+    const phone = await relayer(port, 'phone')
+    const mac = await relayer(port, 'mac')
+    expect(listener.broadcast({ type: 'meals_updated', date: '2026-11-16' })).toBe(2)
+    await waitFor(() => has(phone.msgs, 'meals_updated') && has(mac.msgs, 'meals_updated'))
+    phone.ws.close()
+    mac.ws.close()
+  })
+})

@@ -10,7 +10,7 @@ import { Store } from './store.js'
 import { DB_PATH } from './config.js'
 import { existsSync } from 'fs'
 
-const VERSION = '0.13.0'
+const VERSION = '0.14.0'
 
 const INSTRUCTIONS = `
 health: WHOOP recovery, sleep, and strain as a live channel. The daemon on this
@@ -242,12 +242,39 @@ for the band to free). status.live.yield shows the window; yield.breach_source
 non-null means a relayer missed its disarm and is still holding the band: the
 user must open or force-quit the phone app (or restart the mac relay).
 
+FOOD LOG (calorie + protein tracker; baseline first, then a budget).
+meal.logged: the user logged a meal on the phone. meta: meal_id, kind
+(photo|text), photo (abs path; photos = comma list when several), date.
+THE CONTRACT: Read the photo(s), estimate per item (grams, kcal with a
+kcal_lo/kcal_hi range, protein_g; carbs_g/fat_g optional), write it back with
+health__meal {action:'estimate', meal_id, expected_revision, label, items,
+confidence}, THEN answer in chat with the per-item read and the day line the
+tool returns. Do it promptly: he is holding the phone waiting for the number.
+Use saved presets ({preset:'<slug>', servings}) for repeat meals instead of
+re-estimating them; when a meal recurs, offer to save it (preset_save).
+meal.amended: a correction line typed on the phone for an existing meal.
+Re-estimate with the FULL corrected item list (estimate is a full replace,
+never a patch), or void it if it should not count; confirm in chat.
+CHAT IS AN EQUAL FRONT DOOR: when he types food in chat ("americano", "soto
+betawi + 1 centong") or drops photo paths (iPhone HEICs in ~/Downloads are
+normal), log it with health__meal {action:'log', items, photos:[abs paths],
+at?} (at = when eaten, ISO or HH:MM, so a late log lands on the right day;
+the day rolls over at 04:00). Photos are copied (originals never touched) and
+show on the phone with the same totals. Corrections he gives in chat for any
+meal, app or chat, use estimate on that meal_id; removals use void.
+Never send totals: the daemon sums items. The kcal budget does not exist
+until the baseline is ready (14 complete days + 8 weigh-ins): before that,
+report intake and protein vs its target only, never a made-up kcal target.
+health__meal {action:'baseline'} gives the maintenance read; accept:true sets
+the target (maintenance minus the configured deficit) only once he agrees.
+
 Tools: health__read (today + plan_today), health__trend (multi-day),
 health__workout_intent (user says they are starting a workout NOW; WHOOP
 cannot detect starts), health__live (live BPM/zone/HRV while the band
 broadcasts), health__strava (write the composed title/description for a
-ride.landed activity), health__config (event toggles, thresholds, quiet
-hours), health__status (daemon).
+ride.landed activity), health__meal (food log: log / estimate / void /
+day / presets / baseline), health__config (event toggles, thresholds, quiet
+hours, food targets), health__status (daemon).
 `.trim()
 
 export function createServer(ipc: IpcClient) {
@@ -316,6 +343,51 @@ export function createServer(ipc: IpcClient) {
         },
       },
       {
+        name: 'health__meal',
+        description:
+          'Food log (calorie + protein tracker), equal to the phone app. action: log (new meal from chat: items and/or photos), estimate (FULL REPLACE of an existing meal\'s items; corrections re-send the whole list), void, day (one day: meals, totals, targets), day_complete (mark a day fully logged or not; baseline uses complete days), preset_save / preset_list / preset_delete (repeat meals), baseline (maintenance from logged intake + weigh-in trend; accept:true sets the kcal target). The daemon computes all totals from items.',
+        inputSchema: {
+          type: 'object' as const,
+          properties: {
+            action: {
+              type: 'string',
+              enum: ['log', 'estimate', 'void', 'day', 'day_complete', 'preset_save', 'preset_list', 'preset_delete', 'baseline'],
+            },
+            meal_id: { type: 'number', description: 'estimate / void: the meal (from meal.logged meta or a day read)' },
+            expected_revision: {
+              type: 'number',
+              description: 'estimate: the revision you read (meal.logged carries it). A mismatch means another session wrote first; re-read instead of overwriting.',
+            },
+            label: { type: 'string', description: 'Short meal title, e.g. "Soto betawi + rice + fried chicken" (defaults to item names)' },
+            items: {
+              type: 'array',
+              description: 'Per-item estimate. Plain: {name, grams?, kcal, kcal_lo?, kcal_hi?, protein_g, carbs_g?, fat_g?}. Preset: {preset: "<slug>", servings?} (numbers come from the preset, scaled).',
+              items: { type: 'object' },
+            },
+            confidence: { type: 'string', enum: ['low', 'medium', 'high'] },
+            photos: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'log: absolute paths of photos to attach (HEIC/JPEG/PNG). Copied, resized, GPS/EXIF stripped; originals are never moved or modified.',
+            },
+            note: { type: 'string', description: 'log: what he said, verbatim-ish (one line)' },
+            at: {
+              type: 'string',
+              description: 'log / estimate: when it was EATEN, ISO 8601 or local HH:MM (a time ahead of now = last night). The food day rolls over at 04:00.',
+            },
+            reason: { type: 'string', description: 'estimate: why it changed (e.g. "he said soto, not gulai"); void: why it is removed' },
+            date: { type: 'string', description: 'day / day_complete: YYYY-MM-DD food day (default today)' },
+            complete: { type: 'boolean', description: 'day_complete: true = fully logged (default), false = missing meals, exclude from the baseline' },
+            slug: { type: 'string', description: 'preset_save / preset_delete: preset id (derived from name when omitted)' },
+            name: { type: 'string', description: 'preset_save: display name, e.g. "Soto betawi (mom\'s, with sengkel)"' },
+            aliases: { type: 'array', items: { type: 'string' }, description: 'preset_save: words he uses for it' },
+            accept: { type: 'boolean', description: 'baseline: true = set the suggested target as THE kcal budget (only after he agrees)' },
+            target_kcal: { type: 'number', description: 'baseline: set an explicit kcal budget instead of the suggestion' },
+          },
+          required: ['action'],
+        },
+      },
+      {
         name: 'health__config',
         description:
           'View or update health settings: event class toggles, thresholds, quiet hours, daily event budget, poll interval.',
@@ -331,6 +403,10 @@ export function createServer(ipc: IpcClient) {
             },
             daily_budget: { type: 'number', description: 'Max non-alert events delivered per day' },
             poll_interval_minutes: { type: 'number' },
+            food: {
+              type: 'object',
+              description: 'Food log settings, e.g. {"protein_target_g": 165, "rollover_hour": 4, "deficit_kcal": 400}',
+            },
           },
           required: ['action'],
         },
@@ -395,6 +471,12 @@ export function createServer(ipc: IpcClient) {
             60_000,
           )
           return toolResult(JSON.stringify(result, null, 2))
+        }
+        case 'health__meal': {
+          // 120s: a log with several HEIC photos runs sips per photo.
+          const result = (await ipc.rpc('meal', args, 120_000)) as Record<string, unknown>
+          const { summary, ...rest } = result
+          return toolResult(`${summary ? `${summary}\n\n` : ''}${JSON.stringify(rest, null, 2)}`)
         }
         case 'health__config': {
           if (args.action === 'get') {

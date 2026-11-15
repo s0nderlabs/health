@@ -189,8 +189,24 @@ export type EventClass =
   | 'live.rest' // session ended: summary + HR-recovery read
   | 'ride.landed' // the cyclo's ride reached Strava: compose title/description now
   | 'lift.landed' // a WHOOP lift card reached Strava: strain line stripped, compose after his debrief
+  | 'meal.logged' // the user logged a meal on the phone: estimate it, write back via health__meal
+  | 'meal.amended' // the user sent a correction line for a logged meal from the phone
 
 export type EventPriority = 'info' | 'notable' | 'alert'
+
+/** Event classes delivered even inside quiet hours (besides priority=alert).
+ *  live.*: the user is awake and active RIGHT NOW; holding them would flush a
+ *  stale burst at the boundary. meal.*: the user is holding the phone waiting
+ *  for an estimate (a 23:30 dinner must be answered tonight, not at 06:00). */
+export const QUIET_PIERCING_PREFIXES = ['live.', 'meal.'] as const
+
+export function piercesQuietHours(e: { class: string; priority: string; dedupe_key: string }): boolean {
+  if (e.priority === 'alert') return true
+  if (QUIET_PIERCING_PREFIXES.some((p) => e.class.startsWith(p))) return true
+  // Yield advisories are time-critical (a re-armed relayer can take the band
+  // mid-recording).
+  return e.dedupe_key.startsWith('system.health:yield-')
+}
 
 export interface HealthEvent {
   id?: number
@@ -254,6 +270,15 @@ export interface HealthConfig {
   // Workout-plan JSON served to the phone at GET /plan. Written by the /gym
   // skill in the user's main session; empty = default <runtime dir>/plan.json.
   plan_path: string
+  // Food log (calorie + protein tracker). The day rolls over at rollover_hour
+  // local time, so a 00:30 dinner counts toward the previous day. The kcal
+  // target only exists once the baseline (logged intake + weigh-in trend)
+  // says what maintenance is; protein has a fixed target from day one.
+  food: {
+    protein_target_g: number
+    rollover_hour: number
+    deficit_kcal: number // target = maintenance - this, once the baseline is ready
+  }
 }
 
 export const DEFAULT_CONFIG: HealthConfig = {
@@ -278,6 +303,8 @@ export const DEFAULT_CONFIG: HealthConfig = {
     'live.rest': true,
     'ride.landed': true,
     'lift.landed': true,
+    'meal.logged': true,
+    'meal.amended': true,
   },
   thresholds: {
     strain_notable: 15,
@@ -308,6 +335,9 @@ export const DEFAULT_CONFIG: HealthConfig = {
     'live.rest': 10,
     // ride.landed dedupes by activity id (one per ride, ever); no cooldown.
     'ride.landed': 0,
+    // meal.* are user-initiated, one per log/fix; never throttled.
+    'meal.logged': 0,
+    'meal.amended': 0,
   },
   poll_interval_minutes: 5,
   webhook: {
@@ -327,6 +357,11 @@ export const DEFAULT_CONFIG: HealthConfig = {
     hot_bpm: null,
   },
   plan_path: '',
+  food: {
+    protein_target_g: 165,
+    rollover_hour: 4,
+    deficit_kcal: 400,
+  },
 }
 
 // ── MCP tool helpers (inb0x convention) ───────────────────────────
