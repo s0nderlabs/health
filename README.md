@@ -57,7 +57,13 @@ WHOOP band ──(BLE Broadcast HR)──> health-relay ──(WS, raw frames)�
   paths. Your Claude session estimates each meal per item (grams, kcal with
   a range, protein) and the number lands back on the phone and in chat.
   Corrections are a full re-estimate with the history kept; repeat meals
-  become presets. Weigh-ins flow in from Apple Health. There is no calorie
+  become presets. Weigh-ins flow in from Apple Health (any scale app that
+  writes there), and each one becomes a `body.weighin` event: weight, body
+  fat and the change from your last counted reading. Readings that should
+  not drive the trend (a test before your start date, outside the morning
+  window, a second reading that morning, or far enough off to be someone
+  else) are still shown, labelled and excluded; you can flip any of them.
+  There is no calorie
   target until your own logs and weigh-in trend have measured maintenance
   (14 complete days + 8 weigh-ins); protein has a target from day one.
   Photos are converted to plain JPEGs with GPS and all other metadata
@@ -231,8 +237,10 @@ and nothing live is running (no open session, no fresh workout intent, no
 yield, the phone not the band writer). It never alerts on its own: it
 writes facts to `~/.claude/channels/health/resign/` and the daemon turns
 them into `system.health` events (one per failure episode, clock tiers at
-48/24/8h). The legacy 48h nag stays on as the backstop whenever the
-automation is off, dry, or has gone quiet.
+48/24/8h). Under 24h with no renewal it also pushes a notification to the
+phone (through the app, with sound) and one to the Mac, so you hear about it
+even with no Claude session open. The legacy 48h nag stays on as the
+backstop whenever the automation is off, dry, or has gone quiet.
 
 The build input is a snapshot of the code that is actually on the phone,
 kept outside protected folders (`~/Library/Application Support/health-resign`);
@@ -257,6 +265,14 @@ hardware UDID (`xcrun devicectl list devices`) and stays in your local
 config. A changed signing certificate is never installed unattended (the
 phone needs a Trust tap), and an Apple ID that needs a password or 2FA can
 only be reported, never fixed headless.
+
+The loud subset (the 24h and 8h tiers, expiry, and a hard failure with 24h
+or less left) also goes out as notifications: a local notification on the
+phone over the relayer socket (resent until acked, and at every phone
+hello) and a native Mac banner via `osascript`. macOS attributes those
+banners to Script Editor and drops them silently until it is allowed once:
+run `osascript -e 'display notification "test" with title "health"'` from
+a terminal and allow Script Editor in System Settings > Notifications.
 
 The app never depends on DNS to find the daemon. iCloud Private Relay (and
 any encrypted-DNS app) resolves names outside Tailscale's MagicDNS, and a

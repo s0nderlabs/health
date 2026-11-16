@@ -20,6 +20,7 @@
 import Foundation
 import Combine
 import UIKit
+import UserNotifications
 
 // Not @MainActor: both legs are pinned to the main queue by construction
 // (CBCentralManager queue .main, URLSession delegateQueue .main), so every
@@ -418,6 +419,8 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
 
         case "meals_updated":
             onMealsUpdated?()
+        case "notify":
+            handleNotify(payload)
         case "body_mass_ack":
             let added = (payload["added"] as? Int) ?? 0
             lastAck = "weigh-ins synced (\(added) new)"
@@ -432,6 +435,93 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
         default:
             break
         }
+    }
+
+    // ── Daemon notify (loud alerts) ──────────────────────────────────
+    //
+    // daemon -> phone: {"type":"notify","id","title","body","level":"loud"|"critical"}
+    // phone -> daemon: {"type":"notify_ack","id","shown":Bool,"reason"?:String}
+    //
+    // The daemon's loud alerts (the signing clock in its last day, a hard
+    // re-sign failure with <=24h left) reach the lock screen through this,
+    // on top of the channel event. The notification identifier IS the alert
+    // id, so a resend replaces the banner instead of stacking a second one.
+    // Every notify is acked, duplicates included; shown=false when iOS would
+    // not show it, with a reason: "no_permission" and "empty" are final,
+    // "add_failed" is transient and the daemon resends it. This path NEVER
+    // asks for permission: the rest timer asks in context, a daemon push is
+    // not a context.
+    //
+    // A clock push (phone-sign-<tier>:<signature>) supersedes every older
+    // clock banner (an urgent -> critical escalation replaces instead of
+    // stacking) and the local 24h "Sideload clock" ping, which would say the
+    // same thing at the same moment. Signing.clearResolvedDaemonAlerts drops
+    // the lot once a re-sign lands.
+
+    static let clockNotifyPrefix = "phone-sign-"
+
+    /// Not private: the DEBUG demo (HR_DEMO_NOTIFY) drives this exact path.
+    func handleNotify(_ payload: [String: Any]) {
+        guard let id = payload["id"] as? String, !id.isEmpty else {
+            rlog("notify without an id; dropped (nothing to ack)")
+            return
+        }
+        let title = (payload["title"] as? String) ?? ""
+        let body = (payload["body"] as? String) ?? ""
+        let level = (payload["level"] as? String) == "critical" ? "critical" : "loud"
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { [weak self] settings in
+            let allowed = settings.authorizationStatus == .authorized
+                || settings.authorizationStatus == .provisional
+            guard allowed, !(title.isEmpty && body.isEmpty) else {
+                let reason = allowed ? "empty" : "no_permission"
+                rlog("notify \(id): not shown (\(reason))")
+                DispatchQueue.main.async { self?.ackNotify(id, shown: false, reason: reason) }
+                return
+            }
+            let content = UNMutableNotificationContent()
+            let base = title.isEmpty ? "health" : title
+            // No Time Sensitive entitlement on a free personal team, so the
+            // level shows in the words: critical = the phone leg dies within
+            // 8h or already has.
+            content.title = level == "critical" ? "Urgent: \(base)" : base
+            content.body = body
+            content.sound = .default
+            // .active, never .timeSensitive: a free personal team cannot
+            // carry the Time Sensitive entitlement.
+            content.interruptionLevel = .active
+            content.relevanceScore = level == "critical" ? 1.0 : 0.8
+            content.threadIdentifier = "daemon-notify"
+            // Marks it for the foreground presenter (banner + sound).
+            content.userInfo = ["daemon_notify": level]
+            let request = UNNotificationRequest(identifier: id, content: content, trigger: nil)
+            center.add(request) { err in
+                if let err = err { rlog("notify \(id): add failed: \(err.localizedDescription)") }
+                if err == nil, id.hasPrefix(Self.clockNotifyPrefix) {
+                    Self.supersedeClockBanners(center: center, keeping: id)
+                }
+                DispatchQueue.main.async {
+                    self?.ackNotify(id, shown: err == nil, reason: err == nil ? nil : "add_failed")
+                }
+            }
+        }
+    }
+
+    /// Older clock banners and the local 24h ping go once a clock push landed.
+    private static func supersedeClockBanners(center: UNUserNotificationCenter, keeping id: String) {
+        center.removePendingNotificationRequests(withIdentifiers: [Signing.dayBeforeNoteId])
+        center.getDeliveredNotifications { delivered in
+            let stale = delivered.map(\.request.identifier).filter {
+                $0 == Signing.dayBeforeNoteId || ($0.hasPrefix(Self.clockNotifyPrefix) && $0 != id)
+            }
+            if !stale.isEmpty { center.removeDeliveredNotifications(withIdentifiers: stale) }
+        }
+    }
+
+    private func ackNotify(_ id: String, shown: Bool, reason: String?) {
+        var ack: [String: Any] = ["type": "notify_ack", "id": id, "shown": shown]
+        if let reason = reason { ack["reason"] = reason }
+        socket.sendJSON(ack)
     }
 
     // ── BleLegDelegate ───────────────────────────────────────────────

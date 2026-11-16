@@ -77,7 +77,7 @@ enum Signing {
     /// The full sentence for the Live tab's whisper line.
     static func line(at now: Date = Date()) -> String? {
         guard let text = countdown(at: now) else { return nil }
-        if text == "expired" { return "App signature expired · reinstall from Xcode" }
+        if text == "expired" { return "App signature expired · re-sign from the Mac" }
         return "Signed for \(text) more"
     }
 
@@ -94,11 +94,17 @@ enum Signing {
 
     // ── Pre-expiry notifications ─────────────────────────────────────
 
-    private static let noteIds = ["signing-expiry-24h", "signing-expiry-3h"]
+    /// The local day-before ping; a daemon clock push supersedes it
+    /// (RelayController.handleNotify), they would say the same thing.
+    static let dayBeforeNoteId = "signing-expiry-24h"
+    private static let noteIds = [dayBeforeNoteId, "signing-expiry-3h"]
 
     /// Arm "the app dies tomorrow" and "the app dies in three hours" pings.
-    /// Idempotent (fixed identifiers) and re-run on every foreground, so a
-    /// fresh install re-arms for its own new date. A notification is the
+    /// Idempotent (fixed identifiers) and re-run on every foreground AND
+    /// every socket connect, so a fresh install re-arms for its own new date
+    /// even when the post-install launch never reaches the foreground. They
+    /// are the offline backstop: the daemon's loud pushes cover the same
+    /// moments while the Mac is reachable. A notification is the
     /// only thing that can reach him when the app is not open, and a
     /// silently dead sideload has already cost a workout once.
     static func scheduleExpiryNotifications(now: Date = Date()) {
@@ -119,8 +125,8 @@ enum Signing {
     private static func arm(center: UNUserNotificationCenter, expires: Date, now: Date) {
         center.removePendingNotificationRequests(withIdentifiers: noteIds)
         let leads: [(id: String, lead: TimeInterval, body: String)] = [
-            (noteIds[0], 24 * 3600, "The health app's signature expires tomorrow at %@. Plug in and reinstall from Xcode before then or it stops launching."),
-            (noteIds[1], 3 * 3600, "Three hours left on the health app's signature (%@). Reinstall from Xcode now."),
+            (noteIds[0], 24 * 3600, "The health app's signature expires tomorrow at %@ unless auto re-sign renews it first. Open health on the Mac side for the fix."),
+            (noteIds[1], 3 * 3600, "Three hours left on the health app's signature (%@) unless auto re-sign renews it first. Open health on the Mac side for the fix."),
         ]
         let clock = DateFormatter()
         clock.dateFormat = "EEE HH:mm"
@@ -135,6 +141,22 @@ enum Signing {
             let trigger = UNTimeIntervalNotificationTrigger(
                 timeInterval: max(1, fireAt.timeIntervalSince(now)), repeats: false)
             center.add(UNNotificationRequest(identifier: item.id, content: content, trigger: trigger))
+        }
+    }
+
+    /// Once the signature has more than a day left (a re-sign landed), the
+    /// daemon's signing banners are false emergencies: clear them. The daemon
+    /// only pushes inside the last 24h, so nothing live is ever removed.
+    static func clearResolvedDaemonAlerts(now: Date = Date()) {
+        guard !Demo.active, let left = remaining(at: now), left > 24 * 3600 else { return }
+        let center = UNUserNotificationCenter.current()
+        center.getDeliveredNotifications { delivered in
+            let stale = delivered.filter {
+                $0.request.content.userInfo["daemon_notify"] != nil
+                    && ($0.request.identifier.hasPrefix("phone-sign-")
+                        || $0.request.identifier.hasPrefix("resign-fail:"))
+            }.map(\.request.identifier)
+            if !stale.isEmpty { center.removeDeliveredNotifications(withIdentifiers: stale) }
         }
     }
 

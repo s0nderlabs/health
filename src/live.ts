@@ -17,6 +17,10 @@
 //     {type:'body_mass', samples:[{uuid,ts,kind:'mass'|'fat',value,source?}], deleted?:[uuid], batch?}
 //                                                       -> {type:'body_mass_ack', received, added, deleted, batch?}
 //     batch (optional int): echoed on the ack so the phone matches acks to batches
+//     {type:'notify_ack', id, shown:bool, reason?}      (the phone got a notify; shown=false when
+//                                                         it was not shown; reason 'add_failed' =
+//                                                         transient (resent), else 'no_permission'
+//                                                         or 'empty'; older builds send no reason)
 //   daemon -> relayer (arbitration; the band normally serves ONE receiver, but
 //   accepts a second central when two connects land inside its post-drop
 //   advertising window; the daemon exploits that deliberately, see dual-up):
@@ -41,6 +45,10 @@
 //     {type:'plan_updated'}       the workout plan file changed; refetch GET /plan
 //     {type:'meals_updated', date} the food log changed (an estimate landed, a
 //                                 chat log, a void); refetch GET /meals?date=
+//     {type:'notify', id, title, body, level:'loud'|'critical'}
+//                                 PHONE legs only (pushPhones): post a local
+//                                 notification with identifier = id (a resend
+//                                 replaces), then notify_ack it, duplicates too
 //   HTTP (same token): POST /meal, POST /meal/fix, GET /meals, GET /meal-photo
 //   are the food log's routes, served by FoodService (src/food.ts).
 //   POST /money-notif {app, title?, body, ts?, client_id?, via?} forwards a
@@ -75,6 +83,11 @@ export function parseSignedUntil(v: unknown): string | null {
   const now = Date.now()
   if (t < now - 30 * 86_400_000 || t > now + 400 * 86_400_000) return null
   return new Date(t).toISOString()
+}
+
+/** A relayer that said hello as anything but the Mac relay. */
+function isPhoneSource(source: string): boolean {
+  return source !== 'mac' && source !== 'unknown'
 }
 
 function parseTransport(v: unknown): 'wifi' | 'cellular' | 'unknown' {
@@ -124,6 +137,9 @@ export interface LiveListenerOpts {
   /** An INDEFINITE yield has been active for another reminder interval:
    *  surface a nag (never an auto-reclaim; that is the whole point). */
   onYieldReminder?: (sinceIso: string) => void
+  /** The phone acked a notify push (shown=false: not shown; reason says why,
+   *  null from builds that predate it). */
+  onNotifyAck?: (id: string, shown: boolean, reason: string | null) => void
   timing?: Partial<ArbTiming>
 }
 
@@ -464,6 +480,19 @@ export class LiveListener {
   broadcast(obj: Record<string, unknown>): number {
     let n = 0
     for (const ws of this.relayers) {
+      this.push(ws, obj)
+      n++
+    }
+    return n
+  }
+
+  /** Push to connected PHONE legs only (never the Mac relay, which need not
+   *  tolerate unknown types); returns how many got it. A leg is a phone once
+   *  its hello named a non-mac source, the same test the hello path uses. */
+  pushPhones(obj: Record<string, unknown>): number {
+    let n = 0
+    for (const ws of this.relayers) {
+      if (!isPhoneSource(ws.data.source)) continue
       this.push(ws, obj)
       n++
     }
@@ -1011,6 +1040,20 @@ export class LiveListener {
         const res = this.yieldBand(minutes * 60_000)
         log(`yield requested by ${ws.data.source} (${minutes === 0 ? 'until reclaimed' : `${minutes}m`})`)
         this.push(ws, { type: 'yield_ack', until: new Date(res.until).getTime() })
+        break
+      }
+      case 'notify_ack': {
+        const id = typeof msg.id === 'string' ? msg.id.trim() : ''
+        if (!id || id.length > 200) {
+          this.countParseError(`bad notify_ack from ${ws.data.source}`)
+          return
+        }
+        try {
+          const reason = typeof msg.reason === 'string' && msg.reason ? msg.reason.slice(0, 32) : null
+          this.opts.onNotifyAck?.(id, msg.shown === true, reason)
+        } catch (err) {
+          log(`notify_ack failed: ${err}`)
+        }
         break
       }
       case 'reclaim_request': {

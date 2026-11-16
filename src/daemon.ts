@@ -7,7 +7,9 @@ import { readFileSync, writeFileSync, unlinkSync, existsSync } from 'fs'
 import { join } from 'path'
 import { randomBytes } from 'node:crypto'
 import { AuthBrokenError } from './auth.js'
-import { signedHoursLeft, signingNag, resignAlerts } from './signing.js'
+import { signedHoursLeft, signingNag, resignAlerts, loudSigningPush, localDate as signingLocalDate } from './signing.js'
+import { SigningPushDelivery } from './signing-push.js'
+import { exec as execChild } from './resign/exec.js'
 import { readState, paths as resignPaths, writeJsonAtomic } from './resign/state.js'
 import { resolveResignConfig } from './resign/policy.js'
 import {
@@ -230,8 +232,27 @@ const money = new MoneyService({
   log: (msg) => log(`money: ${msg}`),
 })
 
+// Loud signing pushes (phone + Mac notifications), on top of system.health.
+// pushPhone reaches the listener lazily: it is constructed below.
+const signingPush = new SigningPushDelivery({
+  getMeta: (k) => store.getMeta(k),
+  setMeta: (k, v) => store.setMeta(k, v),
+  pushPhone: (obj) => liveListener.pushPhones(obj),
+  exec: execChild,
+  log: (msg) => log(msg),
+  // The phone surface is dead (notification permission off): one notable a
+  // day so he can fix it, instead of a log line nobody reads.
+  onPhoneNotShown: (id, reason) =>
+    engine.systemProblem(
+      `Phone relayer: a loud signing alert (${id}) reached the phone but was NOT shown (${reason ?? 'notification permission is off'}). Allow notifications for HealthRelay in Settings > Notifications, or the Mac banner is the only loud surface.`,
+      `notify-permission-off:${signingLocalDate(Date.now())}`,
+      { bypassCooldown: true },
+    ),
+})
+
 const liveListener = new LiveListener(liveState, () => config().live.token, {
   foodHttp: (req, url) => food.handleHttp(req, url),
+  onNotifyAck: (id, shown, reason) => signingPush.onAck(id, shown, reason),
   moneyHttp: (req, url) => money.handleHttp(req, url),
   onBodyMass: (samples, deleted) => food.ingestBodySamples(samples, deleted),
   // Phone-side surfaces: intent taps ride the same event path as the MCP tool,
@@ -262,6 +283,12 @@ const liveListener = new LiveListener(liveState, () => config().live.token, {
     // Armed only while the feature is on: with resign disabled a hello costs
     // nothing (no 90 s timer, no preflight queries, no "skipped" log line).
     if (config().resign?.enabled) helloKicker.onHello()
+    // A suspended iPhone's socket rarely spans a 5-min watchdog tick (a BLE
+    // wake, a brief open, the relaunch after an install): hand it every
+    // unacked loud push right at hello. Recomputed AFTER the meta write above,
+    // so a freshly re-signed phone never gets a stale "expires in 3h".
+    // setTimeout 0: the hello verdict goes out first.
+    setTimeout(() => resendSigningPushToPhones(), 0)
   },
   // Yield survives daemon restarts: the window is persisted and re-applied at
   // boot (below), so a kickstart mid-ride cannot silently re-arm the legs and
@@ -305,6 +332,13 @@ const liveListener = new LiveListener(liveState, () => config().live.token, {
 // and the install blocker, and turns state.json into alerts on its tick.
 
 const RESIGN_PATHS = resignPaths()
+
+// "Awake" for the re-sign backstop: since the last wake, not since process
+// start. A 5-min tick that arrives more than 10 min after the previous one
+// means the Mac slept in between. Declared before the listener starts: a
+// phone hello during the startup poll reads it (resendSigningPushToPhones).
+let awakeSince = Date.now()
+let lastTickAt = Date.now()
 
 function resignPreflight(now = Date.now()): ResignPreflight {
   const signedUntil = store.getMeta('phone_app_signed_until') || null
@@ -823,6 +857,10 @@ async function mealRpc(p: Record<string, unknown>): Promise<unknown> {
     case 'baseline':
       if (p.accept === true || p.target_kcal != null) return food.acceptTarget(p)
       return { ...food.baseline(), current_target_kcal: food.targetKcal() }
+    case 'weighins':
+      return food.weighins(typeof p.days === 'number' ? p.days : 14)
+    case 'weighin_set':
+      return food.setWeighin(p)
     default:
       throw new Error(`unknown health__meal action: ${action}`)
   }
@@ -1007,15 +1045,14 @@ const WATCHDOG_UPTIME_GRACE_MS = 15 * 60_000
 /** The sideload clock, daemon side: the pure logic lives in signing.ts
  *  (tested); this is the glue to the store and the engine. bypassCooldown:
  *  self-throttled by the day-scoped key and bounded by the nag window. */
-function phoneSigningWatchdog(now = Date.now()): void {
+function signingAlertsNow(now: number) {
   const signedUntil = store.getMeta('phone_app_signed_until')
   const resign = config().resign
   const state = readState(RESIGN_PATHS.stateFile)
   const awakeMs = now - awakeSince
   // Legacy nag: defers ONLY while the automation is healthy (signing.ts).
   const nag = signingNag(signedUntil, now, { enabled: resign.enabled, state, daemonAwakeMs: awakeMs })
-  if (nag) engine.systemProblem(nag.problem, nag.key, { bypassCooldown: true, ...(nag.priority ? { priority: nag.priority } : {}) })
-  for (const a of resignAlerts(state, signedUntil, now, awakeMs, {
+  const alerts = resignAlerts(state, signedUntil, now, awakeMs, {
     enabled: resign.enabled,
     windowHours: resign.window_hours,
     alertedBetween: (fromIso, toIso) =>
@@ -1027,16 +1064,35 @@ function phoneSigningWatchdog(now = Date.now()): void {
              AND created_at >= ? AND created_at <= ? LIMIT 1`,
         )
         .get(fromIso, toIso),
-  })) {
+  })
+  const pushes = loudSigningPush(nag ? [nag, ...alerts] : alerts, signedUntil, now)
+  return { nag, alerts, pushes }
+}
+
+function phoneSigningWatchdog(now = Date.now()): void {
+  const { nag, alerts, pushes } = signingAlertsNow(now)
+  if (nag) engine.systemProblem(nag.problem, nag.key, { bypassCooldown: true, ...(nag.priority ? { priority: nag.priority } : {}) })
+  for (const a of alerts) {
     engine.systemProblem(a.problem, a.key, { bypassCooldown: true, priority: a.priority })
+  }
+  // The loud subset ALSO goes out as notifications: phone legs every tick
+  // until acked, the Mac once per id (signing-push.ts). Async, never throws.
+  if (pushes.length) {
+    void signingPush.tick(pushes).catch((err) => log(`signing push failed: ${err}`))
   }
 }
 
-// "Awake" for the re-sign backstop: since the last wake, not since process
-// start. A 5-min tick that arrives more than 10 min after the previous one
-// means the Mac slept in between.
-let awakeSince = Date.now()
-let lastTickAt = Date.now()
+/** The hello half of phone delivery: unacked loud pushes, phone legs only. */
+function resendSigningPushToPhones(now = Date.now()): void {
+  try {
+    const { pushes } = signingAlertsNow(now)
+    if (pushes.length) {
+      void signingPush.tick(pushes, { phoneOnly: true }).catch((err) => log(`signing push (hello) failed: ${err}`))
+    }
+  } catch (err) {
+    log(`signing push (hello) failed: ${err}`)
+  }
+}
 
 setInterval(() => {
   {

@@ -22,6 +22,12 @@ final class RestNotificationDelegate: NSObject, UNUserNotificationCenterDelegate
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
+        // Daemon notify (RelayController.handleNotify): a loud alert keeps
+        // its sound in the foreground too, and stays in the list.
+        if notification.request.content.userInfo["daemon_notify"] != nil {
+            completionHandler([.banner, .list, .sound])
+            return
+        }
         // Banner only: foreground audio is RestChime's job (its playback
         // session beats the mute switch, which notification sound cannot),
         // and two sounds for one expiry would be noise.

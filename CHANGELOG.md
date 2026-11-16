@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.18.1 - 2026-11-16
+
+### Added
+
+- **Loud re-sign alerts reach the phone and the Mac, not just the
+  session.** When the phone app's signature is under 24 h with no renewal,
+  or a re-sign fails inside that window, the daemon pushes a local
+  notification (with sound) to the phone over the relay socket, resent
+  until the phone acks it and replacing rather than stacking, plus one
+  native macOS notification per alert. Quieter cases (the 48 h tier, a
+  failed night with days to spare) stay channel-only. A pending alert goes
+  out the moment the phone says hello; resolved alerts clear themselves;
+  notifications switched off for the app raise one daily system.health
+  line. The phone app handles the new `notify` message and acks it.
+- **`body.weighin`: a channel event per scale weigh-in.** Mass and body fat
+  are merged into one line ("Weigh-in 05:02 WIB: 83.1 kg, 23.6% fat
+  (Xiaomi Home). Previous: ... (-0.4 kg)."), informational, queued through
+  quiet hours. Every reading is stored and announced; readings that do not
+  count say why and are excluded from the baseline: before
+  `food.weighins_from` (test), outside 03:30-09:00 (not a morning reading),
+  far from the last counted reading (possible other person; two agreeing
+  days are accepted as a real shift), or a second morning reading
+  (repeat). Only recent readings announce, so a first history sync never
+  floods the channel.
+- `health__meal` actions `weighins` (recent readings with their verdict)
+  and `weighin_set` (count or exclude one, by uuid or measured time; a
+  manual include is never undone by the rules).
+
+### Changed
+
+- The phone's built-in 24 h / 3 h signature pings and the Settings footer
+  now describe the automatic re-sign instead of a cable reinstall.
+- App version 0.18.1 (8).
+
 ## 0.18.0 - 2026-11-16
 
 ### Added

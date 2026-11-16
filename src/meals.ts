@@ -80,7 +80,8 @@ CREATE TABLE IF NOT EXISTS body_samples (
   kind TEXT NOT NULL,
   value REAL NOT NULL,
   source TEXT,
-  received_at TEXT NOT NULL
+  received_at TEXT NOT NULL,
+  excluded TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_body_samples_ts ON body_samples (ts);
 `
@@ -448,6 +449,10 @@ export class MealBook {
   /** Create the food tables. Called by Store on every writable open. */
   static ensureSchema(db: Database): void {
     db.run(FOOD_SCHEMA)
+    // v0.18.1: a per-sample exclusion reason (test / non-fasted). Additive,
+    // idempotent on archives created before the column existed.
+    const cols = db.query("PRAGMA table_info(body_samples)").all() as Array<{ name: string }>
+    if (!cols.some((c) => c.name === 'excluded')) db.run('ALTER TABLE body_samples ADD COLUMN excluded TEXT')
   }
 
   // meals
@@ -714,9 +719,104 @@ export class MealBook {
     return this.db.transaction(() => uuids.reduce((n, u) => n + del.run(u).changes, 0))()
   }
 
+  /** Body samples for the baseline: EXCLUDED rows (test, non-fasted) never count. */
   bodySamplesSince(sinceIso: string): Array<{ ts: string; kind: 'mass' | 'fat'; value: number; source: string | null }> {
     return this.db
-      .query('SELECT ts, kind, value, source FROM body_samples WHERE ts >= ? ORDER BY ts ASC')
+      .query('SELECT ts, kind, value, source FROM body_samples WHERE ts >= ? AND excluded IS NULL ORDER BY ts ASC')
       .all(sinceIso) as Array<{ ts: string; kind: 'mass' | 'fat'; value: number; source: string | null }>
+  }
+
+  /** Which of these uuids are not stored yet (the weigh-in event fires once). */
+  unknownBodyUuids(uuids: string[]): Set<string> {
+    const q = this.db.query('SELECT 1 FROM body_samples WHERE uuid = ?')
+    return new Set(uuids.filter((u) => !q.get(u)))
+  }
+
+  /** The latest NON-excluded mass reading strictly before `beforeIso`. */
+  previousMass(beforeIso: string): { ts: string; value: number } | null {
+    return (
+      (this.db
+        .query("SELECT ts, value FROM body_samples WHERE kind = 'mass' AND excluded IS NULL AND ts < ? ORDER BY ts DESC LIMIT 1")
+        .get(beforeIso) as { ts: string; value: number } | null) ?? null
+    )
+  }
+
+  /** Is there an INCLUDED mass reading in [dayStartIso, beforeIso)? */
+  includedMassOnDayBefore(dayStartIso: string, beforeIso: string): boolean {
+    return !!this.db
+      .query("SELECT 1 FROM body_samples WHERE kind = 'mass' AND excluded IS NULL AND ts >= ? AND ts < ? LIMIT 1")
+      .get(dayStartIso, beforeIso)
+  }
+
+  /** How many INCLUDED mass readings exist strictly before `beforeIso` (the
+   *  outlier rule needs >= 3 REAL priors, never this batch's unclassified rows). */
+  includedMassCountBefore(beforeIso: string): number {
+    return (
+      this.db.query("SELECT COUNT(*) AS n FROM body_samples WHERE kind = 'mass' AND excluded IS NULL AND ts < ?").get(beforeIso) as {
+        n: number
+      }
+    ).n
+  }
+
+  /** Outlier-excluded mass readings in [fromIso, beforeIso): the "a real
+   *  shift, not a visitor" check looks for an earlier one that agrees. */
+  outlierMassBetween(fromIso: string, beforeIso: string): Array<{ ts: string; value: number }> {
+    return this.db
+      .query("SELECT ts, value FROM body_samples WHERE kind = 'mass' AND excluded = 'possible other person' AND ts >= ? AND ts < ?")
+      .all(fromIso, beforeIso) as Array<{ ts: string; value: number }>
+  }
+
+  /** One sample by uuid (primary key), or null. */
+  bodySampleByUuid(uuid: string): { uuid: string; ts: string; kind: string; source: string | null } | null {
+    return (
+      (this.db.query('SELECT uuid, ts, kind, source FROM body_samples WHERE uuid = ?').get(uuid) as {
+        uuid: string
+        ts: string
+        kind: string
+        source: string | null
+      } | null) ?? null
+    )
+  }
+
+  /** Mass + fat samples that currently COUNT (excluded IS NULL), oldest first:
+   *  what the re-classification pass walks. */
+  includedSamplesSince(sinceIso: string): Array<{ uuid: string; ts: string; kind: 'mass' | 'fat'; value: number; source: string | null }> {
+    return this.db
+      .query('SELECT uuid, ts, kind, value, source FROM body_samples WHERE excluded IS NULL AND ts >= ? ORDER BY ts ASC')
+      .all(sinceIso) as Array<{ uuid: string; ts: string; kind: 'mass' | 'fat'; value: number; source: string | null }>
+  }
+
+  /** Every body sample since `sinceIso`, excluded ones included (for review). */
+  bodySamplesAll(sinceIso: string): Array<{ uuid: string; ts: string; kind: 'mass' | 'fat'; value: number; source: string | null; excluded: string | null }> {
+    return this.db
+      .query('SELECT uuid, ts, kind, value, source, excluded FROM body_samples WHERE ts >= ? ORDER BY ts ASC')
+      .all(sinceIso) as Array<{ uuid: string; ts: string; kind: 'mass' | 'fat'; value: number; source: string | null; excluded: string | null }>
+  }
+
+  /** The samples of the weigh-in nearest `atIso` within `tolMs` (mass + its
+   *  fat pair: same source + instant), or [] when none is that close. */
+  weighinNear(atIso: string, tolMs: number): Array<{ uuid: string; ts: string; kind: string; value: number; source: string | null; excluded: string | null }> {
+    const t = Date.parse(atIso)
+    const lo = new Date(t - tolMs).toISOString()
+    const hi = new Date(t + tolMs).toISOString()
+    const masses = this.db
+      .query("SELECT uuid, ts, source FROM body_samples WHERE kind = 'mass' AND ts >= ? AND ts <= ?")
+      .all(lo, hi) as Array<{ uuid: string; ts: string; source: string | null }>
+    if (!masses.length) return []
+    const best = masses.sort((a, b) => Math.abs(Date.parse(a.ts) - t) - Math.abs(Date.parse(b.ts) - t))[0]
+    return this.db
+      .query('SELECT uuid, ts, kind, value, source, excluded FROM body_samples WHERE ts = ? AND source IS ?')
+      .all(best.ts, best.source) as Array<{ uuid: string; ts: string; kind: string; value: number; source: string | null; excluded: string | null }>
+  }
+
+  /** A sample's exclusion reason, or null when it counts. */
+  bodyExcluded(uuid: string): string | null {
+    return ((this.db.query('SELECT excluded FROM body_samples WHERE uuid = ?').get(uuid) as { excluded: string | null } | null)?.excluded) ?? null
+  }
+
+  /** Mark samples excluded (reason) or include them again (null). */
+  setBodyExcluded(uuids: string[], reason: string | null): number {
+    const up = this.db.prepare('UPDATE body_samples SET excluded = ? WHERE uuid = ?')
+    return this.db.transaction(() => uuids.reduce((n, u) => n + up.run(reason, u).changes, 0))()
   }
 }

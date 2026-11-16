@@ -751,6 +751,97 @@ describe('phone surfaces (steps, intent, plan, watchdog)', () => {
     phone.ws.close()
   })
 
+  test('pushPhones reaches phone legs only, never the mac relay or a pre-hello socket', async () => {
+    const { listener, port } = makeArbListener()
+    cleanup.push(() => listener.stop())
+    const mac = await relayer(port, 'mac')
+    const phone = await relayer(port, 'phone')
+    const bare = await connect(port) // no hello yet: source unknown
+    const bareMsgs: string[] = []
+    bare.onmessage = (e) => bareMsgs.push(String(e.data))
+    const msg = { type: 'notify', id: 'phone-sign-urgent:2026-11-16', title: 'T', body: 'B', level: 'loud' }
+    expect(listener.pushPhones(msg)).toBe(1)
+    await waitFor(() => has(phone.msgs, 'notify'))
+    expect(parsed(phone.msgs).find((m) => m.type === 'notify')).toEqual(msg)
+    await Bun.sleep(80)
+    expect(has(mac.msgs, 'notify')).toBe(false)
+    expect(bareMsgs).toEqual([])
+    mac.ws.close()
+    phone.ws.close()
+    bare.close()
+  })
+
+  test('pushPhones with no phone connected returns 0', async () => {
+    const { listener, port } = makeArbListener()
+    cleanup.push(() => listener.stop())
+    const mac = await relayer(port, 'mac')
+    expect(listener.pushPhones({ type: 'notify', id: 'x', title: 'T', body: 'B', level: 'loud' })).toBe(0)
+    mac.ws.close()
+  })
+
+  test('notify_ack fires the callback with id + shown; malformed acks are parse errors', async () => {
+    const acks: Array<[string, boolean]> = []
+    const { listener, port } = makeArbListener({ onNotifyAck: (id, shown) => void acks.push([id, shown]) })
+    cleanup.push(() => listener.stop())
+    const phone = await relayer(port, 'phone')
+    phone.ws.send(JSON.stringify({ type: 'notify_ack', id: 'phone-sign-critical:2026-11-16', shown: true }))
+    phone.ws.send(JSON.stringify({ type: 'notify_ack', id: 'resign-fail:keychain_prompt:x', shown: false }))
+    phone.ws.send(JSON.stringify({ type: 'notify_ack', id: 'no-shown-field' }))
+    await waitFor(() => acks.length === 3)
+    expect(acks).toEqual([
+      ['phone-sign-critical:2026-11-16', true],
+      ['resign-fail:keychain_prompt:x', false],
+      ['no-shown-field', false],
+    ])
+    const before = listener.status().parse_errors
+    phone.ws.send(JSON.stringify({ type: 'notify_ack', id: 42, shown: true }))
+    phone.ws.send(JSON.stringify({ type: 'notify_ack', id: 'z'.repeat(201), shown: true }))
+    await waitFor(() => listener.status().parse_errors >= before + 2)
+    expect(acks).toHaveLength(3)
+    phone.ws.close()
+  })
+
+  test('notify_ack carries the phone reason (null from older builds)', async () => {
+    const acks: Array<[string, boolean, string | null]> = []
+    const { listener, port } = makeArbListener({ onNotifyAck: (id, shown, reason) => void acks.push([id, shown, reason]) })
+    cleanup.push(() => listener.stop())
+    const phone = await relayer(port, 'phone')
+    phone.ws.send(JSON.stringify({ type: 'notify_ack', id: 'a', shown: false, reason: 'add_failed' }))
+    phone.ws.send(JSON.stringify({ type: 'notify_ack', id: 'b', shown: false, reason: 'no_permission' }))
+    phone.ws.send(JSON.stringify({ type: 'notify_ack', id: 'c', shown: true }))
+    phone.ws.send(JSON.stringify({ type: 'notify_ack', id: 'd', shown: false, reason: 7 }))
+    await waitFor(() => acks.length === 4)
+    expect(acks).toEqual([
+      ['a', false, 'add_failed'],
+      ['b', false, 'no_permission'],
+      ['c', true, null],
+      ['d', false, null],
+    ])
+    phone.ws.close()
+  })
+
+  test('a push sent from the phone-hello hook (next macrotask) reaches the helloing leg', async () => {
+    // The daemon's hello resend: onPhoneApp schedules pushPhones with
+    // setTimeout 0, so a phone that connects between watchdog ticks still
+    // gets every unacked loud push.
+    let listenerRef: LiveListener | null = null
+    let pushed = -1
+    const { listener, port } = makeArbListener({
+      onPhoneApp: () => {
+        setTimeout(() => {
+          pushed = listenerRef!.pushPhones({ type: 'notify', id: 'phone-sign-critical:x', title: 'T', body: 'B', level: 'critical' })
+        }, 0)
+      },
+    })
+    listenerRef = listener
+    cleanup.push(() => listener.stop())
+    const phone = await relayer(port, 'phone')
+    await waitFor(() => has(phone.msgs, 'notify'))
+    expect(pushed).toBe(1)
+    expect(parsed(phone.msgs).find((m) => m.type === 'notify')).toMatchObject({ id: 'phone-sign-critical:x', level: 'critical' })
+    phone.ws.close()
+  })
+
   test('GET /plan: auth required, 404 without a file, serves the file, 503 on malformed', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'health-plan-'))
     const planPath = join(dir, 'plan.json')

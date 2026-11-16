@@ -11,7 +11,7 @@ import { DB_PATH } from './config.js'
 import { existsSync } from 'fs'
 import { readPhotoFiles } from './photos.js'
 
-const VERSION = '0.18.0'
+const VERSION = '0.18.1'
 
 const INSTRUCTIONS = `
 health: WHOOP recovery, sleep, and strain as a live channel. The daemon on this
@@ -366,13 +366,13 @@ export function createServer(ipc: IpcClient) {
       {
         name: 'health__meal',
         description:
-          'Food log (calorie + protein tracker), equal to the phone app. action: log (new meal from chat: items and/or photos), estimate (FULL REPLACE of an existing meal\'s items; corrections re-send the whole list), void, day (one day: meals, totals, targets), day_complete (mark a day fully logged or not; baseline uses complete days), preset_save / preset_list / preset_delete (repeat meals), baseline (maintenance from logged intake + weigh-in trend; accept:true sets the kcal target). The daemon computes all totals from items.',
+          'Food log (calorie + protein tracker), equal to the phone app. action: log (new meal from chat: items and/or photos), estimate (FULL REPLACE of an existing meal\'s items; corrections re-send the whole list), void, day (one day: meals, totals, targets), day_complete (mark a day fully logged or not; baseline uses complete days), preset_save / preset_list / preset_delete (repeat meals), baseline (maintenance from logged intake + weigh-in trend; accept:true sets the kcal target), weighins (recent scale readings with their verdict: counted, or excluded and why), weighin_set (include:true counts a reading, include:false excludes it with a reason; find it by uuid or measured_at). The daemon computes all totals from items.',
         inputSchema: {
           type: 'object' as const,
           properties: {
             action: {
               type: 'string',
-              enum: ['log', 'estimate', 'void', 'day', 'day_complete', 'preset_save', 'preset_list', 'preset_delete', 'baseline'],
+              enum: ['log', 'estimate', 'void', 'day', 'day_complete', 'preset_save', 'preset_list', 'preset_delete', 'baseline', 'weighins', 'weighin_set'],
             },
             meal_id: { type: 'number', description: 'estimate / void: the meal (from meal.logged meta or a day read)' },
             expected_revision: {
@@ -396,13 +396,17 @@ export function createServer(ipc: IpcClient) {
               type: 'string',
               description: 'log / estimate: when it was EATEN, ISO 8601 or local HH:MM (a time ahead of now = last night). The food day rolls over at 04:00.',
             },
-            reason: { type: 'string', description: 'estimate: why it changed (e.g. "he said soto, not gulai"); void: why it is removed' },
+            reason: { type: 'string', description: 'estimate: why it changed (e.g. "he said soto, not gulai"); void: why it is removed; weighin_set (include:false): why it is excluded' },
             date: { type: 'string', description: 'day / day_complete: YYYY-MM-DD food day (default today)' },
             complete: { type: 'boolean', description: 'day_complete: true = fully logged (default), false = missing meals, exclude from the baseline' },
             slug: { type: 'string', description: 'preset_save / preset_delete: preset id (derived from name when omitted)' },
             name: { type: 'string', description: 'preset_save: display name, e.g. "Soto betawi (mom\'s, with sengkel)"' },
             aliases: { type: 'array', items: { type: 'string' }, description: 'preset_save: words he uses for it' },
             accept: { type: 'boolean', description: 'baseline: true = set the suggested target as THE kcal budget (only after he agrees)' },
+            include: { type: 'boolean', description: 'weighin_set: true = count this reading in the trend, false = exclude it' },
+            measured_at: { type: 'string', description: 'weighin_set: ISO time of the weigh-in (nearest within 3 min), e.g. from body.weighin meta measured_at' },
+            uuid: { type: 'string', description: 'weighin_set: a sample uuid (from weighins) instead of measured_at' },
+            days: { type: 'number', description: 'weighins: how many days back (default 14)' },
             target_kcal: { type: 'number', description: 'baseline: set an explicit kcal budget instead of the suggestion' },
           },
           required: ['action'],

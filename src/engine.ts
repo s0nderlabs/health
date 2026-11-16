@@ -280,6 +280,8 @@ export class Engine {
       'meal.amended': 48,
       // A budget alert a day late is history, not an alert.
       'money.notif': 24,
+      // Yesterday's weigh-in is stale news once today's exists.
+      'body.weighin': 20,
     })
   }
 
@@ -325,11 +327,14 @@ export class Engine {
    *  loop-closer or a meal estimate. Quiet-hours piercing is declared per
    *  class in QUIET_PIERCING (types.ts). */
   actionEvent(
-    cls: 'ride.landed' | 'lift.landed' | 'meal.logged' | 'meal.amended' | 'money.notif',
+    cls: 'ride.landed' | 'lift.landed' | 'meal.logged' | 'meal.amended' | 'money.notif' | 'body.weighin',
     dedupeKey: string,
     payload: { content: string; meta: Record<string, string> },
   ): boolean {
-    return this.emit(cls, 'notable', dedupeKey, payload, { bypassCooldown: true })
+    // A weigh-in is informational (it never asks the session to act and
+    // never pierces quiet hours: a 04:30 reading waits for the morning).
+    const priority = cls === 'body.weighin' ? 'info' : 'notable'
+    return this.emit(cls, priority, dedupeKey, payload, { bypassCooldown: true })
   }
 
   /** Entry point for the live HR state machine (pre-throttled per-session). */

@@ -43,13 +43,110 @@ export interface FoodDeps {
   getMeta: (k: string) => string | null
   setMeta: (k: string, v: string) => void
   /** Queue a channel event; returns whether it surfaced. */
-  emit: (cls: 'meal.logged' | 'meal.amended', key: string, payload: { content: string; meta: Record<string, string> }) => boolean
+  emit: (
+    cls: 'meal.logged' | 'meal.amended' | 'body.weighin',
+    key: string,
+    payload: { content: string; meta: Record<string, string> },
+  ) => boolean
   /** Push a message to every connected phone. */
   broadcast: (msg: Record<string, unknown>) => void
   /** WHOOP cycle energy by food day, for the baseline cross-check. */
   whoopKcalSince?: (sinceIso: string) => Array<{ start: string; kcal: number }>
   now?: () => number
   log?: (msg: string) => void
+}
+
+/** Exclusion reasons (stored in body_samples.excluded). */
+const EXCL_TEST = 'test: '
+const EXCL_NOT_MORNING = 'not a morning reading'
+const EXCL_REPEAT = 'repeat: a morning reading already counts today'
+const EXCL_OUTLIER = 'possible other person'
+/** The outlier rule: active from 3 included readings; a reading further from
+ *  the latest included one than 2.5 kg + 0.3 kg per day elapsed (capped at
+ *  5 kg) is probably someone else on the scale (no Visitor mode). */
+const OUTLIER_MIN_N = 3
+const OUTLIER_BASE_KG = 2.5
+const OUTLIER_PER_DAY_KG = 0.3
+const OUTLIER_CAP_KG = 5
+
+export function outlierLimitKg(daysGap: number): number {
+  return Math.min(OUTLIER_BASE_KG + OUTLIER_PER_DAY_KG * Math.max(0, daysGap), OUTLIER_CAP_KG)
+}
+
+/** A real shift, not a visitor: an earlier outlier on ANOTHER day within
+ *  the last 3 days that agrees with this one (within 1 kg). */
+const SHIFT_AGREE_KG = 1
+const SHIFT_LOOKBACK_MS = 3 * 86_400_000
+
+function isOutlier(book: MealBook, m: { ts: string; value?: number }): boolean {
+  if (m.value == null) return false
+  if (book.includedMassCountBefore(m.ts) < OUTLIER_MIN_N) return false
+  const prev = book.previousMass(m.ts)
+  if (!prev) return false
+  const days = (Date.parse(m.ts) - Date.parse(prev.ts)) / 86_400_000
+  if (Math.abs(m.value - prev.value) <= outlierLimitKg(days)) return false
+  const ms = Date.parse(m.ts)
+  const day = foodDay(ms, 0)
+  const agree = book
+    .outlierMassBetween(new Date(ms - SHIFT_LOOKBACK_MS).toISOString(), m.ts)
+    .some((o) => foodDay(Date.parse(o.ts), 0) !== day && Math.abs(o.value - m.value!) <= SHIFT_AGREE_KG)
+  return !agree
+}
+/** The morning window, local minutes: 03:30 to 09:00. */
+const MORNING_FROM_MIN = 3 * 60 + 30
+const MORNING_TO_MIN = 9 * 60
+
+const MANUAL_INCLUDE_META = 'weighin_manual_include'
+function dayStartIso(ms: number): string {
+  const d = new Date(ms)
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).toISOString()
+}
+export function inMorningWindow(ms: number): boolean {
+  const d = new Date(ms)
+  const min = d.getHours() * 60 + d.getMinutes()
+  return min >= MORNING_FROM_MIN && min < MORNING_TO_MIN
+}
+
+const WEIGHIN_RECENT_MS = 36 * 3_600_000
+const WEIGHIN_MAX_PER_BATCH = 3
+
+/** "Weigh-in 05:02 WIB: 83.1 kg, 23.6% fat (Xiaomi Home). Previous: 83.6 kg
+ *  on Sun 16 Nov 13:56 (-0.5 kg)." Minimal by design: the energy-balance
+ *  release upgrades the same class with the 7-day trend and confounders. */
+export function weighinEvent(
+  m: { ts: string; value: number; source: string | null },
+  fat: { value: number } | null,
+  prev: { ts: string; value: number } | null,
+  excluded: string | null = null,
+): { content: string; meta: Record<string, string> } {
+  const t = new Date(m.ts)
+  // The zone label is only claimed when true (the Mac on WIB, UTC+7).
+  const hhmm = `${t.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}${t.getTimezoneOffset() === -420 ? '' : ' local'}`
+  const kg = m.value.toFixed(1)
+  const fatPct = fat ? (fat.value * 100).toFixed(1) : null
+  const src = m.source ?? 'unknown source'
+  let content = `Weigh-in ${hhmm.endsWith(' local') ? hhmm : `${hhmm} WIB`}: ${kg} kg${fatPct ? `, ${fatPct}% fat` : ''} (${src}).`
+  if (excluded) {
+    content += excluded.startsWith(EXCL_TEST)
+      ? ` Test reading, excluded (${excluded.slice(EXCL_TEST.length)}).`
+      : excluded === EXCL_NOT_MORNING
+        ? ' Not a morning reading, excluded from the trend.'
+        : excluded === EXCL_REPEAT
+          ? ' Repeat reading this morning, excluded from the trend (the first one counts).'
+          : excluded === EXCL_OUTLIER
+            ? ` ${prev ? `${Math.abs(m.value - prev.value).toFixed(1)} kg off your last reading, likely` : 'Likely'} someone else; excluded. Reply if it was you.`
+            : ` Excluded from the trend (${excluded}).`
+  } else if (prev) {
+    const d = m.value - prev.value
+    const when = new Date(prev.ts).toLocaleString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+    content += ` Previous: ${prev.value.toFixed(1)} kg on ${when} (${d >= 0 ? '+' : '-'}${Math.abs(d).toFixed(1)} kg).`
+  } else {
+    content += ' First reading on record.'
+  }
+  const meta: Record<string, string> = { kg, measured_at: m.ts, source: src }
+  if (fatPct) meta.fat_pct = fatPct
+  if (excluded) meta.excluded = excluded
+  return { content, meta }
 }
 
 const fmtK = (n: number | null | undefined) => (n == null ? '?' : Math.round(n).toLocaleString('en-US'))
@@ -494,10 +591,141 @@ export class FoodService {
       ? rawDeleted.filter((u): u is string => typeof u === 'string' && u.length >= 8 && u.length <= 64)
       : []
     const nowIso = new Date(now).toISOString()
+    const known = this.book.unknownBodyUuids(clean.map((s) => s.uuid))
+    const freshRows = clean.filter((s) => known.has(s.uuid))
     const added = this.book.upsertBodySamples(clean, nowIso)
+    // Deletions FIRST: a reading he removed in Apple Health must not make his
+    // re-weigh in the same batch a "repeat" (or an outlier reference).
     const removed = this.book.deleteBodySamples(deleted)
+    this.reclassifyWeighins()
     if (added > 0 || removed > 0) this.changed(this.today())
+    this.announceWeighins(freshRows, now)
     return { received: clean.length, added, deleted: removed }
+  }
+
+  private manualIncludes(): Set<string> {
+    try {
+      const v = JSON.parse(this.deps.getMeta(MANUAL_INCLUDE_META) ?? '[]')
+      return new Set(Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [])
+    } catch {
+      return new Set()
+    }
+  }
+
+  /** Recent weigh-ins (excluded ones too) for review: one row per weigh-in. */
+  weighins(days = 14): Array<{ measured_at: string; kg: number; fat_pct: number | null; source: string | null; excluded: string | null; uuids: string[] }> {
+    const since = new Date(this.now() - Math.max(1, Math.min(days, 365)) * 86_400_000).toISOString()
+    const rows = this.book.bodySamplesAll(since)
+    const out: Array<{ measured_at: string; kg: number; fat_pct: number | null; source: string | null; excluded: string | null; uuids: string[] }> = []
+    for (const m of rows.filter((r) => r.kind === 'mass')) {
+      const fat = rows.find((r) => r.kind === 'fat' && r.ts === m.ts && r.source === m.source) ?? null
+      out.push({
+        measured_at: m.ts,
+        kg: m.value,
+        fat_pct: fat ? Math.round(fat.value * 1000) / 10 : null,
+        source: m.source,
+        excluded: m.excluded,
+        uuids: fat ? [m.uuid, fat.uuid] : [m.uuid],
+      })
+    }
+    return out
+  }
+
+  /** Manual include / exclude of ONE weigh-in (mass + its fat pair), found
+   *  by uuid or by measured time (nearest within 3 min). include:true clears
+   *  the exclusion; include:false sets `reason` (default "excluded by hand").
+   *  A manual verdict is never overwritten by a resend. */
+  setWeighin(p: { uuid?: unknown; measured_at?: unknown; include?: unknown; reason?: unknown }): {
+    changed: number
+    weighin: { measured_at: string; kg: number | null; excluded: string | null } | null
+  } {
+    if (typeof p.include !== 'boolean') throw new BadRequest('include must be true or false')
+    let pair: Array<{ uuid: string; ts: string; kind: string; value: number; source: string | null }> = []
+    if (typeof p.uuid === 'string' && p.uuid.length >= 8) {
+      const row = this.book.bodySampleByUuid(p.uuid)
+      if (row) pair = this.book.weighinNear(row.ts, 0)
+    } else if (typeof p.measured_at === 'string' && Number.isFinite(Date.parse(p.measured_at))) {
+      pair = this.book.weighinNear(new Date(Date.parse(p.measured_at)).toISOString(), 3 * 60_000)
+    } else {
+      throw new BadRequest('give uuid or measured_at (ISO time of the weigh-in)')
+    }
+    if (!pair.length) return { changed: 0, weighin: null }
+    const reason = p.include ? null : cleanText(p.reason, 120, false) || 'excluded by hand'
+    const changed = this.book.setBodyExcluded(pair.map((r) => r.uuid), reason)
+    // Remember manual INCLUDES, so the re-classification pass never excludes
+    // them again (an exclusion carries its own reason and needs no memory).
+    const manual = this.manualIncludes()
+    for (const r of pair) {
+      if (p.include) manual.add(r.uuid)
+      else manual.delete(r.uuid)
+    }
+    this.deps.setMeta(MANUAL_INCLUDE_META, JSON.stringify([...manual].slice(-500)))
+    this.changed(this.today())
+    const mass = pair.find((r) => r.kind === 'mass') ?? null
+    return { changed, weighin: { measured_at: pair[0].ts, kg: mass?.value ?? null, excluded: reason } }
+  }
+
+  /** Exclusion rules, applied to every reading that currently COUNTS, in
+   *  time order (stored ones too: rows synced before the rules existed, or
+   *  before weighins_from was set). Manual includes are never re-excluded;
+   *  an exclusion is never lifted automatically. In order:
+   *  1. date rule: before food.weighins_from = a TEST reading;
+   *  2. window: measured outside 03:30-09:00 local = not a morning reading;
+   *  3. outlier: far from the last counted reading = possible other person
+   *     (from 3 earlier counted readings; two agreeing days = a real shift);
+   *  4. repeat: a morning reading already counts for that day (the FIRST one).
+   *  A fat sample shares its mass sample's verdict (same source + instant).
+   *  The energy-balance release refines this with the meal-logged signal. */
+  reclassifyWeighins(): void {
+    const from = this.deps.getConfig().weighins_from ?? null
+    const validFrom = isDayKey(from) ? from : null
+    const manual = this.manualIncludes()
+    // Every reading that currently COUNTS, oldest first (bounded to ~13
+    // months), minus the ones he included by hand: stored rows from before the
+    // rules existed, or before weighins_from was set, get classified too.
+    const counting = this.book.includedSamplesSince(new Date(this.now() - 400 * 86_400_000).toISOString())
+    const masses = counting.filter((s) => s.kind === 'mass' && !manual.has(s.uuid))
+    for (const m of masses) {
+      const ms = Date.parse(m.ts)
+      const day = foodDay(ms, 0)
+      let reason: string | null = null
+      if (validFrom && day < validFrom) {
+        const label = new Date(`${validFrom}T12:00:00`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })
+        reason = `${EXCL_TEST}before the first fasted weigh-in on ${label}`
+      } else if (!inMorningWindow(ms)) {
+        reason = EXCL_NOT_MORNING
+      } else if (isOutlier(this.book, m)) {
+        // BEFORE the repeat rule: a friend stepping on first must never
+        // count and push his real reading out as the "repeat".
+        reason = EXCL_OUTLIER
+      } else if (this.book.includedMassOnDayBefore(dayStartIso(ms), m.ts)) {
+        reason = EXCL_REPEAT
+      }
+      if (!reason) continue
+      const pair = counting.filter((s) => s.ts === m.ts && s.source === m.source).map((s) => s.uuid)
+      this.book.setBodyExcluded(pair, reason)
+    }
+  }
+
+  /** One body.weighin event per NEW weigh-in: a mass sample, merged with the
+   *  fat sample of the same source and instant. Only recent ones (a first
+   *  sync can carry years of history: those are archived, never announced),
+   *  at most 3 per batch. */
+  private announceWeighins(
+    fresh: Array<{ uuid: string; ts: string; kind: 'mass' | 'fat'; value: number; source: string | null }>,
+    now: number,
+  ): void {
+    const masses = fresh
+      .filter((s) => s.kind === 'mass' && now - Date.parse(s.ts) <= WEIGHIN_RECENT_MS)
+      .sort((a, b) => a.ts.localeCompare(b.ts))
+      .slice(-WEIGHIN_MAX_PER_BATCH)
+    for (const m of masses) {
+      const fat = fresh.find((s) => s.kind === 'fat' && s.ts === m.ts && s.source === m.source) ?? null
+      const excluded = this.book.bodyExcluded(m.uuid)
+      // An outlier still names how far off it is (vs the last included reading).
+      const prev = !excluded || excluded === EXCL_OUTLIER ? this.book.previousMass(m.ts) : null
+      this.deps.emit('body.weighin', `body.weighin:${m.source ?? '?'}:${m.ts}`, weighinEvent(m, fat, prev, excluded))
+    }
   }
 
   // ── HTTP (mounted on the live listener, behind its token) ───────

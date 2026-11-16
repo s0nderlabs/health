@@ -4,6 +4,7 @@
 // interpretation happens daemon-side (and in Claude's session).
 
 import SwiftUI
+import UserNotifications
 
 @main
 struct HealthRelayApp: App {
@@ -37,6 +38,7 @@ struct HealthRelayApp: App {
                         // Re-armed every open: a fresh install carries a
                         // fresh death date and the old pings must follow it.
                         Signing.scheduleExpiryNotifications()
+                        Signing.clearResolvedDaemonAlerts()
                     }
                 }
         }
@@ -55,7 +57,14 @@ struct HealthRelayApp: App {
         RestNotificationDelegate.shared.install()
         relay.onPlanUpdated = { plan.refresh() }
         relay.onMealsUpdated = { food.refresh() }
-        relay.onSocketUp = { resyncOutbound() }
+        // A reconnect also re-arms the sideload pings: the relaunch after an
+        // auto re-sign install may never reach the foreground, and the old
+        // pending pings would then announce a death that is no longer coming.
+        relay.onSocketUp = {
+            resyncOutbound()
+            Signing.scheduleExpiryNotifications()
+            Signing.clearResolvedDaemonAlerts()
+        }
         relay.onSocketDown = {
             steps.releaseInFlight()
             weight.releaseInFlight()
@@ -63,6 +72,11 @@ struct HealthRelayApp: App {
         #if DEBUG
         if ProcessInfo.processInfo.environment["HR_DEMO"] != nil {
             DemoDriver.shared.drive(relay: relay, plan: plan)
+            // HR_DEMO_NOTIFY=loud|critical: a daemon notify through the real
+            // handler, so a screenshot shows the actual banner.
+            if let level = ProcessInfo.processInfo.environment["HR_DEMO_NOTIFY"] {
+                DemoNotify.fire(level: level, relay: relay)
+            }
             if let mode = ProcessInfo.processInfo.environment["HR_DEMO_FOOD"] {
                 food.day = DemoFood.day(mode)
                 if ProcessInfo.processInfo.environment["HR_DEMO_FOOD_QUEUED"] != nil {
@@ -204,6 +218,38 @@ struct RestPill: View {
 }
 
 #if DEBUG
+/// HR_DEMO=1 HR_DEMO_NOTIFY=loud|critical: feeds a sample daemon notify (the
+/// signing clock at 20h left) into RelayController.handleNotify, the same
+/// path a socket "notify" takes. This demo path, and ONLY this one, asks for
+/// notification permission when it is still undecided (the simulator starts
+/// undecided); the real handler never prompts.
+enum DemoNotify {
+    static func fire(level: String, relay: RelayController) {
+        let payload: [String: Any] = [
+            "type": "notify",
+            "id": "demo-resign",
+            "title": "Phone app signature: 20h left",
+            "body": "Auto re-sign hasn't renewed the health app yet. Be home on Wi-Fi with the phone unlocked for a minute (or open the app) so it can install.",
+            "level": level,
+        ]
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { settings in
+            let post = {
+                // Give the first frame a moment so the banner lands on a
+                // drawn app, not the launch screen.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    relay.handleNotify(payload)
+                }
+            }
+            if settings.authorizationStatus == .notDetermined {
+                center.requestAuthorization(options: [.alert, .sound]) { _, _ in post() }
+            } else {
+                post()
+            }
+        }
+    }
+}
+
 /// Simulator-only demo state so the UI can be seen (and screenshotted) with
 /// realistic content before any daemon or band is in reach. HR_DEMO=1.
 final class DemoDriver {

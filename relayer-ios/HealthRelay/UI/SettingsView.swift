@@ -104,7 +104,7 @@ struct SettingsView: View {
                 } footer: {
                     Text(Signing.expiresAt == nil
                         ? "Simulator or store builds carry no provisioning profile, so there is nothing to count down."
-                        : "A free-team signature lives seven days from when Xcode minted it, then iOS refuses to launch the app. You get a notification the day before and three hours out. Reinstall from Xcode (scripts/build-phone.sh install, cable in) to reset the clock.")
+                        : "A free-team signature lives seven days, then iOS refuses to launch the app. Auto re-sign renews it when the phone is unlocked at home on Wi-Fi; if it has not by the last day, you get a phone and Mac notification. Manual fallback: scripts/build-phone.sh install.")
                 }
 
                 Section {

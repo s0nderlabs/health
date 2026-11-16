@@ -333,3 +333,126 @@ export function resignAlerts(
   }
   return out
 }
+
+// ── Loud pushes (phone + Mac notifications) ───────────────────────
+//
+// An ADDITIONAL delivery path on top of the system.health events, which stay
+// exactly as they are: only the alerts that must reach him away from a CC
+// session become a notification. Loud = (a) the clock tiers urgent (<=24h),
+// critical (<=8h) or expired, or (b) a hard re-sign failure episode while
+// 24h or less are left. The 48h tier, a hard episode with more than 24h left,
+// and every other re-sign alert stay channel-only. "No confirmed success this
+// window" needs no extra input: a confirmed success moves signed_until about
+// 168h out, so no clock tier fires after one.
+
+export interface SigningPush {
+  /** The notification identifier (a resend REPLACES, never stacks). */
+  id: string
+  title: string
+  body: string
+  level: 'loud' | 'critical'
+}
+
+/** Max phone-notification body. */
+export const PUSH_BODY_MAX = 180
+
+/** Phone-length fix per hard class (RESIGN_FIX, shortened). */
+export const RESIGN_FIX_SHORT: Record<string, string> = {
+  account_broken: 'At the Mac: Xcode > Settings > Accounts, sign in, then resign kick --force.',
+  new_certificate: 'At the Mac: resign kick --force, then trust the developer in VPN & Device Management.',
+  untrusted_developer: 'On the phone: trust the developer in VPN & Device Management, open HealthRelay.',
+  profile_not_fresh: 'At the Mac: Xcode reused a cached profile, run resign kick --force --build-only.',
+  device_not_in_profile: 'At the Mac: build once from Xcode with the phone attached, then resign kick --force.',
+  keychain_prompt: 'At the Mac: run resign kick --force and answer Always Allow.',
+  prompt_hang: 'At the Mac: run resign kick --force and answer any prompt.',
+  xcode_setup: 'At the Mac: open Xcode once, then resign kick --force.',
+  device_setup: 'Check Developer Mode and pairing, then resign kick --force.',
+  free_tier_limit: 'Free-team limit hit: remove another sideloaded app, then resign kick --force.',
+  snapshot_mismatch: 'At the Mac: the build snapshot does not match, run resign seed.',
+  install_did_not_take: 'Open HealthRelay once so it reports the new signature.',
+  devicectl_unreachable: 'At the Mac: restart Xcode, then resign kick --force.',
+  lockstate_unparsed: 'At the Mac: run resign plan --probe-lock and read the log.',
+  install_failed: 'At the Mac: scripts/build-phone.sh install.',
+  build_incomplete: 'At the Mac: read the run log, then resign kick --force.',
+  run_timeout: 'At the Mac: read the run log, a step keeps hanging.',
+  other: 'At the Mac: read the re-sign run log.',
+}
+
+const UNLOCK_ACTION = 'Unlock your phone at home on Wi-Fi for a minute so it re-signs.'
+const PENDING_ACTION = 'Open HealthRelay once so it reports the new signature.'
+const REINSTALL_ACTION = 'At the Mac: scripts/build-phone.sh install, phone unlocked on Wi-Fi.'
+
+/** The expiry as local HH:MM, labelled WIB when the clock runs on WIB. */
+export function pushClock(iso: string | null | undefined, offsetMin?: number): string | null {
+  const hm = localHm(iso)
+  if (!hm) return null
+  const off = offsetMin ?? new Date(Date.parse(iso as string)).getTimezoneOffset()
+  return off === -420 ? `${hm} WIB` : hm
+}
+
+/** Phone-length, emdash-free, capped at PUSH_BODY_MAX. */
+function pushBody(s: string): string {
+  const t = clean(s).replace(/\s+/g, ' ').trim()
+  return t.length <= PUSH_BODY_MAX ? t : `${t.slice(0, PUSH_BODY_MAX - 3).trimEnd()}...`
+}
+
+function leftPhrase(left: number, clock: string | null): string {
+  const at = clock ? ` (${clock})` : ''
+  return left <= 0 ? `expired ${Math.abs(left)}h ago${at}` : `${left}h left${at}`
+}
+
+/** The push id of a clock tier: scoped to the SIGNATURE, never the calendar
+ *  day, so an unchanged tier never re-posts at local midnight (a middle-of-
+ *  the-night ding with no new information). Each tier pushes once per
+ *  signature; a reinstall (new signed_until) starts a fresh set. The phone
+ *  replaces an older phone-sign-* banner on escalation (RelayController). */
+export function clockPushId(left: number, signedUntil: string): string {
+  return `phone-sign-${clockTier(left)}:${signedUntil}`
+}
+
+/** The subset of the alerts the watchdog is about to emit that also goes out
+ *  as a notification, deduped by id. Pure: alerts in, pushes out. The clock
+ *  tiers are classified from hours left (the legacy nag's unowned key covers
+ *  every positive tier with one daily key), and their id is clockPushId, so
+ *  an urgent -> critical escalation is a NEW notification while a tier that
+ *  merely crosses midnight is not. Nothing pushes once the signature has
+ *  been dead for SIGNING_EXPIRED_NAG_DAYS (the clock tiers already stop
+ *  there; a hard episode would otherwise outlive the 10-day push ledgers and
+ *  re-post on the Mac every 10 days forever). */
+export function loudSigningPush(
+  alerts: ReadonlyArray<{ key: string; problem: string }>,
+  signedUntil: string | null | undefined,
+  now = Date.now(),
+): SigningPush[] {
+  const left = signedHoursLeft(signedUntil, now)
+  if (left == null || left > TIER_URGENT_H) return []
+  if (left <= -SIGNING_EXPIRED_NAG_DAYS * 24) return []
+  const clock = pushClock(signedUntil)
+  const level: SigningPush['level'] = left <= TIER_CRITICAL_H ? 'critical' : 'loud'
+  const out = new Map<string, SigningPush>()
+  for (const a of alerts) {
+    if (a.key.startsWith('phone-sign-')) {
+      const action = a.problem.includes(PENDING_ADVICE)
+        ? PENDING_ACTION
+        : a.problem.includes(REINSTALL)
+          ? REINSTALL_ACTION
+          : UNLOCK_ACTION
+      const lead =
+        left <= 0
+          ? `Signature expired ${Math.abs(left)}h ago${clock ? ` (${clock})` : ''}, the phone leg is dead.`
+          : `Signature expires in ${left}h${clock ? ` (${clock})` : ''}.`
+      const id = clockPushId(left, signedUntil as string)
+      out.set(id, { id, title: 'Health app signature', body: pushBody(`${lead} ${action}`), level })
+    } else if (a.key.startsWith('resign-fail:')) {
+      const cls = a.key.split(':')[1] ?? 'other'
+      const fix = RESIGN_FIX_SHORT[cls] ?? RESIGN_FIX_SHORT.other
+      out.set(a.key, {
+        id: a.key,
+        title: 'Health app: re-sign failed',
+        body: pushBody(`Re-sign failed (${cls}), ${leftPhrase(left, clock)}. ${fix}`),
+        level,
+      })
+    }
+  }
+  return [...out.values()]
+}

@@ -194,6 +194,7 @@ export type EventClass =
   | 'meal.logged' // the user logged a meal on the phone: estimate it, write back via health__meal
   | 'meal.amended' // the user sent a correction line for a logged meal from the phone
   | 'money.notif' // a bank / wallet notification was forwarded from the phone: run the budget flow
+  | 'body.weighin' // a scale weigh-in reached Apple Health (mass + fat merged): informational
 
 export type EventPriority = 'info' | 'notable' | 'alert'
 
@@ -283,6 +284,10 @@ export interface HealthConfig {
     protein_target_g: number
     rollover_hour: number
     deficit_kcal: number // target = maintenance - this, once the baseline is ready
+    // Local date (YYYY-MM-DD) of the first real (fasted) weigh-in: readings
+    // dated before it are TEST readings, auto-excluded from the baseline and
+    // announced as such. null = no rule.
+    weighins_from: string | null
   }
   // Auto re-sign of the sideloaded phone app (src/resign/, scripts/resign.ts).
   // Off by default; config_set refuses to enable it while system.health
@@ -317,6 +322,7 @@ export const DEFAULT_CONFIG: HealthConfig = {
     'meal.logged': true,
     'meal.amended': true,
     'money.notif': true,
+    'body.weighin': true,
   },
   thresholds: {
     strain_notable: 15,
@@ -352,6 +358,8 @@ export const DEFAULT_CONFIG: HealthConfig = {
     'meal.amended': 0,
     // One per forwarded transaction, deduped upstream; never throttled.
     'money.notif': 0,
+    // One per weigh-in, deduped by source + instant; never throttled.
+    'body.weighin': 0,
   },
   poll_interval_minutes: 5,
   webhook: {
@@ -375,6 +383,7 @@ export const DEFAULT_CONFIG: HealthConfig = {
     protein_target_g: 165,
     rollover_hour: 4,
     deficit_kcal: 400,
+    weighins_from: null,
   },
   resign: { ...DEFAULT_RESIGN },
 }
