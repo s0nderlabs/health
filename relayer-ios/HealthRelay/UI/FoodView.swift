@@ -79,13 +79,16 @@ struct FoodView: View {
             }
         }
         .sheet(item: $composing) { item in
-            ComposeSheet(image: item.image) { note in
+            ComposeSheet(image: item.image, demoNote: Demo.active ? ProcessInfo.processInfo.environment["HR_DEMO_FOOD_NOTE"] : nil) { note in
                 store.log(photo: item.image, note: note)
                 composing = nil
             } cancel: {
                 composing = nil
             }
             .presentationDetents([.large])
+            // A stray swipe must not throw away the photo and note: Cancel
+            // is the explicit way out.
+            .interactiveDismissDisabled()
         }
         .sheet(item: $detail) { meal in
             MealDetail(meal: meal, store: store)
@@ -545,12 +548,17 @@ struct ComposeItem: Identifiable {
 /// latte"), Send. The line is what makes an ambiguous plate estimable.
 struct ComposeSheet: View {
     let image: UIImage
+    /// Mock / UI-test only: a pre-typed note with the keyboard up.
+    var demoNote: String? = nil
     var send: (String?) -> Void
     var cancel: () -> Void
     @State private var note = ""
     @FocusState private var focused: Bool
 
     var body: some View {
+        // A ScrollView so the sheet can never be taller than the space above
+        // the keyboard (the header used to be pushed under the top inset).
+        ScrollView {
         VStack(spacing: 16) {
             HStack {
                 Button("Cancel", action: cancel)
@@ -560,6 +568,7 @@ struct ComposeSheet: View {
                 Text("New meal")
                     .font(Theme.rounded(16, .semibold))
                     .foregroundStyle(Theme.textPrimary)
+                    .accessibilityIdentifier("compose.title")
                 Spacer()
                 Button {
                     send(note)
@@ -574,13 +583,11 @@ struct ComposeSheet: View {
             }
             .padding(.top, 18)
 
-            Image(uiImage: image)
-                .resizable()
-                .scaledToFill()
-                .frame(maxWidth: .infinity)
-                .frame(height: 360)
-                .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 1))
+            // Shrinks while typing so the field and the hint stay above the
+            // keyboard.
+            PhotoBox(image: image)
+                .frame(height: focused ? 150 : 360)
+                .accessibilityIdentifier("compose.photo")
 
             TextField("", text: $note, prompt: Text("Add a note: dirty latte, half portion…").foregroundStyle(Theme.textTertiary), axis: .vertical)
                 .font(.system(size: 15.5))
@@ -590,17 +597,32 @@ struct ComposeSheet: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 13)
                 .glassCard(cornerRadius: 18)
+                .accessibilityIdentifier("compose.note")
 
             Text("Claude estimates it in your session and the number lands here.")
                 .font(.system(size: 12))
                 .foregroundStyle(Theme.textTertiary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 2)
-            Spacer()
+                .accessibilityIdentifier("compose.hint")
         }
         .padding(.horizontal, 20)
+        .padding(.bottom, 16)
+        // On the whole stack, so the field and hint move WITH the photo.
+        .animation(.easeOut(duration: 0.25), value: focused)
+        }
+        // Always bounces, so a downward drag dismisses the keyboard even when
+        // the content fits.
+        .scrollDismissesKeyboard(.interactively)
         .background(AmbientBackground())
         .preferredColorScheme(.dark)
+        .onAppear {
+            if let n = demoNote {
+                note = n
+                // A sheet's field cannot take focus until presentation settles.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { focused = true }
+            }
+        }
     }
 }
 
@@ -778,21 +800,33 @@ struct FullPhoto: View {
     @State private var image: UIImage?
 
     var body: some View {
-        // The image fills a fixed frame and is CLIPPED to it: scaledToFill
-        // alone would spill past the card over the title below.
-        Color.white.opacity(0.04)
-            .overlay {
-                if let image = image {
-                    Image(uiImage: image).resizable().scaledToFill()
-                }
-            }
-            .clipped()
-            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 1))
+        PhotoBox(image: image)
         .onAppear {
             guard let path = path else { return }
             store.image(for: path) { image = $0 }
         }
+    }
+}
+
+/// A photo that FILLS whatever box its parent gives it and is clipped to it.
+/// Never put scaledToFill on an Image inside a flexible frame: a photo wider
+/// than the box reports its full fill width, the parent grows past the screen
+/// and gets centered (Nov 16 2026: the compose sheet's note field, Cancel and
+/// Send went off screen). The overflow is clipped for drawing AND hit testing,
+/// so it can never swallow taps meant for the views above it.
+struct PhotoBox: View {
+    let image: UIImage?
+
+    var body: some View {
+        Color.white.opacity(0.04)
+            .overlay {
+                if let image = image {
+                    Image(uiImage: image).resizable().scaledToFill().allowsHitTesting(false)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 1))
     }
 }
 

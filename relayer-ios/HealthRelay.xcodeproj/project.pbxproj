@@ -32,6 +32,7 @@
 		ABC8D64C5466F7F9F993AF41 /* LiveActivityController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54A8187D9DBB0F6A24ECF7FE /* LiveActivityController.swift */; };
 		AE5A906D6DC070E3693F3897 /* RestChime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D4B7FD975836D714362DE5D /* RestChime.swift */; };
 		B6FE2305C8D8850525F16367 /* TailnetTunnel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0B118E569EC868CBBAF77A4 /* TailnetTunnel.swift */; };
+		B7E528A9D02835BAF5A02C53 /* ComposeSheetLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51C8A73AFA15B5E741B4AB4B /* ComposeSheetLayoutTests.swift */; };
 		BB140371ECD3394B5878D0A9 /* StepsCourier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30521B200C323A43A1C00934 /* StepsCourier.swift */; };
 		C1FDDA7C59C5AB9579A1DB2C /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F51C6B23C65BB01F03022C0C /* SettingsView.swift */; };
 		D2B5E64BDA2FFD33874065A6 /* SessionProgress.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6B8F07C72771C974D660880 /* SessionProgress.swift */; };
@@ -50,6 +51,13 @@
 			proxyType = 1;
 			remoteGlobalIDString = 50695AB7DD39C8E55C1A0573;
 			remoteInfo = HealthRelayWidgets;
+		};
+		B7DA67147BAB49AE1C596252 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 7DEA56ADCD588FA18D53E0DB /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A35B827E6CAEE86538D27BD2;
+			remoteInfo = HealthRelay;
 		};
 /* End PBXContainerItemProxy section */
 
@@ -83,6 +91,7 @@
 		3F75F9042D1CE69087E1D44F /* HealthRelayWidgets.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = HealthRelayWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		4225180A8C9439EE70560C8C /* Signing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Signing.swift; sourceTree = "<group>"; };
 		48C4EF4AB3A7E881A50E208A /* Settings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Settings.swift; sourceTree = "<group>"; };
+		51C8A73AFA15B5E741B4AB4B /* ComposeSheetLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposeSheetLayoutTests.swift; sourceTree = "<group>"; };
 		54A8187D9DBB0F6A24ECF7FE /* LiveActivityController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveActivityController.swift; sourceTree = "<group>"; };
 		7022DF676F936DD86C9FABAD /* FoodStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FoodStore.swift; sourceTree = "<group>"; };
 		7047A0E516BF3C61DDBEB905 /* PlanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanView.swift; sourceTree = "<group>"; };
@@ -96,6 +105,7 @@
 		B0B118E569EC868CBBAF77A4 /* TailnetTunnel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TailnetTunnel.swift; sourceTree = "<group>"; };
 		C29AC53190A143ED4368A8D4 /* HealthRelayWidgets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthRelayWidgets.swift; sourceTree = "<group>"; };
 		C442FDD2C035EFE5F8D0538B /* RouteStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteStore.swift; sourceTree = "<group>"; };
+		D12A901C97F9EE322B50EBBF /* HealthRelayUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = HealthRelayUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		DB37A401CD942EC5294C469F /* Quad100.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Quad100.swift; sourceTree = "<group>"; };
 		DF2D996A0FBD15E16A4F283A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		F25B0D85623B54927532F441 /* FoodView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FoodView.swift; sourceTree = "<group>"; };
@@ -106,6 +116,14 @@
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
+		086FCB67EA6E82CB371ECF0D /* HealthRelayUITests */ = {
+			isa = PBXGroup;
+			children = (
+				51C8A73AFA15B5E741B4AB4B /* ComposeSheetLayoutTests.swift */,
+			);
+			path = HealthRelayUITests;
+			sourceTree = "<group>";
+		};
 		0BC8C1F3BAA7725598C25348 /* HealthRelayWidgets */ = {
 			isa = PBXGroup;
 			children = (
@@ -138,6 +156,7 @@
 			isa = PBXGroup;
 			children = (
 				A4916F51A132071C8CA442D1 /* HealthRelay.app */,
+				D12A901C97F9EE322B50EBBF /* HealthRelayUITests.xctest */,
 				3F75F9042D1CE69087E1D44F /* HealthRelayWidgets.appex */,
 			);
 			name = Products;
@@ -196,6 +215,7 @@
 			isa = PBXGroup;
 			children = (
 				0CDDC9957290EB0E8FC256BC /* HealthRelay */,
+				086FCB67EA6E82CB371ECF0D /* HealthRelayUITests */,
 				0BC8C1F3BAA7725598C25348 /* HealthRelayWidgets */,
 				1A70B10C13FD62A0EEE9A7F3 /* Shared */,
 				18ADC39836549C4AC418E387 /* Products */,
@@ -263,6 +283,24 @@
 			productReference = 3F75F9042D1CE69087E1D44F /* HealthRelayWidgets.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		959A975B2E45869CCFAE5486 /* HealthRelayUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B27B71A15AD2325AE579B5F4 /* Build configuration list for PBXNativeTarget "HealthRelayUITests" */;
+			buildPhases = (
+				AA9072DACC0B08D226174D19 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				49B537C8FE22DB572CAEC62B /* PBXTargetDependency */,
+			);
+			name = HealthRelayUITests;
+			packageProductDependencies = (
+			);
+			productName = HealthRelayUITests;
+			productReference = D12A901C97F9EE322B50EBBF /* HealthRelayUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 		A35B827E6CAEE86538D27BD2 /* HealthRelay */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 92567DF3F95B54AC7BB078D3 /* Build configuration list for PBXNativeTarget "HealthRelay" */;
@@ -296,6 +334,11 @@
 						DevelopmentTeam = 4F2SRW2599;
 						ProvisioningStyle = Automatic;
 					};
+					959A975B2E45869CCFAE5486 = {
+						DevelopmentTeam = 4F2SRW2599;
+						ProvisioningStyle = Automatic;
+						TestTargetID = A35B827E6CAEE86538D27BD2;
+					};
 					A35B827E6CAEE86538D27BD2 = {
 						DevelopmentTeam = 4F2SRW2599;
 						ProvisioningStyle = Automatic;
@@ -317,6 +360,7 @@
 			projectRoot = "";
 			targets = (
 				A35B827E6CAEE86538D27BD2 /* HealthRelay */,
+				959A975B2E45869CCFAE5486 /* HealthRelayUITests */,
 				50695AB7DD39C8E55C1A0573 /* HealthRelayWidgets */,
 			);
 		};
@@ -343,6 +387,14 @@
 				775DC092F6664C2AB6082214 /* HealthRelayWidgets.swift in Sources */,
 				884152E5D1F5FCC35695A1CC /* PulseActivity.swift in Sources */,
 				24B428346BA6421CAF5F8E34 /* Theme.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AA9072DACC0B08D226174D19 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B7E528A9D02835BAF5A02C53 /* ComposeSheetLayoutTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -388,9 +440,54 @@
 			target = 50695AB7DD39C8E55C1A0573 /* HealthRelayWidgets */;
 			targetProxy = 480724F9960B935D09E03F69 /* PBXContainerItemProxy */;
 		};
+		49B537C8FE22DB572CAEC62B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A35B827E6CAEE86538D27BD2 /* HealthRelay */;
+			targetProxy = B7DA67147BAB49AE1C596252 /* PBXContainerItemProxy */;
+		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		34BEB1BB3F12D41F9DC0703B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 4F2SRW2599;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.s0nderlabs.HealthRelayUITests;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_TARGET_NAME = HealthRelay;
+			};
+			name = Release;
+		};
+		45B224A2B8277A72C96053D7 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 4F2SRW2599;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.s0nderlabs.HealthRelayUITests;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_TARGET_NAME = HealthRelay;
+			};
+			name = Debug;
+		};
 		506948C6A49693DA8AE39C97 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -398,7 +495,7 @@
 				CODE_SIGN_ENTITLEMENTS = HealthRelay/HealthRelay.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 6;
+				CURRENT_PROJECT_VERSION = 7;
 				DEVELOPMENT_TEAM = 4F2SRW2599;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				INFOPLIST_FILE = HealthRelay/Info.plist;
@@ -407,7 +504,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.17.1;
+				MARKETING_VERSION = 0.17.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.s0nderlabs.HealthRelay;
 				PRODUCT_NAME = HealthRelay;
 				SDKROOT = iphoneos;
@@ -420,7 +517,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 6;
+				CURRENT_PROJECT_VERSION = 7;
 				DEVELOPMENT_TEAM = 4F2SRW2599;
 				INFOPLIST_FILE = HealthRelayWidgets/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -428,7 +525,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.17.1;
+				MARKETING_VERSION = 0.17.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.s0nderlabs.HealthRelay.widgets;
 				PRODUCT_NAME = HealthRelayWidgets;
 				SDKROOT = iphoneos;
@@ -445,7 +542,7 @@
 				CODE_SIGN_ENTITLEMENTS = HealthRelay/HealthRelay.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 6;
+				CURRENT_PROJECT_VERSION = 7;
 				DEVELOPMENT_TEAM = 4F2SRW2599;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				INFOPLIST_FILE = HealthRelay/Info.plist;
@@ -454,7 +551,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.17.1;
+				MARKETING_VERSION = 0.17.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.s0nderlabs.HealthRelay;
 				PRODUCT_NAME = HealthRelay;
 				SDKROOT = iphoneos;
@@ -467,7 +564,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 6;
+				CURRENT_PROJECT_VERSION = 7;
 				DEVELOPMENT_TEAM = 4F2SRW2599;
 				INFOPLIST_FILE = HealthRelayWidgets/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -475,7 +572,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.17.1;
+				MARKETING_VERSION = 0.17.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.s0nderlabs.HealthRelay.widgets;
 				PRODUCT_NAME = HealthRelayWidgets;
 				SDKROOT = iphoneos;
@@ -612,6 +709,15 @@
 			buildConfigurations = (
 				7AB33B6591020A5CA7AB64A6 /* Debug */,
 				506948C6A49693DA8AE39C97 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		B27B71A15AD2325AE579B5F4 /* Build configuration list for PBXNativeTarget "HealthRelayUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				45B224A2B8277A72C96053D7 /* Debug */,
+				34BEB1BB3F12D41F9DC0703B /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

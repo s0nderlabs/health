@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.17.4 - 2026-11-16
+
+### Fixed
+
+- **The phone app's New meal sheet no longer runs off the screen.** A photo
+  wider than its box made the whole sheet wider than the screen, so the
+  note field's leading edge (and Cancel / Send) went off screen, the header
+  slid under the top inset and the hint hid under the keyboard. The photo
+  now fills a fixed, clipped box (a shared `PhotoBox`, also used by the meal
+  detail) whose overflow can never swallow taps. The sheet scrolls, the
+  photo shrinks while typing so the field and hint stay above the keyboard,
+  and a stray swipe can no longer discard the photo and note (Cancel is the
+  way out).
+
+### Added
+
+- `HealthRelayUITests`: a simulator-only XCUITest target pinning the New
+  meal sheet's geometry with landscape, portrait and very wide photos
+  (field inset, header and buttons on screen and tappable, field and hint
+  above the keyboard). `xcodebuild test -scheme HealthRelay` on a simulator.
+- App version 0.17.4 (7).
+
 ## 0.17.3 - 2026-11-16
 
 ### Fixed
