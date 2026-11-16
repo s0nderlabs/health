@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.17.3 - 2026-11-16
+
+### Fixed
+
+- **Bank-app marketing no longer lands in the money log as a payment.** A
+  Jenius promo ("Makin rajin bayar pakai Jenius, makin besar kesempatan
+  menangkan 10 iPhone...") came through as a payment with no amount,
+  because the loose word "bayar" was the only signal. Now a generic-rule
+  parse with no amount whose text describes no actual money event is
+  counted as noise. Real transfers, refunds and bills whose amount the
+  generic rule cannot read ("sebesar 150.000", "Pesanan kamu sudah
+  dibayar", "Tagihan ... jatuh tempo") are still stored, and declines are
+  always kept.
+- Bank promo words added: "menangkan", "kesempatan", "hadiah", "makin
+  rajin". They never override a completed money event ("Hadiah referral
+  10.000 sudah masuk ke saldo kamu" is still stored).
+
 ## 0.17.2 - 2026-11-16
 
 ### Fixed

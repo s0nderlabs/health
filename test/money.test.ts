@@ -408,3 +408,42 @@ describe('review regressions (v0.17.2)', () => {
     expect(parseMoney('Plasma One', null, 'From: 0x5e0...aCd1. Balance: $414.31.')).toMatchObject({ amount: null, currency: null, balance_after: 414.31 })
   })
 })
+
+describe('amountless generic guesses (v0.17.3)', () => {
+  // Real notif #3, Nov 16 2026: a Jenius promo that the lenient bank rule let through as a payment.
+  const TITLE = 'Bayar Apa Lagi, ya? 🤔'
+  const BODY = 'Makin rajin bayar pakai Jenius, makin besar kesempatan menangkan 10 iPhone Duo & 100 emas 👉'
+
+  test('the Jenius promo is noise, never a payment', () => {
+    expect(isNoise(TITLE, BODY, 'bank')).toBe(true)
+    const { money, events, count } = harness()
+    expect(money.ingest({ app: 'Jenius', title: TITLE, body: BODY }, 'app').status).toBe('ignored')
+    expect(count()).toBe(0)
+    expect(events).toHaveLength(0)
+  })
+
+  test('a generic parse with no amount is noise even without promo words; declines are kept', () => {
+    const { money, count } = harness()
+    expect(money.ingest({ app: 'Jago', title: 'Info', body: 'Pembayaran kamu sedang diproses' }, 'app')).toMatchObject({ status: 'ignored', reason: 'no amount' })
+    expect(count()).toBe(0)
+    expect(money.ingest({ app: 'Jago', title: 'Transaksi ditolak', body: 'Transaksi kartu debit kamu ditolak' }, 'app').status).toBe('stored')
+    expect(money.ingest({ app: 'Jago', title: 'Pembayaran', body: 'Pembayaran Rp 25.000 berhasil' }, 'app').status).toBe('stored')
+    expect(count()).toBe(2)
+  })
+})
+
+describe('review regressions (v0.17.3)', () => {
+  test('real money events without a readable amount are still stored', () => {
+    const { money, count } = harness()
+    const keep: Array<[string, string]> = [
+      ['Flip', 'Transfer kamu ke BUDI sebesar 150.000 berhasil'],
+      ['myBCA', 'Anda menerima transfer 50.000 dari ANDI'],
+      ['Tokopedia', 'Pesanan kamu sudah dibayar'],
+      ['Shopee', 'Refund kamu sudah dikembalikan ke ShopeePay'],
+      ['Kredivo', 'Tagihan kamu akan jatuh tempo 3 hari lagi'],
+      ['Jago', 'Hadiah referral 10.000 sudah masuk ke saldo kamu'],
+    ]
+    for (const [app, body] of keep) expect(money.ingest({ app, title: null, body }, 'app').status).toBe('stored')
+    expect(count()).toBe(keep.length)
+  })
+})

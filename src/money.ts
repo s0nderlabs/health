@@ -180,6 +180,14 @@ export function moneyEvent(text: string): MoneyKind | null {
   return null
 }
 
+/** A generic-rule parse with no amount whose text describes no actual money
+ *  event: its kind came only from a loose word like "bayar" in marketing copy.
+ *  A real transfer / refund / bill with an amount the generic rule could not
+ *  read is NOT this (moneyEvent names it), and neither is a decline. */
+export function amountlessGuess(p: MoneyParse, text: string): boolean {
+  return p.parser.startsWith('generic') && p.amount == null && p.kind !== 'declined' && moneyEvent(text) == null
+}
+
 /**
  * Notifications that carry no money event. Marketplace / super-app class:
  * ALLOWLIST (only a money event survives, and not one dressed as a promo
@@ -194,8 +202,10 @@ export function isNoise(title: string | null, body: string, cls: AppClass = 'ban
     // cashback Rp5.000!") is still marketing unless something HAPPENED.
     return PROMO.test(t) && !COMPLETED.test(t.replace(CONDITIONAL, ' '))
   }
-  return /running low|saldo (kamu |anda )?(menipis|rendah)|promo|cashback (hingga|up to)|diskon|voucher|undian|selamat! kamu/i.test(t) &&
-    !hasTransaction(t)
+  return /running low|saldo (kamu |anda )?(menipis|rendah)|promo|cashback (hingga|up to)|diskon|voucher|undian|selamat! kamu|menangkan|kesempatan|hadiah|makin rajin/i.test(t) &&
+    !hasTransaction(t) &&
+    // "Hadiah referral 10.000 sudah masuk": something HAPPENED, keep it.
+    !(moneyEvent(t) && COMPLETED.test(t.replace(CONDITIONAL, ' ')))
 }
 
 // ── amounts ───────────────────────────────────────────────────────
@@ -545,7 +555,7 @@ export interface MoneyDeps {
 export type IngestResult =
   | { status: 'stored' | 'duplicate'; id: number; kind: MoneyKind; amount: number | null; currency: string | null }
   | { status: 'dropped'; reason: 'otp' }
-  | { status: 'ignored'; reason: 'no transaction' }
+  | { status: 'ignored'; reason: 'no transaction' | 'no amount' }
 
 const fmtAmount = (n: number | null, cur: string | null) => {
   if (n == null) return 'an unparsed amount'
@@ -601,6 +611,14 @@ export class MoneyService {
     const clientId = typeof body.client_id === 'string' && /^[A-Za-z0-9-]{8,64}$/.test(body.client_id) ? body.client_id : null
     const dedupe = clientId ? `cid:${clientId}` : dedupeKey(app, title, text, postedMs)
     const parsed = parseMoney(app, title, text)
+    if (amountlessGuess(parsed, `${title ?? ''}\n${text}`)) {
+      // A real payment always carries an amount. A guess by the generic rule
+      // with none is marketing ("makin rajin bayar pakai Jenius..."): noise,
+      // counted like any other. Declines are kept: "card declined" matters
+      // even without a number.
+      this.book.countNoise(app, new Date(now).toISOString())
+      return { status: 'ignored', reason: 'no amount' }
+    }
     const { row, isNew } = this.book.insert({
       dedupe, app, title, body: text,
       posted_at: new Date(postedMs).toISOString(),
