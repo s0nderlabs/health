@@ -324,7 +324,7 @@ function harness(scaleCfg: ScaleConfig | undefined, keyed = true, extra: Partial
   let keyReads = 0
   const scale = new ScaleService({
     getConfig: () => scaleCfg,
-    ingest: (samples) => food.ingestBodySamples(samples, []),
+    ingest: (samples, raw) => food.ingestBodySamples(samples, [], raw),
     readBindkey: () => {
       keyReads++
       return keyed ? KEY : null
@@ -345,7 +345,7 @@ function harness(scaleCfg: ScaleConfig | undefined, keyed = true, extra: Partial
     restart: (more: Partial<ScaleDeps> = {}) =>
       new ScaleService({
         getConfig: () => scaleCfg,
-        ingest: (samples) => food.ingestBodySamples(samples, []),
+        ingest: (samples, raw) => food.ingestBodySamples(samples, [], raw),
         readBindkey: () => (keyed ? KEY : null),
         now: () => now,
         log: (m) => void logs.push(m),
@@ -493,11 +493,11 @@ describe('unencrypted objects are refused (no bindkey bypass)', () => {
       cleanup.push(h.cleanup)
       expect(h.scale.ingestFrame(hex(plainFrame(obj({ massRaw: 1234 }), 1)))).toEqual({ accepted: false, reason: 'unencrypted', readings: 0 })
       h.scale.ingestFrame(hex(encodeIdleFrame(PID, 2)))
+      expect(h.keyReads()).toBe(0) // the frames never even reached the key
       h.advance(SETTLE_MS * 2)
-      h.scale.tick()
+      h.scale.tick() // (the timer's own missing-key retry may read it here)
       expect(h.food.weighins(2)).toHaveLength(0)
       expect(h.events.filter((e) => e.cls === 'body.weighin')).toHaveLength(0)
-      expect(h.keyReads()).toBe(0) // never even reached the key
     }
   })
 })

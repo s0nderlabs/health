@@ -190,13 +190,30 @@ export function moneyEvent(text: string): MoneyKind | null {
 // Something HAPPENED (a completed or posted verb): the guard every marketing
 // rule respects, so an auto-debited instalment, a disbursed loan or a credited
 // reward is never dropped as an ad ("Pinjaman Rp5.000.000 sudah cair ke
-// rekening kamu" happened; "Rp7.000.000 lgsg cair" is a pitch).
+// rekening kamu" happened; "Rp7.000.000 lgsg cair" is a pitch). Trade
+// completions count too ("Your buy order ... at price Rp2,246,012/gram has
+// been filled", "Kamu membeli 0.1 gram emas"): a fill quotes a per-unit price
+// and must never read as a price digest. ("Order / pesanan berhasil|selesai"
+// is already covered by the bare berhasil / selesai.)
 const HAPPENED =
-  /\b(?:berhasil|sukses|successful|paid|dibayar|lunas|diterima|received|masuk|refund(?:ed)?|dikembalikan|ditolak|declined|gagal|failed|completed|selesai|confirmed|didebit|dipotong|dikirim|terkirim|ditambahkan|dicairkan)\b|\b(?:telah|sudah)\s+(?:di\w+|cair|masuk|terkirim)\b/i
+  /\b(?:berhasil|sukses|successful|paid|dibayar|lunas|diterima|received|masuk|refund(?:ed)?|dikembalikan|ditolak|declined|gagal|failed|completed|selesai|confirmed|didebit|dipotong|dikirim|terkirim|ditambahkan|dicairkan|filled|executed|bought|purchased|sold|membeli|dibeli|terbeli|menjual|dijual|terjual)\b|\b(?:telah|sudah)\s+(?:di\w+|cair|masuk|terkirim)\b/i
 
 // Pure ads with NO amount that still name a transaction word ("GRATIS tarik
 // tunai di ATM terdekat!: Pakai Kartu Jago, bebas tarik tunai di ATM mana aja").
 const AD_CUES = /\bgratis\b|\bpakai kartu\b|\bbebas\s+\w+(?:\s+\w+)?\s+di\b|\bterdekat\b|\bmana aja\b/i
+
+const MARKET_NEWS =
+  /\b(?:read on \w+ news|\w+ news\b|read more|baca selengkapnya|fell below|dropped below|surged|rallied|plunged|soared|(?:lowest|highest) since|all[- ]time high|ATH\b|turun ke bawah|naik ke atas)/i
+
+/** A price quote list: "per unit" prices, a "Prices"/"Harga" headline, or
+ *  several % changes with trend arrows. Two of those signals = a digest. */
+function isPriceDigest(t: string): boolean {
+  const perUnit = (t.match(/(?:rp\.?|idr|\$)\s*\d[\d.,]*\s*\/\s*(?:gram|gr|g|oz|unit|coin|lembar)\b/gi) ?? []).length
+  const pctMoves = (t.match(/[+-]?\d+(?:[.,]\d+)?\s*%\s*(?:📉|📈|🔻|🔺|▲|▼)?/g) ?? []).length
+  const headline = /\b(?:prices?|harga|kurs|market update|update harga)\b/i.test(t)
+  const signals = (perUnit >= 1 ? 1 : 0) + (pctMoves >= 2 ? 1 : 0) + (headline ? 1 : 0)
+  return signals >= 2
+}
 
 export function amountlessGuess(p: MoneyParse, text: string): boolean {
   return p.parser.startsWith('generic') && p.amount == null && p.kind !== 'declined' && moneyEvent(text) == null
@@ -232,6 +249,12 @@ export function isNoise(title: string | null, body: string, cls: AppClass = 'ban
   // survives; this only drops texts that describe nothing that happened.
   if (LOAN_PROMO.test(t) && moneyEvent(t) == null && !HAPPENED.test(t)) return true
   if (!hasAmount(t) && AD_CUES.test(t) && !HAPPENED.test(t)) return true
+  // Market price digests ("Today's Gold & Silver Prices: PAXG Rp2,246,012/gram
+  // | -0.57% 📉 XAUT ..."): quotes, not money that moved.
+  if (isPriceDigest(t) && !HAPPENED.test(t)) return true
+  // Market NEWS ("BTC Briefly Fell Below $62K: Lowest since July ... Read on
+  // Pintu News"): a headline about prices is never money that moved.
+  if (MARKET_NEWS.test(t) && !HAPPENED.test(t)) return true
   return /running low|saldo (kamu |anda )?(menipis|rendah)|promo|cashback (hingga|up to)|diskon|voucher|undian|selamat! kamu|menangkan|kesempatan|hadiah|makin rajin/i.test(t) &&
     !hasTransaction(t) &&
     // "Hadiah referral 10.000 sudah masuk": something HAPPENED, keep it.

@@ -343,7 +343,7 @@ describe('weigh-ins + targets', () => {
     )
     expect(r).toEqual({ received: 2, added: 2, deleted: 0 })
     expect(food.ingestBodySamples([{ uuid: 'hk-mass-0001', ts, kind: 'mass', value: 83.4 }], [])!.added).toBe(0)
-    expect(food.latestWeight()).toEqual({ kg: 83.4, at: ts, fat_pct: 23.6 })
+    expect(food.latestWeight()).toEqual({ kg: 83.4, at: ts, fat_pct: 23.6, fat_at: ts, fat_source: null, fat_basis: 'device' })
     expect(food.ingestBodySamples([], ['hk-fat-00001'])!.deleted).toBe(1)
     expect(food.ingestBodySamples('nope', [])).toBeNull()
   })
@@ -455,14 +455,14 @@ describe('body.weighin (v0.18.1)', () => {
     const at = local(2026, 11, 17, 5, 2)
     const { food, events, setNow } = harness(d16pm + 60_000)
     food.ingestBodySamples([{ uuid: 'hk-mass-d16am', ts: iso(d16am), kind: 'mass', value: 83.6, source: 'Xiaomi Home' }], [])
-    food.ingestBodySamples([{ uuid: 'hk-mass-d16pm', ts: iso(d16pm), kind: 'mass', value: 84.0, source: 'Xiaomi Home' }], [])
+    food.ingestBodySamples([{ uuid: 'hk-mass-d16pm', ts: iso(d16pm), kind: 'mass', value: 82.4, source: 'Xiaomi Home' }], [])
     events.length = 0
     setNow(at + 60_000)
     food.ingestBodySamples([{ uuid: 'hk-mass-1701', ts: iso(at), kind: 'mass', value: 83.1, source: 'Xiaomi Home' }], [])
     const w = events.find((e) => e.cls === 'body.weighin')!
     expect(w.content).toContain('Previous: 83.6 kg')
     expect(w.content).toContain('(-0.5 kg)')
-    expect(w.content).not.toContain('84.0')
+    expect(w.content).not.toContain('82.4')
   })
 
   test('rules: date rule = test reading, outside 03:30-09:00 = not morning, second morning reading = repeat', () => {
@@ -474,11 +474,11 @@ describe('body.weighin (v0.18.1)', () => {
     food.ingestBodySamples(
       [
         { uuid: 'hk-mass-t16', ts: iso(t16), kind: 'mass', value: 84.2, source: 'Xiaomi Home' },
-        { uuid: 'hk-fat-t1600', ts: iso(t16), kind: 'fat', value: 0.239, source: 'Xiaomi Home' },
+        { uuid: 'hk-fat-t1600', ts: iso(t16), kind: 'fat', value: 0.210, source: 'Xiaomi Home' },
       ],
       [],
     )
-    expect(wib(events.at(-1)!.content)).toBe('Weigh-in 14:20 WIB: 84.2 kg, 23.9% fat (Xiaomi Home). Test reading, excluded (before the first fasted weigh-in on Tue 17 Nov).')
+    expect(wib(events.at(-1)!.content)).toBe('Weigh-in 14:20 WIB: 84.2 kg, 21.0% fat (Xiaomi Home). Test reading, excluded (before the first fasted weigh-in on Tue 17 Nov).')
     expect(book.bodyExcluded('hk-fat-t1600')).toContain('test')
     // Nov 17: the first morning reading counts, a second is a repeat, an afternoon one is not morning.
     const m1 = local(2026, 11, 17, 4, 40), m2 = local(2026, 11, 17, 6, 15), pm = local(2026, 11, 17, 16, 10)
@@ -537,7 +537,7 @@ describe('body.weighin (v0.18.1)', () => {
     food.ingestBodySamples(
       [
         { uuid: 'hk-mass-pm17', ts: iso(at), kind: 'mass', value: 84.6, source: 'Xiaomi Home' },
-        { uuid: 'hk-fat-pm1700', ts: iso(at), kind: 'fat', value: 0.239, source: 'Xiaomi Home' },
+        { uuid: 'hk-fat-pm1700', ts: iso(at), kind: 'fat', value: 0.210, source: 'Xiaomi Home' },
       ],
       [],
     )
@@ -547,7 +547,7 @@ describe('body.weighin (v0.18.1)', () => {
     expect(book.bodyExcluded('hk-fat-pm1700')).toBeNull()
     expect(food.setWeighin({ uuid: 'hk-mass-pm17', include: false, reason: 'he had eaten' }).weighin!.excluded).toBe('he had eaten')
     expect(food.setWeighin({ measured_at: iso(at + 3_600_000), include: true }).changed).toBe(0) // nothing within 3 min
-    expect(food.weighins(7)).toEqual([{ measured_at: iso(at), kg: 84.6, fat_pct: 23.9, source: 'Xiaomi Home', excluded: 'he had eaten', uuids: ['hk-mass-pm17', 'hk-fat-pm1700'] }])
+    expect(food.weighins(7)).toEqual([{ measured_at: iso(at), kg: 84.6, fat_pct: 21, fat_basis: 'device', source: 'Xiaomi Home', excluded: 'he had eaten', uuids: ['hk-mass-pm17', 'hk-fat-pm1700'] }])
     expect(() => food.setWeighin({ measured_at: iso(at) })).toThrow()
   })
 
@@ -583,7 +583,7 @@ describe('body.weighin review regressions (v0.18.1)', () => {
     const { food, store, setNow } = harness(t16 + 60_000)
     const book = new MealBook(store.db)
     // Synced by an older daemon: excluded NULL, no rules ran.
-    store.db.run("INSERT INTO body_samples (uuid, ts, kind, value, source, received_at) VALUES ('hk-mass-old16', ?, 'mass', 84.0, 'Xiaomi Home', ?)", [iso(t16), iso(t16)])
+    store.db.run("INSERT INTO body_samples (uuid, ts, kind, value, source, received_at) VALUES ('hk-mass-old16', ?, 'mass', 82.4, 'Xiaomi Home', ?)", [iso(t16), iso(t16)])
     const cfg = { ...DEFAULT_CONFIG.food, weighins_from: '2026-11-17' }
     ;(food as unknown as { deps: { getConfig: () => typeof cfg } }).deps.getConfig = () => cfg
     setNow(local(2026, 11, 16, 15))
@@ -624,7 +624,7 @@ describe('body.weighin review regressions (v0.18.1)', () => {
     expect(book.bodyExcluded('hk-mass-pm17x')).toBe('not a morning reading')
     food.setWeighin({ uuid: 'hk-mass-pm17x', include: true })
     setNow(local(2026, 11, 18, 6))
-    food.ingestBodySamples([{ uuid: 'hk-mass-m18x', ts: iso(local(2026, 11, 18, 5)), kind: 'mass', value: 84.0, source: 'Xiaomi Home' }], [])
+    food.ingestBodySamples([{ uuid: 'hk-mass-m18x', ts: iso(local(2026, 11, 18, 5)), kind: 'mass', value: 84.5, source: 'Xiaomi Home' }], [])
     expect(book.bodyExcluded('hk-mass-pm17x')).toBeNull()
   })
 })

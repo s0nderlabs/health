@@ -11,7 +11,7 @@ import { DB_PATH } from './config.js'
 import { existsSync } from 'fs'
 import { readPhotoFiles } from './photos.js'
 
-const VERSION = '0.19.0'
+const VERSION = '0.19.1'
 
 const INSTRUCTIONS = `
 health: WHOOP recovery, sleep, and strain as a live channel. The daemon on this
@@ -310,6 +310,8 @@ once 3 readings count, and the active confounders line. Readings after a
 meal logged that food day ("after a meal") and exact repeats of the previous
 reading in both weight and fat ("possible replay") are excluded but still
 announced: mention it in one line, he can include one with weighin_set.
+S400 BLE fat %: its open formula reads unlike Xiaomi's, so the stored value is calibrated to Xiaomi Home from paired weigh-ins (scale_calibration shows the fit and its out-of-sample error). The event says which: uncalibrated (open formula), provisional (offset from 1-2 pairs: say it is rough), or calibrated (3+ pairs, with a +/- band); weighins rows carry fat_basis (device / raw / provisional / calibrated) and the S400 raw value. Fat % is trend-only, never a goal check.
+S400 BODY COMPOSITION: every S400 weigh-in also carries Mi Scale FORMULA ESTIMATES from weight + 50 kHz impedance + scale.profile (height, birth date, sex); trend only, never a measurement, never a goal check. visceral = visceral fat index (Mi formula, whole number 1-50); visceral and bmr_kcal are functions of weight/height/age only (note "weight-derived, no impedance"): a change in either IS a weight change, never separate news about visceral fat or metabolism; muscle_kg = Xiaomi-style muscle: fat-free mass minus bone (what Xiaomi Home calls "muscle mass", NOT skeletal muscle); smm_kg = skeletal muscle (Janssen BIA equation), a different and smaller number: never compare the two; lean_kg = fat-free mass, always weight x (1 - the DISPLAYED fat), so it carries fat's label and fat mass + lean mass = weight; bone_kg = bone mineral estimate; water_pct, protein_pct (note "guessed formula": the reference itself flags it, the roughest); bmr_kcal = Mi Fit BMR estimate; bmi = plain BMI. muscle_kg, water_pct and protein_pct are built on the FORMULA fat: once fat is calibrated their note says which ("from formula fat 23.7%"), until their own pairs tie them to the report. A metric whose reference formula hits its cap or clamp (BMR 5000, muscle 120, bone 8, fat 75, visceral outside 1-50) is left out entirely: those are error markers, not values. There is NO body age and NO body score: Xiaomi publishes no method for either, so none is computed; never invent one. Labels per metric: formula (no pair yet), provisional (offset from 1-2 manual pairs: rough), calibrated (3+ pairs, with a +/- band in the metric's unit). Old readings stored before impedances were have the impedance inferred from their fat value (note "inferred impedance"): treat those as rougher still; they carry no smm_kg (Janssen leans on the impedance alone). body.weighin for an S400 reading adds ONE line, visceral then muscle (his waist / V-taper priority; the visceral number restates weight, read the muscle for composition); day.body carries the latest S400 weigh-in of the last 7 days with every metric; weighins rows carry metrics (value + formula raw + basis). To calibrate against the Xiaomi report: when he reads you Xiaomi Home numbers for a weigh-in, submit each one with health__meal {action:'weighin_pair', measured_at (the S400 weigh-in's time, from body.weighin meta measured_at; matched within 180 s), metric (fat_pct | muscle_kg | water_pct | protein_pct | bone_kg | visceral | bmr_kcal | bmi; lean_kg is never paired, it follows fat), value, source? (default "xiaomi report"), force?}: one call per metric, a re-submit for the same weigh-in + metric replaces it, and that metric is refitted at once. It REFUSES a weigh-in excluded as not his (someone else, a test, by hand) and a value more than 10 fit units off the formula (10 pt fat/water, 10 kg muscle, 1 kg bone, 150 kcal, 10 visceral: usually a lb-for-kg slip or the wrong metric); the reply says why; ask him, then re-send with force:true only if he confirms. A wrong pair is removed with health__meal {action:'weighin_unpair', measured_at, metric} (that metric refits, back to formula when none is left); the reply's reading.excluded shows the verdict of what was paired. Manual fat values join the automatic Apple Health pairs (the manual one wins for the same weigh-in). A bmi pair is a height check only (diff + implied height), never a calibration. scale_calibration lists every metric's model and per-pair residuals.
 
 MONEY NOTIFICATIONS. money.notif: a bank / wallet notification (SeaBank,
 Plasma One, GoPay, ShopeePay, Pintu, ...) was forwarded from the phone the
@@ -408,7 +410,7 @@ export function createServer(ipc: IpcClient) {
       {
         name: 'health__meal',
         description:
-          'Food log (calorie + protein tracker), equal to the phone app. action: log (new meal from chat: items and/or photos), estimate (FULL REPLACE of an existing meal\'s items; corrections re-send the whole list), void, day (one day: meals, totals, targets), day_complete (mark a day fully logged or not; baseline uses complete days), preset_save / preset_list / preset_delete (repeat meals), baseline (maintenance from logged intake + weigh-in trend; accept:true sets the kcal target), weighins (recent scale readings with their verdict: counted, or excluded and why), weighin_set (include:true counts a reading, include:false excludes it with a reason; find it by uuid or measured_at), confounder_add / confounder_close (dated changes that bend the weight trend: creatine, an intake step-down, illness; the baseline stays provisional while one is open), goal_set / goal_clear (target fat %, milestone kg, lean-mass reference). day and baseline also return energy: WHOOP burn mapped to the food day, and once calibrated the balance (intake - burn x factor) with its band. The daemon computes all totals from items.',
+          'Food log (calorie + protein tracker), equal to the phone app. action: log (new meal from chat: items and/or photos), estimate (FULL REPLACE of an existing meal\'s items; corrections re-send the whole list), void, day (one day: meals, totals, targets), day_complete (mark a day fully logged or not; baseline uses complete days), preset_save / preset_list / preset_delete (repeat meals), baseline (maintenance from logged intake + weigh-in trend; accept:true sets the kcal target), weighins (recent scale readings with their verdict: counted, or excluded and why), weighin_set (include:true counts a reading, include:false excludes it with a reason; find it by uuid or measured_at), scale_calibration (the S400 fat calibration to Xiaomi Home: model with its leave-one-out error, status, and per-pair reference / raw / calibrated / residual; plus every body-composition metric\'s model, pairs, residuals, and BMI height checks), weighin_pair (one value from the Xiaomi report for an S400 weigh-in: measured_at + metric + value [+ source, force]; stored, then that metric is refitted; bmi only checks the height; refuses an excluded weigh-in or an implausible value unless force:true), weighin_unpair (remove a wrong pair: measured_at + metric; that metric refits), confounder_add / confounder_close (dated changes that bend the weight trend: creatine, an intake step-down, illness; the baseline stays provisional while one is open), goal_set / goal_clear (target fat %, milestone kg, lean-mass reference). day and baseline also return energy: WHOOP burn mapped to the food day, and once calibrated the balance (intake - burn x factor) with its band. The daemon computes all totals from items.',
         inputSchema: {
           type: 'object' as const,
           properties: {
@@ -416,7 +418,7 @@ export function createServer(ipc: IpcClient) {
               type: 'string',
               enum: [
                 'log', 'estimate', 'void', 'day', 'day_complete', 'preset_save', 'preset_list', 'preset_delete', 'baseline',
-                'weighins', 'weighin_set', 'confounder_add', 'confounder_close', 'goal_set', 'goal_clear',
+                'weighins', 'weighin_set', 'weighin_pair', 'weighin_unpair', 'scale_calibration', 'confounder_add', 'confounder_close', 'goal_set', 'goal_clear',
               ],
             },
             meal_id: { type: 'number', description: 'estimate / void: the meal (from meal.logged meta or a day read)' },
@@ -452,7 +454,21 @@ export function createServer(ipc: IpcClient) {
             aliases: { type: 'array', items: { type: 'string' }, description: 'preset_save: words he uses for it' },
             accept: { type: 'boolean', description: 'baseline: true = set the suggested target as THE kcal budget (only after he agrees)' },
             include: { type: 'boolean', description: 'weighin_set: true = count this reading in the trend, false = exclude it' },
-            measured_at: { type: 'string', description: 'weighin_set: ISO time of the weigh-in (nearest within 3 min), e.g. from body.weighin meta measured_at' },
+            measured_at: {
+              type: 'string',
+              description: 'weighin_set: ISO time of the weigh-in (nearest within 3 min); weighin_pair / weighin_unpair: ISO time of the S400 weigh-in (matched within 180 s, error if none). Both e.g. from body.weighin meta measured_at',
+            },
+            metric: {
+              type: 'string',
+              enum: ['fat_pct', 'muscle_kg', 'water_pct', 'protein_pct', 'bone_kg', 'visceral', 'bmr_kcal', 'bmi'],
+              description: 'weighin_pair / weighin_unpair: which Xiaomi report value this is (muscle_kg = Xiaomi "muscle mass"; bmi is a height check, never calibrated; lean_kg is not paired, it follows body fat)',
+            },
+            value: { type: 'number', description: 'weighin_pair: the value as the Xiaomi report shows it (%, kg, kcal, or the visceral index)' },
+            source: { type: 'string', description: 'weighin_pair: where the value came from (default "xiaomi report")' },
+            force: {
+              type: 'boolean',
+              description: 'weighin_pair: true pairs anyway when the weigh-in is excluded (not his?) or the value is far from the formula; only after he confirms',
+            },
             uuid: { type: 'string', description: 'weighin_set: a sample uuid (from weighins) instead of measured_at' },
             days: { type: 'number', description: 'weighins: how many days back (default 14)' },
             target_kcal: { type: 'number', description: 'baseline: set an explicit kcal budget instead of the suggestion' },

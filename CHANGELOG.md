@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.19.1 - 2026-11-16
+
+### Fixed
+
+- **Live sessions now end after outdoor activity.** A session used to end
+  only on 5 minutes sustained below the cool line, which everyday heart rate
+  after a ride or tennis keeps grazing, so sessions stayed open for hours
+  and their summaries counted daily life as work. A new idle end closes a
+  session after 30 minutes without effort (an 8-second streak at the start
+  line, or a minute averaging at the Z1 floor, or RR proving such a pulse
+  under cadence lock), with the summary snapped at the last real effort.
+  Time with no feed never counts as idle. A lift with long rests and a
+  20-minute break stays one session (regression-tested).
+- **A weigh-in can no longer be lost to a late key.** The scale key loads at
+  daemon start and is retried every minute, and the listener re-posts a
+  frame the daemon refused only for lack of a key.
+
+### Added
+
+- **S400 fat % calibrated to Xiaomi Home.** Every BLE weigh-in's raw values
+  (weight, both impedances, heart rate, scale timestamp, open-formula fat)
+  are stored. A BLE reading and a Xiaomi Home reading of the same weigh-in
+  (within 3 minutes and 0.2 kg) form a pair; a robust fit over the pairs
+  (an offset until the raw readings spread, then a shrunk slope) corrects
+  the S400 value, labelled provisional or calibrated with its error, and the
+  raw value is always kept. Same-instant copies of one weigh-in from two
+  sources count once.
+- **Body composition from the scale.** Visceral fat, muscle (Xiaomi-style:
+  fat-free mass minus bone), skeletal muscle (Janssen), water, protein,
+  bone, lean mass and BMR, from published open-source formulas, each
+  labelled formula / provisional / calibrated; visceral fat and BMR are
+  marked weight-derived (no impedance). No body age or score (no published
+  method). `health__meal weighin_pair` records a reference value from the
+  Xiaomi report and calibrates that metric; `scale_calibration` reports
+  every model and residual. The weigh-in event carries a short visceral and
+  muscle line.
+- **Money noise rules:** market price digests and market-news headlines
+  (never parsed as an amount) are dropped; trade completions (filled,
+  bought, sold, membeli, terjual, ...) always survive every marketing rule.
+
 ## 0.19.0 - 2026-11-16
 
 ### Added

@@ -319,6 +319,9 @@ export interface ScaleConfig {
   keychain_account?: string
   /** Keychain service of the bindkey (default dev.s400-bindkey). */
   keychain_service?: string
+  /** HealthKit source name(s) the S400 fat is calibrated against (e.g.
+   *  ["Xiaomi Home"]). Unset = any non-S400 source with mass + fat. */
+  reference_sources?: string[]
   profile?: {
     height_cm?: number
     birth_date?: string // YYYY-MM-DD

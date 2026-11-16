@@ -81,7 +81,10 @@ WHOOP band ──(BLE Broadcast HR)──> health-relay ──(WS, raw frames)�
   login to your Xiaomi account (no password; only the key is kept, in the
   macOS Keychain). Build the listener with `scripts/build-scale.sh`, copy it
   to `~/.local/bin`, and load `relayer/com.s0nderlabs.health.scale.plist.template`
-  as a LaunchAgent (it asks for Bluetooth permission once).
+  as a LaunchAgent (it asks for Bluetooth permission once). Its body-fat
+  value is calibrated against the scale's own app whenever both record the
+  same weigh-in, and it adds formula estimates of visceral fat, muscle,
+  water, protein, bone and BMR, each labelled with how far to trust it.
   Photos are converted to plain JPEGs with GPS and all other metadata
   stripped; your originals are never touched.
 - **Money notifications** (optional): an iOS Shortcuts automation forwards

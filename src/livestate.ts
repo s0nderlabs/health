@@ -16,6 +16,49 @@ const COOL_SUSTAIN_S = 300 // sustained-cool before a session ends
 // outage replays gapless frames on reconnect, and ending the session at 3
 // minutes of daemon-side silence would split one workout into two.
 const FEED_DROP_END_S = 720
+// IDLE end. After outdoor activity, everyday HR (85-110) grazes the cool line,
+// so the 5-min sustained-cool end never holds and a 34-min ride stayed open
+// 2h47m (tennis: 3h27m for ~1h of play) until the band came off, archiving
+// hours of daily life as Z0/Z1 work. A session with no EFFORT for this long
+// of HEARD time is over. 30 min clears every real rest structure: a lift's
+// inter-set rest and an interval recovery both sit far shorter, and so does
+// a long mid-session break (raised from 15 min after a real false end: a
+// 12-min break after heavy squats, sitting at ~94 bpm, idle-ended a lift at
+// 15 min and the bench, deadlift and accessory work never re-opened one).
+//
+// EFFORT is deliberately not "one sample at the start line": one sample is
+// optical jitter or one stair, and repeated touches kept tails open forever,
+// while heavy singles and easy Z1 riding sit just UNDER the start line. An
+// effort is any of:
+//  - a STREAK held EFFORT_SUSTAIN_S of samples that are each at/above the
+//    start line, OR at/above the effort line (Z1 floor, rest + 40% HRR) with
+//    a set-style rise (EFFORT_RISE_BPM over the trailing-window minimum), OR
+//    carrying RR that proves a start-line pulse the bpm field disagrees with
+//    (cadence lock: bpm reads step rate, RR reads the heart);
+//  - a LEVEL: the trailing EFFORT_WINDOW_S of contiguous samples averages at
+//    or above the effort line (Z1 riding, a descent) and the window lies
+//    wholly after the last streak, so the decay tail after a hard effort
+//    never counts as more effort.
+export const IDLE_END_S = 1800
+const EFFORT_SUSTAIN_S = 8
+const EFFORT_RISE_BPM = 10
+const EFFORT_WINDOW_S = 60
+const EFFORT_LINE_HRR = 0.4
+// Confidence judgments (confirm, zone milestones, intent claims) move to the
+// WORK window once this long has passed without effort, the same window the
+// end summary judges, so a tail's clean resting RR can never confirm a session
+// whose own end then reports it low.
+const WORK_VIEW_STALE_S = 60
+// The tick-path idle end needs a recently heard ACCEPTED sample: a socket
+// outage replays up to ~10 min of buffered frames on reconnect, so an idle
+// clock running out during silence is unknown, not idle (feed_drop owns
+// silence). Wide enough for a sparse low-rate feed, narrow enough that an
+// effort hidden in the unheard stretch is a short window, not a split.
+const IDLE_TICK_FRESH_S = 120
+// An idle end reports the HR-recovery read only when a sample actually landed
+// at the 60s mark (60s + this slack for a lossy ~1Hz feed); a reading taken
+// minutes later after a feed gap is not a 60-second recovery.
+const IDLE_RECOVERY_SLACK_S = 15
 const RMSSD_WINDOW_S = 300
 const RMSSD_MIN_INTERVALS = 30
 // Artifact gates. Optical wrist HR under vibration/grip pressure emits
@@ -83,6 +126,7 @@ const RR_MATCH_TOL = 0.15
 const RR_SUSPECT_BELOW = 0.5 // majority-mismatch = artifact-suspect, cap to low
 
 export type RejectReason = 'ceiling' | 'double'
+export type EndReason = 'cooldown' | 'feed_drop' | 'yield' | 'idle'
 export type SessionConfidence = 'low' | 'medium' | 'high'
 
 export interface LiveDeps {
@@ -120,7 +164,7 @@ export interface LiveDeps {
 export interface SessionSummary {
   started_at: string
   ended_at: string
-  reason: 'cooldown' | 'feed_drop' | 'yield'
+  reason: EndReason
   duration_s: number
   avg_bpm: number
   max_bpm: number
@@ -131,6 +175,16 @@ export interface SessionSummary {
   demoted: boolean // ended low-confidence with no intent: probably not a workout
   rr_presence: number | null // fraction of samples carrying RR intervals
   rr_consistency: number | null // of those, fraction whose implied rate matches bpm
+}
+
+interface StatSnap {
+  ts: number
+  sumBpm: number
+  n: number
+  maxBpm: number
+  zoneSeconds: number[]
+  rrSamples: number
+  rrConsistent: number
 }
 
 interface Session {
@@ -144,9 +198,20 @@ interface Session {
   // not slow milestone detection.
   zoneSince: (number | null)[]
   announced: Set<number>
-  lastHotTs: number
-  bpmAtLastHot: number
+  // The last EFFORT sample (see IDLE_END_S). The idle clock runs from here;
+  // it starts at session start, which after a daemon restart is the
+  // re-detection (the in-memory state is fresh), so a re-armed session's clock
+  // can never start before the re-arm.
+  lastEffortTs: number
+  // Feed gaps (> IDLE_TICK_FRESH_S, rejected-only stretches included) since
+  // the last effort: unheard time is unknown, never idle.
+  idleGapMs: number
+  // The HR-recovery anchor: the last STREAK effort sample and its rate. A
+  // level effort does not move it (a Z1 average is not a peak to recover from).
+  anchorTs: number
+  anchorBpm: number
   recovery60Drop: number | null
+  recovery60Ts: number | null // when recovery60Drop was read (sample ts)
   // Stats frozen at the moment sustained cooling began, so the summary
   // describes the WORK, not the work plus five minutes of cooldown tail.
   // RR counters are frozen too: the tail is RR-rich real-pulse data that
@@ -159,6 +224,10 @@ interface Session {
     rrSamples: number
     rrConsistent: number
   } | null
+  // Stats as of the last effort sample (inclusive), refreshed on every
+  // effort sample: the idle end's source, so its summary describes the WORK,
+  // not the work plus IDLE_END_S of everyday-life tail.
+  effortSnap: StatSnap | null
   // Confidence evidence (see the tier constants). Latches never un-latch; RR
   // counters accumulate over accepted samples (incl. the ring-seeded start).
   intentMatched: boolean
@@ -184,6 +253,10 @@ export class LiveState {
   private rejected = 0
   private lastRejected: { ts: number; bpm: number; reason: RejectReason } | null = null
   private lastIntentTs = 0
+  // Effort streak start (null = the current sample does not qualify), and the
+  // first sample after the last feed gap (the trailing windows never bridge one).
+  private effortSince: number | null = null
+  private contigSince = 0
 
   constructor(private deps: LiveDeps) {}
 
@@ -203,7 +276,8 @@ export class LiveState {
       // open. Arm the window instead; the warmup case claims it the moment
       // evidence arrives (maybeConfirm), the next-activity case claims it at
       // that session's start.
-      const { level } = this.confidenceOf(this.session, this.lastTs || ts)
+      const v = this.workView(this.session, this.lastTs || ts)
+      const { level } = this.confidenceOf(this.session, v.ts, v.snap)
       if (level !== 'low') {
         this.claimIntent(this.session)
         this.maybeConfirm(this.lastTs || ts)
@@ -248,6 +322,15 @@ export class LiveState {
     return Math.round(rest + 0.45 * (this.deps.getMaxHr() - rest))
   }
 
+  /** The idle clock's effort line: the Z1 floor (never above the start line). */
+  private effortLine(): number {
+    const rest = this.deps.getRestHr()
+    return Math.min(
+      this.hotBpm(),
+      Math.round(rest + EFFORT_LINE_HRR * (this.deps.getMaxHr() - rest)),
+    )
+  }
+
   private coolBpm(): number {
     const rest = this.deps.getRestHr()
     return Math.round(rest + 0.25 * (this.deps.getMaxHr() - rest))
@@ -288,11 +371,13 @@ export class LiveState {
     this.ring.push({ ts, bpm: s.bpm, rr: s.rr_ms })
     if (this.ring.length > RING_CAP) this.ring.splice(0, this.ring.length - RING_CAP)
 
-    if (gap > GAP_RESET_S) {
+    if (gap > GAP_RESET_S || !this.contigSince) {
       // A feed gap breaks continuity: smoothing and streaks must not bridge it.
       this.ema = s.bpm
       this.hotSince = null
       this.coolSince = null
+      this.effortSince = null
+      this.contigSince = ts
       if (this.session) this.session.zoneSince = [null, null, null, null, null, null]
     } else {
       this.ema = this.ema == null ? s.bpm : this.ema + EMA_ALPHA * (s.bpm - this.ema)
@@ -312,9 +397,6 @@ export class LiveState {
           this.session.hotCycles++
           this.session.cycleArmed = false
         }
-        this.session.lastHotTs = ts
-        this.session.bpmAtLastHot = s.bpm
-        this.session.recovery60Drop = null
       }
     } else {
       this.hotSince = null
@@ -326,12 +408,89 @@ export class LiveState {
       }
     }
 
+    // Effort streak (see IDLE_END_S). Tracked with or without a session, so
+    // the detection streak itself is the start's first effort.
+    const effortRate = this.effortRate(ts, s.bpm, s.rr_ms, hot)
+    if (effortRate != null) {
+      if (this.effortSince == null) this.effortSince = ts
+    } else {
+      this.effortSince = null
+    }
+
     if (!this.session && this.hotSince != null && ts - this.hotSince >= HOT_SUSTAIN_S * 1000) {
       this.startSession(this.hotSince)
     }
 
-    if (this.session) this.updateSession(ts, s.bpm, dt, s.rr_ms)
+    if (this.session) {
+      // Unheard time (silence, or a stretch where every frame was rejected)
+      // is unknown, not idle: it never advances the idle clock. Same bar as
+      // the tick path's freshness, so a sparse ~1/min feed still counts.
+      if (gap > IDLE_TICK_FRESH_S) this.session.idleGapMs += gap * 1000
+      const effort: 'streak' | 'level' | null =
+        effortRate != null &&
+        this.effortSince != null &&
+        ts - this.effortSince >= EFFORT_SUSTAIN_S * 1000
+          ? 'streak'
+          : this.levelEffort(this.session, ts)
+            ? 'level'
+            : null
+      this.updateSession(ts, s.bpm, dt, s.rr_ms, effort, effortRate ?? s.bpm)
+    }
     return null
+  }
+
+  /** Does this sample qualify toward an effort streak? Returns the rate it
+   *  proves (bpm, or the RR-implied rate on a cadence lock), else null. */
+  private effortRate(ts: number, bpm: number, rr: number[], hot: number): number | null {
+    if (bpm >= hot) return bpm
+    if (bpm >= this.effortLine()) {
+      // Set signature: a rise over the trailing-window minimum (the ring tail
+      // is this sample; the window never reaches back across a feed gap).
+      const from = Math.max(ts - EFFORT_WINDOW_S * 1000, this.contigSince)
+      let min = bpm
+      for (let i = this.ring.length - 2; i >= 0; i--) {
+        const p = this.ring[i]
+        if (p.ts < from) break
+        if (p.bpm < min) min = p.bpm
+      }
+      if (bpm - min >= EFFORT_RISE_BPM) return bpm
+    }
+    const rate = rrRate(rr)
+    if (rate != null && rate >= hot && Math.abs(rate - bpm) > bpm * RR_MATCH_TOL) {
+      return Math.round(rate)
+    }
+    return null
+  }
+
+  /** Level effort: a full contiguous trailing window, wholly after the last
+   *  streak, averaging at or above the effort line. */
+  private levelEffort(s: Session, ts: number): boolean {
+    const span = EFFORT_WINDOW_S * 1000
+    if (ts - this.contigSince < span || ts - s.anchorTs < span) return false
+    let sum = 0
+    let n = 0
+    for (let i = this.ring.length - 1; i >= 0; i--) {
+      const p = this.ring[i]
+      if (p.ts <= ts - span) break
+      sum += p.bpm
+      n++
+    }
+    return n > 0 && sum / n >= this.effortLine()
+  }
+
+  /** Observed (heard) time since the last effort. */
+  private idleMs(s: Session, now: number): number {
+    return now - s.lastEffortTs - s.idleGapMs
+  }
+
+  /** The window confidence is judged on: live while effort is recent, the
+   *  work window (the same one an idle end archives) once it is stale. */
+  private workView(s: Session, ts: number): { ts: number; snap: StatSnap | undefined } {
+    if (!s.effortSnap || this.idleMs(s, ts) <= WORK_VIEW_STALE_S * 1000) {
+      return { ts, snap: undefined }
+    }
+    const w = earliestWork(s, s.effortSnap)
+    return { ts: w.ts, snap: w }
   }
 
   /** Per-sample RR-vs-bpm consistency accounting (see the RR constants).
@@ -339,26 +498,23 @@ export class LiveState {
    *  range as the rMSSD path): junk like a 150ms interval is garbage-in, not
    *  a cadence-lock signature, and must not flag a real workout as suspect. */
   private rrAccount(s: Session, bpm: number, rr: number[]): void {
-    let sum = 0
-    let n = 0
-    for (const v of rr) {
-      if (v >= 300 && v <= 2000) {
-        sum += v
-        n++
-      }
-    }
-    if (n === 0) return
+    const rate = rrRate(rr)
+    if (rate == null) return
     s.rrSamples++
-    if (Math.abs(60000 / (sum / n) - bpm) <= bpm * RR_MATCH_TOL) s.rrConsistent++
+    if (Math.abs(rate - bpm) <= bpm * RR_MATCH_TOL) s.rrConsistent++
   }
 
-  private rrStats(s: Session): { presence: number | null; consistency: number | null } {
+  private rrStats(
+    s: Session,
+    snap: Session['coolSnap'] = s.coolSnap,
+  ): { presence: number | null; consistency: number | null } {
     // While cooling, judge the WORK window (frozen in coolSnap): the tail's
     // resting pulse emits pristine RR that would dilute a work-window
-    // mismatch below the suspect bar.
-    const n = s.coolSnap?.n ?? s.n
-    const rrSamples = s.coolSnap?.rrSamples ?? s.rrSamples
-    const rrConsistent = s.coolSnap?.rrConsistent ?? s.rrConsistent
+    // mismatch below the suspect bar. An idle end passes its effort snapshot
+    // for the same reason.
+    const n = snap?.n ?? s.n
+    const rrSamples = snap?.rrSamples ?? s.rrSamples
+    const rrConsistent = snap?.rrConsistent ?? s.rrConsistent
     return {
       presence: n > 0 ? Math.round((rrSamples / n) * 100) / 100 : null,
       consistency:
@@ -366,14 +522,18 @@ export class LiveState {
     }
   }
 
-  private confidenceOf(s: Session, nowTs: number): { level: SessionConfidence; reasons: string[] } {
+  private confidenceOf(
+    s: Session,
+    nowTs: number,
+    snap?: Session['coolSnap'],
+  ): { level: SessionConfidence; reasons: string[] } {
     // The user's explicit word outranks every inference, the artifact gate
     // included: a declared session with a noisy optical stream is still the
     // declared session (rr stats stay in the summary for forensics).
     if (s.intentMatched) return { level: 'high', reasons: ['intent'] }
     // Majority RR mismatch is the cadence-lock signature: the elevation itself
     // is untrustworthy, so nothing else can upgrade it.
-    const { consistency } = this.rrStats(s)
+    const { consistency } = this.rrStats(s, snap === undefined ? s.coolSnap : snap)
     if (consistency != null && consistency < RR_SUSPECT_BELOW) {
       return { level: 'low', reasons: ['rr_suspect'] }
     }
@@ -400,15 +560,16 @@ export class LiveState {
     // Late claim: a tap that landed while this session was still unevidenced
     // (the ambiguous case in noteIntent) belongs to it the moment it develops
     // an exercise signature.
+    const v = this.workView(s, ts)
     if (
       !s.intentMatched &&
       this.lastIntentTs > 0 &&
       ts - this.lastIntentTs <= INTENT_MATCH_BEFORE_MS &&
-      this.confidenceOf(s, ts).level !== 'low'
+      this.confidenceOf(s, v.ts, v.snap).level !== 'low'
     ) {
       this.claimIntent(s)
     }
-    const { level, reasons } = this.confidenceOf(s, ts)
+    const { level, reasons } = this.confidenceOf(s, v.ts, v.snap)
     if (level === 'low') return
     // A confirm after WHOOP already scored a workout COVERING this session's
     // start would trail the conclusion (the workout.card shipped; consumers
@@ -475,10 +636,16 @@ export class LiveState {
       zoneSeconds: [0, 0, 0, 0, 0, 0],
       zoneSince: [null, null, null, null, null, null],
       announced: new Set(),
-      lastHotTs: startTs,
-      bpmAtLastHot: 0,
+      // The current (start) sample is a hot sample: it is the first effort
+      // and the first recovery anchor (updateSession restamps it the same).
+      lastEffortTs: this.lastTs || startTs,
+      idleGapMs: 0,
+      anchorTs: this.lastTs || startTs,
+      anchorBpm: this.ring[this.ring.length - 1]?.bpm ?? 0,
       recovery60Drop: null,
+      recovery60Ts: null,
       coolSnap: null,
+      effortSnap: null,
       // An intent declared shortly before the detected start (or during the
       // 90s detection ramp, where lastIntentTs > startTs) matches immediately.
       intentMatched: this.lastIntentTs > 0 && startTs - this.lastIntentTs <= INTENT_MATCH_BEFORE_MS,
@@ -541,7 +708,14 @@ export class LiveState {
     )
   }
 
-  private updateSession(ts: number, bpm: number, dt: number, rr: number[]): void {
+  private updateSession(
+    ts: number,
+    bpm: number,
+    dt: number,
+    rr: number[],
+    effort: 'streak' | 'level' | null,
+    effortBpm: number,
+  ): void {
     const s = this.session!
     if (bpm < this.coolBpm()) {
       if (!s.coolSnap) {
@@ -563,6 +737,25 @@ export class LiveState {
     this.rrAccount(s, bpm, rr)
     const zone = this.zoneOf(bpm)
     s.zoneSeconds[zone] += dt
+    if (effort) {
+      s.lastEffortTs = ts
+      s.idleGapMs = 0
+      if (effort === 'streak') {
+        s.anchorTs = ts
+        s.anchorBpm = effortBpm
+        s.recovery60Drop = null
+        s.recovery60Ts = null
+      }
+      s.effortSnap = {
+        ts,
+        sumBpm: s.sumBpm,
+        n: s.n,
+        maxBpm: s.maxBpm,
+        zoneSeconds: [...s.zoneSeconds],
+        rrSamples: s.rrSamples,
+        rrConsistent: s.rrConsistent,
+      }
+    }
 
     // From DEEP_ZONE up: the evidence latches need the lower streaks tracked,
     // the milestone loop below only ever reads 3+.
@@ -591,7 +784,8 @@ export class LiveState {
       // touch stays silent (a passive elevation can graze Z3 for 15s), and
       // it is NOT marked announced, so the milestone fires the moment the
       // session earns its confidence while still in the zone.
-      const conf = this.confidenceOf(s, ts)
+      const v = this.workView(s, ts)
+      const conf = this.confidenceOf(s, v.ts, v.snap)
       if (conf.level !== 'low') {
         for (let z = 3; z <= earned; z++) s.announced.add(z)
         const startIso = new Date(s.startTs).toISOString()
@@ -613,16 +807,19 @@ export class LiveState {
     }
 
     // Classic 60s heart-rate-recovery: drop measured one minute after the
-    // last hot sample. Captured once per quiet spell, refreshed if effort resumes.
-    if (s.recovery60Drop == null && s.bpmAtLastHot > 0 && ts - s.lastHotTs >= 60_000) {
-      s.recovery60Drop = s.bpmAtLastHot - bpm
+    // last streak effort. Captured once per quiet spell, refreshed if effort resumes.
+    if (s.recovery60Drop == null && s.anchorBpm > 0 && ts - s.anchorTs >= 60_000) {
+      s.recovery60Drop = s.anchorBpm - bpm
+      s.recovery60Ts = ts
     }
 
     this.maybeConfirm(ts)
 
     if (this.coolSince != null && ts - this.coolSince >= COOL_SUSTAIN_S * 1000) {
       this.endSession(ts, 'cooldown')
+      return
     }
+    if (this.idleMs(s, ts) >= IDLE_END_S * 1000) this.endSession(ts, 'idle')
   }
 
   /** Is a workout session currently in progress? (Arbitration probe guard.) */
@@ -650,20 +847,70 @@ export class LiveState {
     const lastEvidence = Math.max(this.lastTs, this.lastRejected?.ts ?? 0)
     const silent = now - lastEvidence >= FEED_DROP_END_S * 1000
     const garbage = now - this.lastTs >= GARBAGE_END_S * 1000
-    if (silent || garbage) this.endSession(this.lastTs, 'feed_drop')
+    if (silent || garbage) {
+      this.endSession(this.lastTs, 'feed_drop')
+      return
+    }
+    // Idle on the tick too, so a sparse feed (no sample landing on the
+    // IDLE_END_S mark) still ends on time. Only while ACCEPTED samples are being heard:
+    // rejected frames say nothing about HR being low (an artifact storm on a
+    // hard ride must not idle-end it), and silence may hide replayable effort.
+    if (
+      now - this.lastTs <= IDLE_TICK_FRESH_S * 1000 &&
+      this.idleMs(this.session, now) >= IDLE_END_S * 1000
+    ) {
+      this.endSession(now, 'idle')
+    }
   }
 
-  private endSession(endTs: number, reason: 'cooldown' | 'feed_drop' | 'yield'): void {
+  private endSession(endTs: number, reason: EndReason): void {
     const s = this.session!
     this.session = null
     this.hotSince = null
     this.coolSince = null
     // A cooldown end means the last 5 min were tail, not work: report the
     // session as it stood when sustained cooling began.
-    // The cooling snapshot (when one exists) is the end-stats source for BOTH
-    // end reasons: a feed that dies mid-cooldown (band off, walked out) ended
-    // its work at cooling onset just like a clean cooldown end did.
-    const stats = s.coolSnap ?? { ts: endTs, sumBpm: s.sumBpm, n: s.n, zoneSeconds: s.zoneSeconds }
+    // The cooling snapshot (when one exists) is the end-stats source for every
+    // end that is not TRIMMED: a feed that dies mid-cooldown (band off, walked
+    // out) ended its work at cooling onset just like a clean cooldown end did.
+    //
+    // TRIMMED ends snap at the work's edge (the earlier of the last-effort and
+    // cooling snapshots): an IDLE end always (the IDLE_END_S since were everyday
+    // life), and a yield or feed_drop that lands a cooldown-length or more of
+    // heard quiet after the last effort (otherwise which end won, a yield a
+    // minute before the idle mark or the idle end itself, would decide
+    // whether the tail archives as work).
+    // Cooldown ends keep their cooling-onset semantics (unchanged numbers).
+    const live: StatSnap = {
+      ts: endTs,
+      sumBpm: s.sumBpm,
+      n: s.n,
+      maxBpm: s.maxBpm,
+      zoneSeconds: s.zoneSeconds,
+      rrSamples: s.rrSamples,
+      rrConsistent: s.rrConsistent,
+    }
+    const trimmed =
+      s.effortSnap != null &&
+      (reason === 'idle' ||
+        ((reason === 'yield' || reason === 'feed_drop') &&
+          this.idleMs(s, endTs) >= COOL_SUSTAIN_S * 1000))
+    const stats: StatSnap = trimmed
+      ? earliestWork(s, s.effortSnap!)
+      : s.coolSnap
+        ? { ...s.coolSnap, maxBpm: s.maxBpm }
+        : live
+    // A trimmed end reports the HR-recovery read only when a sample landed at
+    // the 60s mark after the last streak effort AND after the archived work
+    // (a drop into continued Z1 riding is not a recovery); the archived end
+    // then includes that minute.
+    const readOk =
+      s.recovery60Drop != null &&
+      s.recovery60Ts != null &&
+      s.recovery60Ts - s.anchorTs <= (60 + IDLE_RECOVERY_SLACK_S) * 1000 &&
+      s.recovery60Ts >= stats.ts
+    const recoveryDrop = trimmed ? (readOk ? s.recovery60Drop : null) : s.recovery60Drop
+    const endedTs = trimmed && readOk ? s.recovery60Ts! : stats.ts
     // Unreachable in practice (the 90s start gate seeds ~90 samples before a
     // session can exist), kept as a divide-by-zero guard. A hit would drop
     // the summary AND the archive row, so never widen what reaches it.
@@ -678,19 +925,19 @@ export class LiveState {
     // must not contradict each other (the rr forensics still persist).
     // WHOOP scoring an overlapping workout later upgrades the archived row
     // (see corroborateLiveSessions).
-    const { level } = this.confidenceOf(s, stats.ts)
-    const rr = this.rrStats(s)
+    const { level } = this.confidenceOf(s, stats.ts, stats)
+    const rr = this.rrStats(s, stats)
     const demoted = level === 'low' && !s.intentMatched && !s.confirmAnnounced
 
     const summary: SessionSummary = {
       started_at: new Date(s.startTs).toISOString(),
-      ended_at: new Date(stats.ts).toISOString(),
+      ended_at: new Date(endedTs).toISOString(),
       reason,
       duration_s: Math.round((stats.ts - s.startTs) / 1000),
       avg_bpm: Math.round(stats.sumBpm / stats.n),
-      max_bpm: s.maxBpm,
+      max_bpm: stats.maxBpm,
       zone_seconds: stats.zoneSeconds.map((z) => Math.round(z)),
-      recovery_60s_drop: s.recovery60Drop,
+      recovery_60s_drop: recoveryDrop,
       confidence: level,
       intent_matched: s.intentMatched,
       demoted,
@@ -705,9 +952,17 @@ export class LiveState {
     const recovery =
       summary.recovery_60s_drop != null
         ? ` HR recovery: -${summary.recovery_60s_drop} bpm in the minute after the last effort.`
-        : ''
+        : trimmed
+          ? ' HR recovery unavailable (no reading in the minute after the last effort).'
+          : ''
     const how =
-      reason === 'feed_drop' ? 'broadcast stopped' : reason === 'yield' ? 'band yielded' : 'cooled down'
+      reason === 'feed_drop'
+        ? 'broadcast stopped'
+        : reason === 'yield'
+          ? 'band yielded'
+          : reason === 'idle'
+            ? `ended after ${Math.round(IDLE_END_S / 60)} min without effort`
+            : 'cooled down'
     const body = `${fmtMinSec(summary.duration_s)}, avg ${summary.avg_bpm} bpm, peak ${summary.max_bpm}.${zoneLine ? ` Zones: ${zoneLine}.` : ''}${recovery}`
     const content = demoted
       ? `Elevation ended (${how}): ${body} Probably not a workout (no intent declared, no exercise signature: no set/interval structure, no sustained depth); ignore for training load.`
@@ -720,10 +975,15 @@ export class LiveState {
         content,
         meta: {
           class: 'live.rest',
+          reason,
+          ended_at: summary.ended_at,
           duration_s: String(summary.duration_s),
           avg_bpm: String(summary.avg_bpm),
           max_bpm: String(summary.max_bpm),
           confidence: level,
+          ...(summary.recovery_60s_drop != null
+            ? { recovery_60s_drop: String(summary.recovery_60s_drop) }
+            : {}),
           ...(demoted ? { demoted: 'true' } : {}),
           ...(s.intentMatched ? { intent_matched: 'true' } : {}),
           ...(rr.presence != null ? { rr_presence: String(rr.presence) } : {}),
@@ -817,7 +1077,10 @@ export class LiveState {
             avg_bpm: s.n ? Math.round(s.sumBpm / s.n) : null,
             max_bpm: s.maxBpm,
             zone_seconds: s.zoneSeconds.map((z) => Math.round(z)),
-            confidence: this.confidenceOf(s, this.lastTs || now).level,
+            confidence: (() => {
+              const v = this.workView(s, this.lastTs || now)
+              return this.confidenceOf(s, v.ts, v.snap).level
+            })(),
             intent_matched: s.intentMatched,
             rr_presence: this.rrStats(s).presence,
             rr_consistency: this.rrStats(s).consistency,
@@ -825,6 +1088,28 @@ export class LiveState {
         : null,
     }
   }
+}
+
+/** Implied rate from the physiologically possible RR intervals (300-2000 ms,
+ *  same range as the rMSSD path), or null when there are none. */
+function rrRate(rr: number[]): number | null {
+  let sum = 0
+  let n = 0
+  for (const v of rr) {
+    if (v >= 300 && v <= 2000) {
+      sum += v
+      n++
+    }
+  }
+  return n === 0 ? null : 60000 / (sum / n)
+}
+
+/** The work window's edge: the earlier of the last-effort snapshot and the
+ *  cooling snapshot (a cooling snapshot exists only after the last effort in
+ *  practice, but a cadence-locked effort can sit under the cool line). */
+function earliestWork(s: Session, effort: StatSnap): StatSnap {
+  const cool = s.coolSnap ? { ...s.coolSnap, maxBpm: s.maxBpm } : null
+  return cool && cool.ts < effort.ts ? cool : effort
 }
 
 function fmtMinSec(totalS: number): string {

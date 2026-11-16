@@ -510,3 +510,31 @@ describe('review regressions + new formats (energy release)', () => {
     expect(p.occurred_at).toBe(parseIndoDateTime('16 Nov 2026 15:16'))
   })
 })
+
+describe('price digests (Pintu gold/silver prices)', () => {
+  test('a multi-ticker price digest is noise; a real gold buy is not', () => {
+    expect(isNoise("Today's Gold & Silver Prices", 'PAXG Rp2,246,012/gram | -0.57% 📉\nXAUT Rp2,244,136/gram | -0.64% 📉\nSLVON Rp25,082/gram | -1.13% 📉', 'bank')).toBe(true)
+    expect(isNoise('Pembelian berhasil', 'Pembelian 0,1 gram PAXG senilai Rp224.600 berhasil', 'bank')).toBe(false)
+    expect(isNoise('Harga emas naik', 'Harga emas hari ini Rp1.300.000/gram, naik 1,2% 📈', 'bank')).toBe(true)
+  })
+})
+
+describe('price digest rule never drops a completed trade (review finding)', () => {
+  test('fills, buys and sells that quote a per-unit price are kept', () => {
+    expect(isNoise('Order filled', 'Your buy order for PAXG at price Rp2,246,012/gram has been filled', 'bank')).toBe(false)
+    expect(isNoise('Pembelian emas', 'Kamu membeli 0.1 gram emas di harga Rp2.246.012/gram', 'bank')).toBe(false)
+    expect(isNoise('Trade executed', 'Bought 0.5 PAXG at price $2,400/oz', 'bank')).toBe(false)
+    expect(isNoise('Penjualan', 'Emas 0,2 gram terjual di harga Rp1.300.000/gram', 'bank')).toBe(false)
+    expect(isNoise('Pesanan', 'Pesanan berhasil: 1 gram emas di harga Rp1.300.000/gram', 'bank')).toBe(false)
+    // the quote list itself is still noise
+    expect(isNoise("Today's Gold & Silver Prices", 'PAXG Rp2,246,012/gram | -0.57% 📉\nXAUT Rp2,244,136/gram | -0.64% 📉', 'bank')).toBe(true)
+  })
+})
+
+describe('market news headlines (Pintu News)', () => {
+  test('a price headline is noise; a real sell is not', () => {
+    expect(isNoise('BTC Briefly Fell Below $62K', 'Lowest since July, then recovered to about $65,000 on Sunday night. Read on Pintu News.', 'bank')).toBe(true)
+    expect(isNoise('ETH surged 8%', 'Ether rallied past $4,000 overnight. Read more in the app.', 'bank')).toBe(true)
+    expect(isNoise('Order filled', 'Your sell order for 0.01 BTC at $64,000 has been filled', 'bank')).toBe(false)
+  })
+})

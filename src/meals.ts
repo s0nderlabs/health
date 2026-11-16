@@ -13,6 +13,7 @@
 //   editing a preset later never rewrites a meal already logged.
 
 import type { Database } from 'bun:sqlite'
+import { ensureScaleReadingsSchema } from './scalecal.js'
 
 export const FOOD_SCHEMA = `
 CREATE TABLE IF NOT EXISTS meals (
@@ -492,6 +493,10 @@ export class MealBook {
     // idempotent on archives created before the column existed.
     const cols = db.query("PRAGMA table_info(body_samples)").all() as Array<{ name: string }>
     if (!cols.some((c) => c.name === 'excluded')) db.run('ALTER TABLE body_samples ADD COLUMN excluded TEXT')
+    // v0.19.1: raw S400 readings (impedances, open-formula fat %) and their
+    // Xiaomi calibration. S400 fat samples stored before the table existed
+    // get a row with the raw value taken from the sample (impedances null).
+    ensureScaleReadingsSchema(db)
   }
 
   // meals
@@ -818,11 +823,11 @@ export class MealBook {
     )
   }
 
-  /** Mass + fat samples that currently COUNT (excluded IS NULL), oldest first:
-   *  what the re-classification pass walks. */
+  /** Mass + fat samples that currently COUNT (excluded IS NULL), oldest first
+   *  (uuid breaks a tie): what the re-classification pass walks. */
   includedSamplesSince(sinceIso: string): Array<{ uuid: string; ts: string; kind: 'mass' | 'fat'; value: number; source: string | null }> {
     return this.db
-      .query('SELECT uuid, ts, kind, value, source FROM body_samples WHERE excluded IS NULL AND ts >= ? ORDER BY ts ASC')
+      .query('SELECT uuid, ts, kind, value, source FROM body_samples WHERE excluded IS NULL AND ts >= ? ORDER BY ts ASC, uuid ASC')
       .all(sinceIso) as Array<{ uuid: string; ts: string; kind: 'mass' | 'fat'; value: number; source: string | null }>
   }
 
@@ -849,12 +854,34 @@ export class MealBook {
       .all(best.ts, best.source) as Array<{ uuid: string; ts: string; kind: string; value: number; source: string | null; excluded: string | null }>
   }
 
-  /** The latest mass reading strictly before `beforeIso`, ANY verdict, with
-   *  its fat pair (same source + instant): the replay guard's reference. */
-  previousMassAny(beforeIso: string): { ts: string; value: number; source: string | null; fat: number | null } | null {
+  /** The samples of ONE weigh-in: mass + fat of this source at this instant
+   *  (weighin_set by uuid: never the other source's copy at the same time). */
+  weighinAt(ts: string, source: string | null): Array<{ uuid: string; ts: string; kind: string; value: number; source: string | null; excluded: string | null }> {
+    return this.db
+      .query('SELECT uuid, ts, kind, value, source, excluded FROM body_samples WHERE ts = ? AND source IS ?')
+      .all(ts, source) as Array<{ uuid: string; ts: string; kind: string; value: number; source: string | null; excluded: string | null }>
+  }
+
+  /** INCLUDED mass readings at exactly this instant, other than `uuid` (the
+   *  same weigh-in delivered twice, e.g. S400 BLE + Xiaomi Home on the scale's
+   *  own clock). */
+  includedMassesAt(ts: string, uuid: string): Array<{ uuid: string; source: string | null }> {
+    return this.db
+      .query("SELECT uuid, source FROM body_samples WHERE kind = 'mass' AND excluded IS NULL AND ts = ? AND uuid != ?")
+      .all(ts, uuid) as Array<{ uuid: string; source: string | null }>
+  }
+
+  /** The latest mass reading of `source` strictly before `beforeIso`, ANY
+   *  verdict, with its fat pair (same source + instant): the replay guard's
+   *  reference. Only the same source: a replay is one path re-delivering its
+   *  own record, and another source's copy of the same weigh-in is not one. */
+  previousMassOfSource(
+    beforeIso: string,
+    source: string | null,
+  ): { uuid: string; ts: string; value: number; source: string | null; fat: number | null } | null {
     const m = this.db
-      .query("SELECT ts, value, source FROM body_samples WHERE kind = 'mass' AND ts < ? ORDER BY ts DESC LIMIT 1")
-      .get(beforeIso) as { ts: string; value: number; source: string | null } | null
+      .query("SELECT uuid, ts, value, source FROM body_samples WHERE kind = 'mass' AND source IS ? AND ts < ? ORDER BY ts DESC, uuid DESC LIMIT 1")
+      .get(source, beforeIso) as { uuid: string; ts: string; value: number; source: string | null } | null
     if (!m) return null
     return { ...m, fat: this.fatAt(m.ts, m.source) }
   }

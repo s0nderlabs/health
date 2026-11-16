@@ -57,9 +57,51 @@ import {
   type GoalView,
 } from './confounders.js'
 import { ingestPhoto, PHOTO_MAX_PER_MEAL } from './photos.js'
+import {
+  CAL_META as SCALE_CAL_META,
+  FIT_MAX_PAIRS,
+  PAIR_WINDOW_MS,
+  ScaleCalBook,
+  applyModel,
+  backfillScaleReadings,
+  calibrationNote,
+  fitCalibration,
+  pairReadings,
+  parseModel,
+  provenanceOf,
+  readingProvenance,
+  readingStemOf,
+  referenceName,
+  sameModel,
+  type CalModel,
+  type CalPair,
+  type FatProvenance,
+  type ScaleRaw,
+  type ScaleReadingRow,
+} from './scalecal.js'
+import { SCALE_SOURCE } from './scale.js'
+import {
+  METRICS,
+  PAIRABLE_METRICS,
+  basisOf,
+  basisOfProvenance,
+  calibrationText,
+  bodyEventLine,
+  computeMetrics,
+  fitMetric,
+  metricViews,
+  parseMetrics,
+  profileKey,
+  METRICS_VERSION,
+  applyMetric,
+  type FatOverride,
+  type MetricBasis,
+  type MetricKey,
+  type MetricView,
+} from './bodycomp.js'
 import { BadRequest, cleanText, jsonBody } from './http.js'
 export { BadRequest } from './http.js'
-import type { HealthConfig } from './types.js'
+import type { HealthConfig, ScaleConfig } from './types.js'
 
 export const MAX_PHOTOS_PER_MEAL = PHOTO_MAX_PER_MEAL
 const MAX_BODY_SAMPLES = 5000
@@ -72,6 +114,13 @@ export interface FoodDeps {
   getConfig: () => FoodConfig
   getMeta: (k: string) => string | null
   setMeta: (k: string, v: string) => void
+  /** scale.reference_sources: the HealthKit source name(s) the S400 fat is
+   *  calibrated against (e.g. ["Xiaomi Home"]). Unset = any non-S400 source
+   *  with mass + fat at one instant. */
+  getScaleReferenceSources?: () => string[] | undefined
+  /** scale.profile (height, birth date, sex): the body-composition formulas'
+   *  inputs. Unset = no metrics beyond weight and fat. */
+  getScaleProfile?: () => ScaleConfig['profile'] | undefined
   /** Queue a channel event; returns whether it surfaced. */
   emit: (
     cls: 'meal.logged' | 'meal.amended' | 'body.weighin',
@@ -94,11 +143,26 @@ const EXCL_REPEAT = 'repeat: a morning reading already counts today'
 const EXCL_OUTLIER = 'possible other person'
 const EXCL_AFTER_MEAL = 'after a meal'
 const EXCL_REPLAY = 'possible replay'
+/** The same weigh-in from a second source at the identical instant (S400 BLE
+ *  + Xiaomi Home on the scale's own clock): one copy counts. Re-decided on
+ *  every pass, so the other copy counts again once the preferred one is
+ *  excluded (a replay, by hand, an outlier). */
+const EXCL_SAME_INSTANT = 'same weigh-in, other source'
 /** The date rule's own prefix: a weighins_from change re-decides exactly these. */
 const EXCL_DATE_RULE = `${EXCL_TEST}before the first fasted weigh-in`
+/** day.body: exclusions that still mean HIS body (timing, not identity). */
+const BODY_OK_EXCLUSIONS = new Set([EXCL_NOT_MORNING, EXCL_REPEAT, EXCL_AFTER_MEAL, EXCL_REPLAY, EXCL_SAME_INSTANT])
+/** Derived verdicts every re-classification pass lifts and re-decides. */
+const REDECIDED_EXCLUSIONS = [EXCL_AFTER_MEAL, EXCL_REPLAY, EXCL_SAME_INSTANT]
+/** weighin_pair: a value further than this many fit units (METRICS fitUnit:
+ *  1 fat point, 1 kg, 0.1 kg bone, 15 kcal) from the formula is refused
+ *  without force:true. */
+const IMPLAUSIBLE_FIT_UNITS = 10
 /** Replay guard tolerance: identical to the scale's resolution. */
 const REPLAY_KG = 0.005
 const REPLAY_FAT = 0.00005
+/** S400 against S400: the raw open-formula fat % at 2 dp. */
+const REPLAY_RAW_PCT = 0.005
 const CAL_META = 'food_energy_calibration'
 const GOAL_META = 'food_goal'
 /** The outlier rule: active from 3 included readings; a reading further from
@@ -111,6 +175,17 @@ const OUTLIER_CAP_KG = 5
 
 export function outlierLimitKg(daysGap: number): number {
   return Math.min(OUTLIER_BASE_KG + OUTLIER_PER_DAY_KG * Math.max(0, daysGap), OUTLIER_CAP_KG)
+}
+
+/** The weigh-in walk order: time, then the S400 BLE copy of a shared
+ *  instant first, then uuid. Total and deterministic, so which copy of a
+ *  same-instant weigh-in counts never depends on storage order. */
+function compareWeighins(a: { ts: string; uuid: string; source: string | null }, b: { ts: string; uuid: string; source: string | null }): number {
+  if (a.ts !== b.ts) return a.ts < b.ts ? -1 : 1
+  const sa = a.source === SCALE_SOURCE ? 0 : 1
+  const sb = b.source === SCALE_SOURCE ? 0 : 1
+  if (sa !== sb) return sa - sb
+  return a.uuid < b.uuid ? -1 : a.uuid > b.uuid ? 1 : 0
 }
 
 /** A real shift, not a visitor: an earlier outlier on ANOTHER day within
@@ -147,6 +222,13 @@ export function fastedFromMs(ms: number, rolloverHour: number): number {
 }
 
 const MANUAL_INCLUDE_META = 'weighin_manual_include'
+/** Per-metric body-composition models (JSON {metric: CalModel}); fat keeps
+ *  its own record (scalecal CAL_META). */
+export const METRIC_CAL_META = 'scale_metric_calibration'
+/** day.body looks this far back for the latest S400 weigh-in. */
+const DAY_BODY_WINDOW_MS = 7 * 86_400_000
+/** Metrics with their own calibration (fat has scalecal's; bmi has none). */
+const CALIBRATED_METRICS: readonly MetricKey[] = PAIRABLE_METRICS.filter((k) => k !== 'fat_pct' && k !== 'bmi')
 
 /** "Creatine start" -> "creatine_start": the one spelling add and close share. */
 function normKind(k: unknown): string {
@@ -173,7 +255,14 @@ export function weighinEvent(
   fat: { value: number } | null,
   prev: { ts: string; value: number } | null,
   excluded: string | null = null,
-  extras: { avg7?: { kg: number; n: number; delta_kg: number | null } | null; confounders?: string | null } = {},
+  extras: {
+    avg7?: { kg: number; n: number; delta_kg: number | null } | null
+    confounders?: string | null
+    /** S400 fat provenance: replaces the bare source in the parenthetical. */
+    fatCalibration?: FatProvenance | null
+    /** S400 body composition (visceral + muscle), one compact line. */
+    body?: { line: string; visceral?: number; muscle_kg?: number } | null
+  } = {},
 ): { content: string; meta: Record<string, string> } {
   const t = new Date(m.ts)
   // The zone label is only claimed when true (the Mac on WIB, UTC+7).
@@ -181,7 +270,9 @@ export function weighinEvent(
   const kg = m.value.toFixed(1)
   const fatPct = fat ? (fat.value * 100).toFixed(1) : null
   const src = m.source ?? 'unknown source'
-  let content = `Weigh-in ${hhmm.endsWith(' local') ? hhmm : `${hhmm} WIB`}: ${kg} kg${fatPct ? `, ${fatPct}% fat` : ''} (${src}).`
+  const cal = fatPct && extras.fatCalibration ? extras.fatCalibration : undefined
+  const srcText = cal !== undefined ? calibrationNote(cal) : src
+  let content = `Weigh-in ${hhmm.endsWith(' local') ? hhmm : `${hhmm} WIB`}: ${kg} kg${fatPct ? `, ${fatPct}% fat` : ''} (${srcText}).`
   if (excluded) {
     content += excluded.startsWith(EXCL_TEST)
       ? ` Test reading, excluded (${excluded.slice(EXCL_TEST.length)}).`
@@ -189,6 +280,8 @@ export function weighinEvent(
         ? ' Not a morning reading, excluded from the trend.'
         : excluded === EXCL_REPEAT
           ? ' Repeat reading this morning, excluded from the trend (the first one counts).'
+          : excluded === EXCL_SAME_INSTANT
+            ? ' The same weigh-in as another source\'s copy at this instant, counted once (from the other copy).'
           : excluded === EXCL_OUTLIER
             ? ` ${prev ? `${Math.abs(m.value - prev.value).toFixed(1)} kg off your last reading, likely` : 'Likely'} someone else; excluded. Reply if it was you.`
             : excluded === EXCL_AFTER_MEAL
@@ -210,8 +303,15 @@ export function weighinEvent(
   }
   const conf = excluded ? null : extras.confounders
   if (conf) content += ` Confounders: ${conf}.`
+  const body = extras.body ?? null
+  if (body) content += `\n${body.line}`
   const meta: Record<string, string> = { kg, measured_at: m.ts, source: src }
   if (fatPct) meta.fat_pct = fatPct
+  if (cal !== undefined) {
+    meta.fat_calibration = cal.status
+    meta.calibration_pairs = String(cal.n)
+    if (cal.rms_pct != null) meta.calibration_rms_pct = cal.rms_pct.toFixed(2)
+  }
   if (excluded) meta.excluded = excluded
   if (a) {
     meta.avg7_kg = a.kg.toFixed(1)
@@ -219,6 +319,8 @@ export function weighinEvent(
     if (a.delta_kg != null) meta.avg7_delta_kg = a.delta_kg.toFixed(1)
   }
   if (conf) meta.confounders = conf
+  if (body?.visceral != null) meta.visceral = String(Math.round(body.visceral))
+  if (body?.muscle_kg != null) meta.muscle_kg = body.muscle_kg.toFixed(1)
   return { content, meta }
 }
 
@@ -275,15 +377,38 @@ export interface BaselineReport extends Baseline {
   goal: GoalView | null
 }
 
+/** A ScaleRaw from the scale leg, sanity-checked (null = dropped). */
+function cleanScaleRaw(r: unknown): ScaleRaw | null {
+  if (typeof r !== 'object' || r == null) return null
+  const o = r as Record<string, unknown>
+  const fin = (v: unknown, lo: number, hi: number) => (typeof v === 'number' && Number.isFinite(v) && v >= lo && v <= hi ? v : null)
+  const uuid = typeof o.uuid === 'string' && o.uuid.length >= 6 && o.uuid.length <= 62 ? o.uuid : null
+  const t = typeof o.measured_at === 'string' ? Date.parse(o.measured_at) : NaN
+  const kg = fin(o.kg, 20, 400)
+  if (!uuid || !Number.isFinite(t) || kg == null) return null
+  return {
+    uuid,
+    measured_at: new Date(t).toISOString(),
+    kg,
+    impedance_low: fin(o.impedance_low, 0, 5000),
+    impedance_high: fin(o.impedance_high, 0, 5000),
+    hr: fin(o.hr, 20, 250),
+    scale_ts: fin(o.scale_ts, 0, 0xffffffff),
+    fat_raw_pct: fin(o.fat_raw_pct, 1, 80),
+  }
+}
+
 export class FoodService {
   readonly book: MealBook
   readonly confounders: ConfounderBook
+  readonly scaleCal: ScaleCalBook
   private now: () => number
   private log: (msg: string) => void
 
   constructor(private deps: FoodDeps) {
     this.book = new MealBook(deps.db)
     this.confounders = new ConfounderBook(deps.db)
+    this.scaleCal = new ScaleCalBook(deps.db)
     this.now = deps.now ?? Date.now
     this.log = deps.log ?? (() => {})
   }
@@ -876,13 +1001,31 @@ export class FoodService {
     return Number.isFinite(v) && v > 0 ? v : null
   }
 
-  latestWeight(): { kg: number; at: string; fat_pct: number | null } | null {
+  latestWeight(): {
+    kg: number
+    at: string
+    fat_pct: number | null
+    fat_at?: string
+    fat_source?: string | null
+    fat_basis?: 'device' | 'raw' | 'provisional' | 'calibrated' | null
+    fat_raw_pct?: number | null
+  } | null {
     const since = new Date(this.now() - 30 * 86_400_000).toISOString()
-    const s = this.book.bodySamplesSince(since)
+    const s = this.book.bodySamplesAll(since).filter((x) => x.excluded == null)
     const mass = s.filter((x) => x.kind === 'mass').at(-1)
     if (!mass) return null
-    const fat = s.filter((x) => x.kind === 'fat').at(-1)
-    return { kg: Math.round(mass.value * 10) / 10, at: mass.ts, fat_pct: fat ? Math.round(fat.value * 1000) / 10 : null }
+    // The latest weigh-in's own fat when it has one, else the latest fat; it
+    // names its source and what the value is (device, raw, calibrated).
+    const fat = s.find((x) => x.kind === 'fat' && x.ts === mass.ts && x.source === mass.source) ?? s.filter((x) => x.kind === 'fat').at(-1)
+    if (!fat) return { kg: Math.round(mass.value * 10) / 10, at: mass.ts, fat_pct: null }
+    return {
+      kg: Math.round(mass.value * 10) / 10,
+      at: mass.ts,
+      fat_pct: Math.round(fat.value * 1000) / 10,
+      fat_at: fat.ts,
+      fat_source: fat.source,
+      ...this.fatBasis(fat),
+    }
   }
 
   /** One day of food: meals, totals, targets, baseline progress. */
@@ -943,6 +1086,7 @@ export class FoodService {
       },
       energy,
       weight: this.latestWeight(),
+      body: this.dayBody(),
     }
   }
 
@@ -1008,7 +1152,11 @@ export class FoodService {
 
   // ── weigh-ins (HealthKit via the phone) ─────────────────────────
 
-  ingestBodySamples(raw: unknown, rawDeleted: unknown): { received: number; added: number; deleted: number } | null {
+  ingestBodySamples(
+    raw: unknown,
+    rawDeleted: unknown,
+    scaleRaw?: ScaleRaw | ScaleRaw[] | null,
+  ): { received: number; added: number; deleted: number } | null {
     if (!Array.isArray(raw) || raw.length > MAX_BODY_SAMPLES) return null
     if (rawDeleted != null && (!Array.isArray(rawDeleted) || rawDeleted.length > MAX_BODY_SAMPLES)) return null
     const now = this.now()
@@ -1031,12 +1179,39 @@ export class FoodService {
       ? rawDeleted.filter((u): u is string => typeof u === 'string' && u.length >= 8 && u.length <= 64)
       : []
     const nowIso = new Date(now).toISOString()
+    // The S400 leg's raw reading lands BEFORE its samples: the raw fat % is
+    // the calibration input and must never be read back from a sample the
+    // calibration has already rewritten.
+    for (const r of scaleRaw == null ? [] : Array.isArray(scaleRaw) ? scaleRaw : [scaleRaw]) {
+      const ok = cleanScaleRaw(r)
+      if (ok) this.scaleCal.upsertReading(ok, nowIso)
+    }
+    // An S400 fat sample is stored CALIBRATED with the stored model (never
+    // raw next to calibrated ones, even if the refit below fails), and a
+    // re-ingest never puts the raw value back over a calibrated one.
+    const s400Fat = clean.filter((s) => s.kind === 'fat' && s.source === SCALE_SOURCE && /-f$/.test(s.uuid))
+    if (s400Fat.length) {
+      const model = this.scaleModel()
+      for (const s of s400Fat) {
+        const v = this.scaleCal.calibrateReading(readingStemOf(s.uuid), model)
+        if (v != null) s.value = v
+      }
+    }
     const known = this.book.unknownBodyUuids(clean.map((s) => s.uuid))
     const freshRows = clean.filter((s) => known.has(s.uuid))
     const added = this.book.upsertBodySamples(clean, nowIso)
     // Deletions FIRST: a reading he removed in Apple Health must not make his
     // re-weigh in the same batch a "repeat" (or an outlier reference).
     const removed = this.book.deleteBodySamples(deleted)
+    // Pairs and the S400 fat calibration follow EVERY body ingest, from
+    // either source: the Xiaomi copy of a weigh-in usually arrives minutes
+    // after the S400 one (when the app is opened). Before the verdicts: the
+    // replay rule reads the (calibrated) fat values.
+    try {
+      this.recalibrateScale()
+    } catch (err) {
+      this.log(`scale calibration failed: ${err instanceof Error ? err.message : 'error'}`)
+    }
     this.reclassifyWeighins()
     if (added > 0 || removed > 0) this.changed(this.today())
     this.announceWeighins(freshRows, now)
@@ -1052,20 +1227,54 @@ export class FoodService {
     }
   }
 
+  /** What a stored fat value is: 'device' = the source's own number (Xiaomi
+   *  Home, any HealthKit app); for S400 rows 'raw' (open formula) or
+   *  'calibrated' / 'provisional' (to the reference), with the raw value. */
+  private fatBasis(fat: { uuid: string; source: string | null } | null, rows?: Map<string, ScaleReadingRow>): {
+    fat_basis: 'device' | 'raw' | 'provisional' | 'calibrated' | null
+    fat_raw_pct?: number | null
+  } {
+    if (!fat) return { fat_basis: null }
+    if (fat.source !== SCALE_SOURCE) return { fat_basis: 'device' }
+    const stem = readingStemOf(fat.uuid)
+    const row = rows ? (rows.get(stem) ?? null) : this.scaleCal.reading(stem)
+    const p = readingProvenance(row, null)
+    return { fat_basis: p.status === 'uncalibrated' ? 'raw' : p.status, fat_raw_pct: row?.fat_raw_pct != null ? Math.round(row.fat_raw_pct * 100) / 100 : null }
+  }
+
   /** Recent weigh-ins (excluded ones too) for review: one row per weigh-in. */
-  weighins(days = 14): Array<{ measured_at: string; kg: number; fat_pct: number | null; source: string | null; excluded: string | null; uuids: string[] }> {
+  weighins(days = 14): Array<{
+    measured_at: string
+    kg: number
+    fat_pct: number | null
+    fat_basis: 'device' | 'raw' | 'provisional' | 'calibrated' | null
+    fat_raw_pct?: number | null
+    source: string | null
+    excluded: string | null
+    uuids: string[]
+    metrics?: Array<MetricView & { raw?: number }>
+    impedance_inferred?: boolean
+  }> {
     const since = new Date(this.now() - Math.max(1, Math.min(days, 365)) * 86_400_000).toISOString()
     const rows = this.book.bodySamplesAll(since)
-    const out: Array<{ measured_at: string; kg: number; fat_pct: number | null; source: string | null; excluded: string | null; uuids: string[] }> = []
+    const readings = this.scaleCal.readingsByUuid(rows.filter((r) => r.source === SCALE_SOURCE).map((r) => readingStemOf(r.uuid)))
+    const models = rows.some((r) => r.source === SCALE_SOURCE) ? this.metricModels() : {}
+    const fatModel = rows.some((r) => r.source === SCALE_SOURCE) ? this.scaleModel() : null
+    const out: ReturnType<FoodService['weighins']> = []
     for (const m of rows.filter((r) => r.kind === 'mass')) {
       const fat = rows.find((r) => r.kind === 'fat' && r.ts === m.ts && r.source === m.source) ?? null
+      const row = m.source === SCALE_SOURCE ? (readings.get(readingStemOf(m.uuid)) ?? null) : null
       out.push({
         measured_at: m.ts,
         kg: m.value,
         fat_pct: fat ? Math.round(fat.value * 1000) / 10 : null,
+        ...this.fatBasis(fat, readings),
         source: m.source,
         excluded: m.excluded,
         uuids: fat ? [m.uuid, fat.uuid] : [m.uuid],
+        // S400 rows: the formula body composition (calibrated where a model
+        // exists), each with its formula value.
+        ...(row ? { metrics: this.readingViews(row, models, fatModel, fat?.value ?? null), impedance_inferred: row.impedance_inferred === 1 } : {}),
       })
     }
     return out
@@ -1083,7 +1292,9 @@ export class FoodService {
     let pair: Array<{ uuid: string; ts: string; kind: string; value: number; source: string | null }> = []
     if (typeof p.uuid === 'string' && p.uuid.length >= 8) {
       const row = this.book.bodySampleByUuid(p.uuid)
-      if (row) pair = this.book.weighinNear(row.ts, 0)
+      // Only this row's own weigh-in: another source's copy at the same
+      // instant is a separate record with its own verdict.
+      if (row) pair = this.book.weighinAt(row.ts, row.source)
     } else if (typeof p.measured_at === 'string' && Number.isFinite(Date.parse(p.measured_at))) {
       pair = this.book.weighinNear(new Date(Date.parse(p.measured_at)).toISOString(), 3 * 60_000)
     } else {
@@ -1092,7 +1303,7 @@ export class FoodService {
     if (!pair.length) return { changed: 0, weighin: null }
     let reason = p.include ? null : cleanText(p.reason, 120, false) || 'excluded by hand'
     // A hand verdict must never look like a derived one the next pass lifts.
-    if (reason === EXCL_AFTER_MEAL || reason === EXCL_REPLAY) reason = `${reason} (by hand)`
+    if (reason != null && REDECIDED_EXCLUSIONS.includes(reason)) reason = `${reason} (by hand)`
     const changed = this.book.setBodyExcluded(pair.map((r) => r.uuid), reason)
     // Remember manual INCLUDES, so the re-classification pass never excludes
     // them again (an exclusion carries its own reason and needs no memory).
@@ -1102,6 +1313,9 @@ export class FoodService {
       else manual.delete(r.uuid)
     }
     this.deps.setMeta(MANUAL_INCLUDE_META, JSON.stringify([...manual].slice(-500)))
+    // Re-decide the derived verdicts this one feeds (the other source's copy
+    // at the same instant counts again once this copy is excluded).
+    this.reclassifyWeighins()
     this.changed(this.today())
     const mass = pair.find((r) => r.kind === 'mass') ?? null
     return { changed, weighin: { measured_at: pair[0].ts, kg: mass?.value ?? null, excluded: reason } }
@@ -1117,24 +1331,28 @@ export class FoodService {
    *  2. window: measured outside 03:30-09:00 local = not a morning reading;
    *  3. outlier: far from the last counted reading = possible other person
    *     (from 3 earlier counted readings; two agreeing days = a real shift);
-   *  4. repeat: a morning reading already counts for that day (the FIRST one).
+   *  4. repeat: a morning reading already counts for that day (the FIRST one);
+   *  5. same instant: another source's copy of this weigh-in counts (walk
+   *     order = ts, then S400 BLE first, then uuid: the first one wins).
    *  A fat sample shares its mass sample's verdict (same source + instant).
    *  Energy-balance release (in order, after the window rule):
    *  replay: identical to the previous reading in BOTH mass and fat;
    *  after a meal: a meal was eaten before it, on its food day and its own
    *  morning (from the later of the food-day start and local 03:30).
-   *  These two are re-decided on every pass (they follow the data). */
+   *  These two and the same-instant rule are re-decided on every pass (they
+   *  follow the data). */
   reclassifyWeighins(opts: { dateRuleChanged?: boolean } = {}): void {
     // A new weighins_from re-decides the date rule's own verdicts (and only
     // those).
     if (opts.dateRuleChanged) this.book.liftExclusions(EXCL_DATE_RULE)
     const rollover = this.deps.getConfig().rollover_hour
     const sinceIso = new Date(this.now() - 400 * 86_400_000).toISOString()
-    // "after a meal" and "possible replay" are derived from data that can
-    // change under them (a meal voided or re-timed, a reference reading
-    // deleted): lift them and let this pass re-decide (manual verdicts carry
-    // their own reasons and are never touched).
-    this.book.liftExactExclusions([EXCL_AFTER_MEAL, EXCL_REPLAY], sinceIso)
+    // "after a meal", "possible replay" and "same weigh-in, other source" are
+    // derived from data that can change under them (a meal voided or
+    // re-timed, a reference reading deleted, the preferred copy excluded):
+    // lift them and let this pass re-decide (manual verdicts carry their own
+    // reasons and are never touched).
+    this.book.liftExactExclusions(REDECIDED_EXCLUSIONS, sinceIso)
     const from = this.deps.getConfig().weighins_from ?? null
     const validFrom = isDayKey(from) ? from : null
     const manual = this.manualIncludes()
@@ -1142,7 +1360,9 @@ export class FoodService {
     // months), minus the ones he included by hand: stored rows from before the
     // rules existed, or before weighins_from was set, get classified too.
     const counting = this.book.includedSamplesSince(sinceIso)
-    const masses = counting.filter((s) => s.kind === 'mass' && !manual.has(s.uuid))
+    // Same-instant copies in a FIXED order (S400 BLE first, then uuid), the
+    // order sameInstantLoses ranks them in.
+    const masses = counting.filter((s) => s.kind === 'mass' && !manual.has(s.uuid)).sort(compareWeighins)
     for (const m of masses) {
       const ms = Date.parse(m.ts)
       const day = foodDay(ms, 0)
@@ -1163,6 +1383,8 @@ export class FoodService {
         reason = EXCL_OUTLIER
       } else if (this.book.includedMassOnDayBefore(dayStartIso(ms), m.ts)) {
         reason = EXCL_REPEAT
+      } else if (this.sameInstantLoses(m)) {
+        reason = EXCL_SAME_INSTANT
       }
       if (!reason) continue
       const pair = counting.filter((s) => s.ts === m.ts && s.source === m.source).map((s) => s.uuid)
@@ -1170,13 +1392,450 @@ export class FoodService {
     }
   }
 
-  /** Identical to the previous reading (any verdict) in BOTH mass and fat. */
-  private isReplay(m: { ts: string; value: number; source: string | null }): boolean {
-    const prev = this.book.previousMassAny(m.ts)
-    if (!prev || prev.fat == null) return false
+  /** Identical to the previous reading OF THE SAME SOURCE (any verdict) in
+   *  BOTH mass and fat. A replay is one path re-delivering its own record:
+   *  the S400 BLE leg and another app are independent paths (the same
+   *  weigh-in on both is the same-instant rule's job), so another source's
+   *  reading is never the reference. S400 against S400 compares the RAW
+   *  open-formula value (stable; the calibrated fat moves with every refit);
+   *  any other source compares its stored fat. */
+  private isReplay(m: { uuid: string; ts: string; value: number; source: string | null }): boolean {
+    const prev = this.book.previousMassOfSource(m.ts, m.source)
+    if (!prev || Math.abs(prev.value - m.value) >= REPLAY_KG) return false
+    if (m.source === SCALE_SOURCE) {
+      const a = this.scaleCal.reading(readingStemOf(prev.uuid))?.fat_raw_pct
+      const b = this.scaleCal.reading(readingStemOf(m.uuid))?.fat_raw_pct
+      return a != null && b != null && Math.abs(a - b) < REPLAY_RAW_PCT
+    }
     const fat = this.book.fatAt(m.ts, m.source)
-    if (fat == null) return false
-    return Math.abs(prev.value - m.value) < REPLAY_KG && Math.abs(prev.fat - fat) < REPLAY_FAT
+    return prev.fat != null && fat != null && Math.abs(prev.fat - fat) < REPLAY_FAT
+  }
+
+  /** Two included masses at the SAME instant are one weigh-in delivered
+   *  twice (the S400 and Xiaomi Home both stamp the scale's own clock): only
+   *  one counts. Ranked like the pass walks them (compareWeighins: S400 BLE
+   *  first, then the lower uuid); this one loses when a preferred copy still
+   *  counts. */
+  private sameInstantLoses(m: { uuid: string; ts: string; source: string | null }): boolean {
+    return this.book.includedMassesAt(m.ts, m.uuid).some((o) => compareWeighins({ ...o, ts: m.ts }, m) < 0)
+  }
+
+  // ── S400 fat calibration (against Xiaomi Home) ─────────────────
+
+  /** The stored calibration model, or null before the first fit. */
+  scaleModel(): CalModel | null {
+    return parseModel(this.deps.getMeta(SCALE_CAL_META))
+  }
+
+  /** Re-pair S400 readings with non-S400 weigh-ins, refit, store the model
+   *  when it changed, and write the calibrated value onto every S400 fat
+   *  sample (paired or not: one consistent series). Raw values stay in
+   *  scale_readings. */
+  recalibrateScale(): CalModel {
+    backfillScaleReadings(this.deps.db)
+    // Body-composition formula values first (new rows, a changed profile):
+    // the per-metric refits at the end read them.
+    try {
+      this.refreshMetrics()
+    } catch (err) {
+      this.log(`scale: body metrics failed: ${err instanceof Error ? err.message : 'error'}`)
+    }
+    const nowIso = new Date(this.now()).toISOString()
+    const sinceIso = new Date(this.now() - 400 * 86_400_000).toISOString()
+    const readings = this.scaleCal.readingsWithRaw(sinceIso)
+    let pairs: ReturnType<typeof pairReadings> = []
+    if (readings.length) {
+      const first = Date.parse(readings[0].measured_at) - PAIR_WINDOW_MS
+      const last = Date.parse(readings[readings.length - 1].measured_at) + PAIR_WINDOW_MS
+      const refs = this.scaleCal.referenceWeighins(new Date(first).toISOString(), new Date(last).toISOString(), this.deps.getScaleReferenceSources?.())
+      pairs = pairReadings(readings, refs)
+    }
+    // Manual fat values (weighin_pair metric fat_pct) join the automatic
+    // HealthKit pairs; for the same reading the manual one wins.
+    const manualFat = this.scaleCal.refValues('fat_pct').filter((r) => r.fat_raw_pct != null)
+    if (manualFat.length) {
+      const byReading = new Map(pairs.map((p) => [p.reading_uuid, p]))
+      for (const r of manualFat)
+        byReading.set(r.reading_uuid, {
+          reading_uuid: r.reading_uuid,
+          measured_at: r.measured_at,
+          kg: r.kg,
+          raw_pct: r.fat_raw_pct!,
+          ref_uuid: `manual:fat_pct:${r.reading_uuid}`,
+          ref_fat_pct: r.value,
+          ref_source: r.source,
+        })
+      pairs = [...byReading.values()].sort((x, y) => x.measured_at.localeCompare(y.measured_at))
+    }
+    this.scaleCal.setPairs(pairs)
+    const prev = this.scaleModel()
+    let model = fitCalibration(pairs, nowIso)
+    const refit = !sameModel(prev, model)
+    if (!refit) model = prev!
+    else {
+      this.deps.setMeta(SCALE_CAL_META, JSON.stringify(model))
+      if (prev || model.kind !== 'none')
+        this.log(`scale: fat calibration ${model.kind} from ${model.n} pair(s)`) // no body numbers
+    }
+    // Every food day whose stored S400 fat moved is re-sent, not only today.
+    const changedTs = this.scaleCal.applyToAll(model)
+    if (changedTs.length) {
+      const R = this.deps.getConfig().rollover_hour
+      const days = [...new Set(changedTs.map((ts) => foodDay(Date.parse(ts), R)))].sort()
+      for (const d of days) this.changed(d)
+      this.log(`scale: fat calibration rewrote ${changedTs.length} S400 fat sample(s) on ${days.length} day(s)`) // counts only
+    }
+    try {
+      for (const k of CALIBRATED_METRICS) this.refitMetric(k)
+    } catch (err) {
+      this.log(`scale: body metric calibration failed: ${err instanceof Error ? err.message : 'error'}`)
+    }
+    return model
+  }
+
+  // ── S400 body composition (bodycomp.ts) ─────────────────────────
+
+  /** (Re)compute the formula metrics of every reading whose stored ones are
+   *  missing or were computed with another profile. Returns rows written. */
+  refreshMetrics(): number {
+    const profile = this.deps.getScaleProfile?.()
+    const key = profileKey(profile)
+    const rows = this.scaleCal.metricInputs()
+    let n = 0
+    this.deps.db.transaction(() => {
+      for (const r of rows) {
+        const cur = parseMetrics(r.metrics)
+        if (cur && cur.v === METRICS_VERSION && cur.profile === key) continue
+        if (!key && r.metrics == null && r.impedance_inferred === 0) continue
+        const m = computeMetrics(r, profile)
+        this.scaleCal.setMetrics(r.uuid, m ? JSON.stringify(m) : null, m?.impedance_inferred ?? false)
+        n++
+      }
+    })()
+    return n
+  }
+
+  /** The stored per-metric models (fat excluded: scaleModel()). */
+  metricModels(): Partial<Record<MetricKey, CalModel>> {
+    try {
+      const raw = this.deps.getMeta(METRIC_CAL_META)
+      const v = raw ? (JSON.parse(raw) as Record<string, unknown>) : {}
+      const out: Partial<Record<MetricKey, CalModel>> = {}
+      for (const k of CALIBRATED_METRICS) {
+        const m = v[k] == null ? null : parseModel(JSON.stringify(v[k]))
+        if (m) out[k] = m
+      }
+      return out
+    } catch {
+      return {}
+    }
+  }
+
+  /** The manual pairs of one metric: formula value (raw) vs his value. */
+  private metricPairs(metric: MetricKey): Array<CalPair & { impedance_inferred: boolean }> {
+    const out: Array<CalPair & { impedance_inferred: boolean }> = []
+    for (const r of this.scaleCal.refValues(metric)) {
+      const raw = parseMetrics(r.metrics)?.values[metric]
+      if (raw == null) continue
+      out.push({
+        reading_uuid: r.reading_uuid,
+        measured_at: r.measured_at,
+        kg: r.kg,
+        raw_pct: raw,
+        ref_uuid: `manual:${metric}:${r.reading_uuid}`,
+        ref_fat_pct: r.value,
+        ref_source: r.source,
+        impedance_inferred: r.impedance_inferred === 1,
+      })
+    }
+    return out
+  }
+
+  /** Refit one metric from its manual pairs; stored when it changed. */
+  refitMetric(metric: MetricKey): CalModel {
+    const models = this.metricModels()
+    const prev = models[metric] ?? null
+    const model = fitMetric(metric, this.metricPairs(metric), new Date(this.now()).toISOString())
+    if (sameModel(prev, model)) return prev!
+    if (model.kind === 'none' && !prev) return model
+    const all: Record<string, CalModel> = { ...models }
+    if (model.kind === 'none') delete all[metric]
+    else all[metric] = model
+    this.deps.setMeta(METRIC_CAL_META, JSON.stringify(all))
+    this.log(`scale: ${metric} calibration ${model.kind} from ${model.n} pair(s)`) // no body numbers
+    this.changed(this.today())
+    return model
+  }
+
+  /** The views of one stored reading (fat from the fat calibration). */
+  private readingViews(
+    row: ScaleReadingRow,
+    models: Partial<Record<MetricKey, CalModel>>,
+    fatModel: CalModel | null,
+    fatSample: number | null,
+  ): Array<MetricView & { raw?: number }> {
+    return metricViews(parseMetrics(row.metrics), models, this.fatOverride(row, fatModel, fatSample), row.kg)
+  }
+
+  /** The fat view: the stored S400 fat sample (what the trend reads) when
+   *  there is one, else the calibrated / raw value of the row. */
+  private fatOverride(row: ScaleReadingRow, fatModel: CalModel | null, fatSample: number | null): FatOverride | null {
+    const p = readingProvenance(row, fatModel)
+    const pct =
+      fatSample != null
+        ? fatSample * 100
+        : p.status !== 'uncalibrated' && row.fat_cal_pct != null
+          ? row.fat_cal_pct
+          : (row.fat_raw_pct ?? parseMetrics(row.metrics)?.values.fat_pct ?? null)
+    if (pct == null) return null
+    const basis = basisOfProvenance(p)
+    const note = calibrationText('fat_pct', p)
+    // raw = the row's open-formula fat, never the displayed (calibrated) one.
+    return { value: pct, basis, note, raw: row.fat_raw_pct ?? null }
+  }
+
+  /** day.body: the latest S400 weigh-in of the last 7 days that is his (an
+   *  outlier, test, or hand-excluded reading is skipped), with its metrics
+   *  in the iOS order. Null when there is none. */
+  dayBody(): { measured_at: string; kg: number; metrics: MetricView[] } | null {
+    const rows = this.scaleCal.recentReadingsWithVerdict(new Date(this.now() - DAY_BODY_WINDOW_MS).toISOString())
+    const row = rows.find((r) => r.mass_excluded == null || BODY_OK_EXCLUSIONS.has(r.mass_excluded))
+    if (!row) return null
+    const views = this.readingViews(row, this.metricModels(), this.scaleModel(), this.book.fatAt(row.measured_at, SCALE_SOURCE))
+    return {
+      measured_at: row.measured_at,
+      kg: Math.round(row.kg * 10) / 10,
+      metrics: views.map(({ key, label, value, unit, basis, note }) => ({ key, label, value, unit, basis, note })),
+    }
+  }
+
+  /** health__meal weighin_pair: one value from the Xiaomi report for the
+   *  S400 weigh-in within 180 s of measured_at. Stored (a re-submit
+   *  replaces it), then THAT metric is refitted. BMI is never calibrated: a
+   *  BMI pair reports the difference (a height check).
+   *
+   *  Guards, each overridable with force:true once he confirms: the matched
+   *  reading must be his (not excluded as someone else / a test / by hand;
+   *  the same filter as day.body), and the value must sit within 10 fit
+   *  units of the formula (a lb-for-kg slip or the wrong metric, which one
+   *  pair would otherwise turn straight into an offset model). */
+  weighinPair(p: { measured_at?: unknown; metric?: unknown; value?: unknown; source?: unknown; force?: unknown }): Record<string, unknown> {
+    const metric = typeof p.metric === 'string' ? (p.metric.trim().toLowerCase() as MetricKey) : ('' as MetricKey)
+    if (metric === 'lean_kg') throw new BadRequest('lean_kg is not paired: it is weight x (1 - body fat) and follows the fat calibration; pair fat_pct instead')
+    if (!PAIRABLE_METRICS.includes(metric)) throw new BadRequest(`metric must be one of ${PAIRABLE_METRICS.join(', ')}`)
+    const t = typeof p.measured_at === 'string' ? Date.parse(p.measured_at) : NaN
+    if (!Number.isFinite(t)) throw new BadRequest('measured_at must be the ISO time of the weigh-in (body.weighin meta measured_at)')
+    const value = typeof p.value === 'number' ? p.value : typeof p.value === 'string' && p.value.trim() ? Number(p.value) : NaN
+    const [lo, hi] = METRICS[metric].range
+    if (!Number.isFinite(value) || value < lo || value > hi) throw new BadRequest(`value for ${metric} must be a number in ${lo}-${hi}`)
+    const force = p.force === true
+    const source = cleanText(p.source, 60) ?? 'xiaomi report'
+    const atIso = new Date(t).toISOString()
+    this.refreshMetrics()
+    const row = this.scaleCal.readingNear(atIso)
+    if (!row) throw new BadRequest(`no S400 weigh-in within ${PAIR_WINDOW_MS / 1000} s of ${atIso}`)
+    const excluded = row.mass_excluded
+    if (excluded != null && !BODY_OK_EXCLUSIONS.has(excluded) && !force)
+      throw new BadRequest(
+        `the S400 weigh-in at ${row.measured_at} is excluded ("${excluded}"), so it may not be his; check weighins, and re-send with force:true only if it is`,
+      )
+    const formula = metric === 'fat_pct' ? (row.fat_raw_pct ?? parseMetrics(row.metrics)?.values.fat_pct ?? null) : (parseMetrics(row.metrics)?.values[metric] ?? null)
+    const maxDiff = IMPLAUSIBLE_FIT_UNITS * METRICS[metric].fitUnit
+    if (formula != null && metric !== 'bmi' && Math.abs(value - formula) > maxDiff && !force) {
+      const unit = METRICS[metric].unit
+      throw new BadRequest(
+        `implausible: ${metric} ${value} is ${Math.round(Math.abs(value - formula) * 100) / 100}${unit ? ` ${unit}` : ''} from the formula's ${Math.round(formula * 100) / 100} (limit ${maxDiff}); check the metric and the unit (kg, not lb), and re-send with force:true only if it is right`,
+      )
+    }
+    const nowIso = new Date(this.now()).toISOString()
+    this.scaleCal.upsertRefValue({ reading_uuid: row.uuid, metric, value, source, ref_measured_at: atIso }, nowIso)
+    const reading = { uuid: row.uuid, measured_at: row.measured_at, kg: row.kg, impedance_inferred: row.impedance_inferred === 1, excluded, forced: force }
+    const noFormula = formula == null ? `no formula ${metric} for that reading yet (needs scale.profile${METRICS[metric].usesImpedance ? ' and an impedance' : ''}); stored, it joins the fit once there is one` : null
+    if (metric === 'bmi') {
+      const h = this.deps.getScaleProfile?.()?.height_cm
+      return {
+        metric,
+        reading,
+        stored: { value, source },
+        calibrated: false,
+        formula_bmi: formula == null ? null : Math.round(formula * 100) / 100,
+        diff: formula == null ? null : Math.round((value - formula) * 100) / 100,
+        implied_height_cm: Math.round(Math.sqrt(row.kg / value) * 1000) / 10,
+        profile_height_cm: typeof h === 'number' ? h : null,
+        note: 'BMI is not calibrated: the difference is a height check (implied_height_cm is the height the reference BMI implies at this weight).',
+      }
+    }
+    if (metric === 'fat_pct') {
+      const model = this.recalibrateScale()
+      const prov = provenanceOf(model)
+      return {
+        metric,
+        reading,
+        stored: { value, source },
+        formula_value: formula == null ? null : Math.round(formula * 100) / 100,
+        calibrated_value: formula == null ? null : applyModel(model, formula),
+        residual: formula == null ? null : Math.round((value - applyModel(model, formula)) * 100) / 100,
+        model,
+        status: basisOf(model),
+        label: calibrationNote(prov),
+        note: noFormula ?? 'Manual fat pairs join the automatic HealthKit pairs; for the same weigh-in the manual value wins.',
+      }
+    }
+    const model = this.refitMetric(metric)
+    const cal = formula == null ? null : applyMetric(model, formula)
+    return {
+      metric,
+      reading,
+      stored: { value, source },
+      formula_value: formula == null ? null : Math.round(formula * 10000) / 10000,
+      calibrated_value: cal == null ? null : Math.round(cal * 1000) / 1000,
+      residual: cal == null ? null : Math.round((value - cal) * 1000) / 1000,
+      model,
+      status: basisOf(model),
+      note: noFormula,
+    }
+  }
+
+  /** health__meal weighin_unpair: remove the manual value of one metric for
+   *  the S400 weigh-in within 180 s of measured_at (a typo, the wrong metric,
+   *  the wrong weigh-in), then refit that metric. Matches regardless of the
+   *  reading's verdict, so a pair on an excluded reading can be taken back. */
+  weighinUnpair(p: { measured_at?: unknown; metric?: unknown }): Record<string, unknown> {
+    const metric = typeof p.metric === 'string' ? (p.metric.trim().toLowerCase() as MetricKey) : ('' as MetricKey)
+    if (!PAIRABLE_METRICS.includes(metric) && metric !== 'lean_kg') throw new BadRequest(`metric must be one of ${PAIRABLE_METRICS.join(', ')}`)
+    const t = typeof p.measured_at === 'string' ? Date.parse(p.measured_at) : NaN
+    if (!Number.isFinite(t)) throw new BadRequest('measured_at must be the ISO time of the weigh-in (body.weighin meta measured_at)')
+    const row = this.scaleCal.readingNear(new Date(t).toISOString())
+    if (!row) throw new BadRequest(`no S400 weigh-in within ${PAIR_WINDOW_MS / 1000} s of ${new Date(t).toISOString()}`)
+    const prev = this.scaleCal.refValue(row.uuid, metric)
+    const removed = this.scaleCal.deleteRefValue(row.uuid, metric)
+    const reading = { uuid: row.uuid, measured_at: row.measured_at, kg: row.kg, excluded: row.mass_excluded }
+    if (!removed) return { metric, reading, removed: false, note: 'no manual value for that weigh-in and metric' }
+    // bmi has no model; lean_kg (no longer pairable) only had legacy values.
+    if (metric === 'bmi' || metric === 'lean_kg') return { metric, reading, removed: { value: prev?.value ?? null, source: prev?.source ?? null } }
+    const model = metric === 'fat_pct' ? this.recalibrateScale() : this.refitMetric(metric)
+    return { metric, reading, removed: { value: prev?.value ?? null, source: prev?.source ?? null }, model, status: basisOf(model) }
+  }
+
+  /** health__meal scale_calibration: the model, and per pair the Xiaomi
+   *  value, the open-formula raw, the calibrated value, and the residual. */
+  scaleCalibration(): {
+    model: CalModel | null
+    status: FatProvenance['status']
+    reference: string | null
+    readings: { total: number; with_impedance: number; paired: number }
+    pairs: Array<{
+      measured_at: string
+      kg: number
+      ref_source: string | null
+      ref_fat_pct: number
+      raw_pct: number
+      /** The raw came from an old 0.1-point sample (backfill), not the formula. */
+      raw_quantized: boolean
+      calibrated_pct: number
+      residual_pct: number
+      in_fit: boolean
+    }>
+    note: string
+    metrics: Record<
+      string,
+      {
+        label: string
+        unit: string
+        formula: string
+        model: CalModel | null
+        status: MetricBasis
+        pairs: Array<{
+          measured_at: string
+          reading_uuid: string
+          source: string | null
+          ref_value: number
+          formula_value: number
+          calibrated_value: number
+          residual: number
+          impedance_inferred: boolean
+          in_fit: boolean
+        }>
+      }
+    >
+    bmi_checks: Array<{ measured_at: string; source: string; ref_bmi: number; formula_bmi: number | null; diff: number | null; implied_height_cm: number }>
+    body_note: string
+  } {
+    const model = this.scaleModel()
+    const rows = this.scaleCal.pairedReadings(100)
+    const c = this.scaleCal.counts()
+    const prov = provenanceOf(model)
+    return {
+      model,
+      status: prov.status,
+      reference: referenceName(model),
+      readings: { total: c.readings ?? 0, with_impedance: c.with_impedance ?? 0, paired: c.paired ?? 0 },
+      pairs: rows
+        .filter((r) => r.fat_raw_pct != null && r.pair_fat_pct != null)
+        .map((r, i) => {
+          const cal = applyModel(model, r.fat_raw_pct!)
+          return {
+            measured_at: r.measured_at,
+            kg: r.kg,
+            ref_source: r.pair_source ?? null,
+            ref_fat_pct: r.pair_fat_pct!,
+            raw_pct: Math.round(r.fat_raw_pct! * 100) / 100,
+            raw_quantized: r.raw_from_sample === 1,
+            calibrated_pct: cal,
+            residual_pct: Math.round((r.pair_fat_pct! - cal) * 100) / 100,
+            in_fit: i < FIT_MAX_PAIRS,
+          }
+        }),
+      note:
+        'The S400 open formula differs from the reference app\'s; the calibrated value tracks the reference (status provisional = offset from 1-2 pairs; loo_rms_pct = the out-of-sample error). Manual fat values (weighin_pair) join the automatic pairs, ref_source names them. Fat % is a trend only, never a goal check.',
+      metrics: this.metricCalibrationReport(),
+      bmi_checks: this.scaleCal.refValues('bmi').map((r) => {
+        const f = parseMetrics(r.metrics)?.values.bmi ?? null
+        return {
+          measured_at: r.measured_at,
+          source: r.source,
+          ref_bmi: r.value,
+          formula_bmi: f == null ? null : Math.round(f * 100) / 100,
+          diff: f == null ? null : Math.round((r.value - f) * 100) / 100,
+          implied_height_cm: Math.round(Math.sqrt(r.kg / r.value) * 1000) / 10,
+        }
+      }),
+      body_note:
+        'Body composition beyond fat is Mi Scale formula estimates from weight + 50 kHz impedance + profile (trend only, never a measurement). muscle_kg is Xiaomi-style (fat-free mass minus bone, what Xiaomi Home calls muscle); smm_kg is Janssen skeletal muscle, a different, smaller quantity. Per metric: formula (no pair), provisional (offset from 1-2 manual pairs), calibrated (3+ pairs, loo_rms_pct in the metric\'s unit). BMI is never calibrated (a pair is a height check). No body age or body score (no published method).',
+    }
+  }
+
+  /** Per-metric models and their manual pairs, with residuals. */
+  private metricCalibrationReport(): ReturnType<FoodService['scaleCalibration']>['metrics'] {
+    const models = this.metricModels()
+    const out: ReturnType<FoodService['scaleCalibration']>['metrics'] = {}
+    for (const k of CALIBRATED_METRICS) {
+      const model = models[k] ?? null
+      const pairs = this.metricPairs(k)
+      const dp = (v: number) => Math.round(v * 1000) / 1000
+      out[k] = {
+        label: METRICS[k].label,
+        unit: METRICS[k].unit,
+        formula: METRICS[k].ref,
+        model,
+        status: basisOf(model),
+        pairs: pairs.map((p, i) => {
+          const cal = applyMetric(model, p.raw_pct)
+          return {
+            measured_at: p.measured_at,
+            reading_uuid: p.reading_uuid,
+            source: p.ref_source ?? null,
+            ref_value: p.ref_fat_pct,
+            formula_value: dp(p.raw_pct),
+            calibrated_value: dp(cal),
+            residual: dp(p.ref_fat_pct - cal),
+            impedance_inferred: p.impedance_inferred,
+            in_fit: i >= pairs.length - FIT_MAX_PAIRS,
+          }
+        }),
+      }
+    }
+    return out
   }
 
   /** 7-day average of INCLUDED readings up to this one (n >= 3), and its
@@ -1210,16 +1869,39 @@ export class FoodService {
       .filter((s) => s.kind === 'mass' && now - Date.parse(s.ts) <= WEIGHIN_RECENT_MS)
       .sort((a, b) => a.ts.localeCompare(b.ts))
       .slice(-WEIGHIN_MAX_PER_BATCH)
+    const model = masses.some((m) => m.source === SCALE_SOURCE) ? this.scaleModel() : null
     for (const m of masses) {
-      const fat = fresh.find((s) => s.kind === 'fat' && s.ts === m.ts && s.source === m.source) ?? null
+      const freshFat = fresh.find((s) => s.kind === 'fat' && s.ts === m.ts && s.source === m.source) ?? null
+      // The label follows what THIS reading's sample carries (its own row),
+      // never just the global model.
+      const provenance =
+        m.source === SCALE_SOURCE && freshFat ? readingProvenance(this.scaleCal.reading(readingStemOf(freshFat.uuid)), model) : null
+      // The stored value: an S400 fat sample may have just been calibrated.
+      const fat = freshFat ? { value: this.book.fatAt(m.ts, m.source) ?? freshFat.value } : null
       const excluded = this.book.bodyExcluded(m.uuid)
       // An outlier still names how far off it is (vs the last included reading).
       const prev = !excluded || excluded === EXCL_OUTLIER ? this.book.previousMass(m.ts) : null
-      const extras = excluded
-        ? {}
-        : { avg7: this.avg7(m.ts), confounders: this.activeConfoundersLine(foodDay(Date.parse(m.ts), this.deps.getConfig().rollover_hour)) }
+      const extras = {
+        ...(excluded
+          ? {}
+          : { avg7: this.avg7(m.ts), confounders: this.activeConfoundersLine(foodDay(Date.parse(m.ts), this.deps.getConfig().rollover_hour)) }),
+        ...(provenance ? { fatCalibration: provenance } : {}),
+        ...(m.source === SCALE_SOURCE ? { body: this.bodyLineFor(m.uuid, freshFat ? (this.book.fatAt(m.ts, m.source) ?? freshFat.value) : null) } : {}),
+      }
       this.deps.emit('body.weighin', `body.weighin:${m.source ?? '?'}:${m.ts}`, weighinEvent(m, fat, prev, excluded, extras))
     }
+  }
+
+  /** The body.weighin extra line of one S400 reading (visceral + muscle). */
+  private bodyLineFor(massUuid: string, fatSample: number | null): { line: string; visceral?: number; muscle_kg?: number } | null {
+    const row = this.scaleCal.reading(readingStemOf(massUuid))
+    if (!row) return null
+    const views = this.readingViews(row, this.metricModels(), this.scaleModel(), fatSample)
+    const line = bodyEventLine(views)
+    if (!line) return null
+    const v = views.find((x) => x.key === 'visceral')
+    const mu = views.find((x) => x.key === 'muscle_kg')
+    return { line, ...(v ? { visceral: v.value } : {}), ...(mu ? { muscle_kg: mu.value } : {}) }
   }
 
   // ── HTTP (mounted on the live listener, behind its token) ───────

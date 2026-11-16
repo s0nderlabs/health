@@ -4,6 +4,7 @@ import {
   RING_CAP,
   INTENT_MATCH_BEFORE_MS,
   INTENT_REARM_FUSE_MS,
+  IDLE_END_S,
   intentRearmPlan,
 } from '../src/livestate.js'
 import type { SessionSummary } from '../src/livestate.js'
@@ -966,4 +967,530 @@ describe('intentRearmPlan (the boot-guard policy, pure)', () => {
     feed(state, 0, 120, 130) // hot immediately: start at +90s, inside the fuse
     expect(events.find((e) => e.cls === 'live.session')?.meta.confidence).toBe('high')
   })
+})
+
+describe('idle end (no effort for IDLE_END_S)', () => {
+  const IDLE_MIN = Math.round(IDLE_END_S / 60)
+  // Generic profile: rest 56, max 181 -> hot (start line) 112, cool 87.
+  const H = { maxHr: 181, restHr: 56 }
+  const rests = (events: Emitted[]) => events.filter((e) => e.cls === 'live.rest')
+  // 70 -> 130 in 10-bpm steps: a physiological ramp the doubling gate accepts.
+  // The first hot (>= 112) sample is the 120 at s=14: the session start.
+  const ramp = (state: LiveState) => {
+    feed(state, 0, 10, 70)
+    feed(state, 10, 6, (i) => 80 + i * 10)
+  }
+  const START_S = 14
+
+  test('tennis shape: 60 min of play then 2 h of everyday HR grazing the cool line ends idle', () => {
+    const { state, events, summaries } = harness(H)
+    ramp(state)
+    // 130-165 play: 150 s rallies at 145-165, 30 s changeovers at 130.
+    const play = (i: number) => (i % 180 < 150 ? 145 + ((i * 5) % 21) : 130)
+    feed(state, 16, 3600, play)
+    const lastEffortS = 16 + 3599
+    const lastEffortBpm = play(3599)
+    // 85-110 wobbling across the cool line: the 5-min sustained-cool end
+    // never holds (the field bug). Nothing here reaches the start line.
+    feed(state, 3616, 7200, (i) => 85 + ((i * 7) % 26))
+    expect(summaries).toHaveLength(1)
+    const s = summaries[0]
+    expect(s.reason).toBe('idle')
+    // Duration, average, zones describe the play, not the tail.
+    expect(s.duration_s).toBe(lastEffortS - START_S)
+    expect(s.avg_bpm).toBeGreaterThanOrEqual(140)
+    expect(s.max_bpm).toBe(165)
+    expect(s.zone_seconds[0]).toBe(0) // no everyday-life Z0 tail
+    const zoneTotal = s.zone_seconds.reduce((a, b) => a + b, 0)
+    expect(Math.abs(zoneTotal - s.duration_s)).toBeLessThanOrEqual(2)
+    // Recovery read from the sample 60s after the last effort; the archived
+    // end includes that minute.
+    const bpmAt60 = 85 + (((lastEffortS + 60 - 3616) * 7) % 26)
+    expect(s.recovery_60s_drop).toBe(lastEffortBpm - bpmAt60)
+    expect(s.ended_at).toBe(new Date(T0 + (lastEffortS + 60) * 1000).toISOString())
+    // It fired exactly IDLE_END_S after the last effort sample: one rest
+    // event, coach-readable reason.
+    expect(rests(events)).toHaveLength(1)
+    expect(rests(events)[0].content).toContain(`Session over (ended after ${IDLE_MIN} min without effort)`)
+    expect(rests(events)[0].content).toContain('HR recovery: -')
+    expect(rests(events)[0].meta.duration_s).toBe(String(s.duration_s))
+  })
+
+  test('the idle end fires on the sample IDLE_END_S after the last effort, not before', () => {
+    const { state, summaries } = harness(H)
+    ramp(state)
+    feed(state, 16, 600, 140)
+    const lastEffortS = 615
+    feed(state, 616, IDLE_END_S - 1, (i) => 95 + (i % 10)) // up to last + IDLE_END_S - 1
+    expect(summaries).toHaveLength(0)
+    feed(state, lastEffortS + IDLE_END_S, 1, 98)
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0].reason).toBe('idle')
+    expect(summaries[0].duration_s).toBe(lastEffortS - START_S)
+  })
+
+  test('ride shape: 4x8 min intervals with 4 min recoveries never idle-ends mid-ride', () => {
+    const { state, summaries } = harness(H)
+    ramp(state)
+    let t = 16
+    for (let rep = 0; rep < 4; rep++) {
+      feed(state, t, 480, (i) => 150 + (i % 11)) // 150-160 work
+      t += 480
+      feed(state, t, 240, (i) => 115 + (i % 11)) // 115-125 recovery
+      t += 240
+      expect(summaries).toHaveLength(0)
+    }
+    feed(state, t, 310, 75) // the ride's real end: sustained cool
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0].reason).toBe('cooldown')
+  })
+
+  test('lift shape: 40 s sets every 5-6 min with 95-105 rests never idle-ends; ends normally after', () => {
+    const lift = (state: LiveState): number => {
+      ramp(state)
+      feed(state, 16, 120, (i) => 120 + (i % 6)) // warmup row starts the session
+      let t = 136
+      for (let set = 0; set < 8; set++) {
+        feed(state, t, 40, (i) => 125 + Math.round((i * 20) / 39)) // set peaks 125-145
+        t += 40
+        const rest = set % 2 ? 320 : 260 // set-to-set 5-6 min
+        feed(state, t, rest, (i) => 95 + (i % 11)) // 95-105 between sets
+        t += rest
+      }
+      return t
+    }
+    {
+      const { state, summaries } = harness(H)
+      const t = lift(state)
+      expect(summaries).toHaveLength(0) // never idle-ended mid-lift
+      feed(state, t, 310, 75)
+      expect(summaries).toHaveLength(1)
+      expect(summaries[0].reason).toBe('cooldown')
+    }
+    {
+      // Same lift, but he stays at 95-105 afterwards (above the cool line):
+      // the idle end closes it IDLE_END_S after the last set.
+      const { state, summaries } = harness(H)
+      const t = lift(state)
+      const lastSetEndS = t - 320 - 1 // the 8th set's final second (set index 7 -> 320s rest)
+      feed(state, t, IDLE_END_S + 600, (i) => 95 + (i % 11))
+      expect(summaries).toHaveLength(1)
+      expect(summaries[0].reason).toBe('idle')
+      expect(summaries[0].duration_s).toBe(lastSetEndS - START_S)
+    }
+  })
+
+  test('a sustained effort in the tail (a flight of stairs, 30 s at 120) resets the idle clock', () => {
+    const { state, summaries } = harness(H)
+    ramp(state)
+    feed(state, 16, 1200, 140) // 20 min of work, last effort at 1215
+    feed(state, 1216, 600, (i) => 95 + (i % 6)) // 10 min tail
+    const stairsS = 1816
+    feed(state, stairsS, 30, 120) // a flight of stairs: 30 s at 120
+    const lastStairsS = stairsS + 29
+    feed(state, lastStairsS + 1, IDLE_END_S - 1, (i) => 95 + (i % 6))
+    // Past IDLE_END_S from the work's end, but the stairs reset the clock.
+    expect(lastStairsS + IDLE_END_S - 1).toBeGreaterThan(1215 + IDLE_END_S)
+    expect(summaries).toHaveLength(0)
+    feed(state, lastStairsS + IDLE_END_S, 5, 97)
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0].reason).toBe('idle')
+    expect(summaries[0].duration_s).toBe(lastStairsS - START_S)
+  })
+
+  test('a single sample at the line (one-step optical jitter) does NOT reset the idle clock', () => {
+    const { state, summaries } = harness(H)
+    ramp(state)
+    feed(state, 16, 1200, 140) // last effort at 1215
+    feed(state, 1216, 600, (i) => 95 + (i % 6))
+    feed(state, 1816, 1, 120) // one isolated sample
+    // Run past the work's idle mark but stop well short of the jitter's own
+    // (1816 + IDLE_END_S): only an end anchored at 1215 can fire in here.
+    const tailEndS = 1215 + IDLE_END_S + 100
+    expect(tailEndS).toBeLessThan(1816 + IDLE_END_S)
+    feed(state, 1817, tailEndS - 1817 + 1, (i) => 95 + (i % 6))
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0].reason).toBe('idle')
+    expect(summaries[0].duration_s).toBe(1215 - START_S)
+  })
+
+  test('restart re-arm: the idle clock starts at re-arm, never earlier; the re-armed session still idle-ends', () => {
+    // The daemon restarted 45 min into a declared session; the boot guard
+    // re-arms the intent at T0 on a FRESH LiveState.
+    const plan = intentRearmPlan({
+      openSessionIso: new Date(T0 - 45 * 60_000).toISOString(),
+      lastTapIso: null,
+      now: T0,
+      scoredCoveringOpen: false,
+    })
+    expect(plan.armAt).not.toBeNull()
+    const { state, summaries, releases } = harness(H)
+    state.noteIntent(plan.armAt!)
+    feed(state, 0, 300, 135) // still working after the restart: re-detected
+    const lastEffortS = 299
+    // A clock counted from the original start (45 min ago) would end on the
+    // very next sample; it must run from the re-armed session instead.
+    feed(state, 300, IDLE_END_S - 1, (i) => 98 + (i % 6))
+    expect(summaries).toHaveLength(0)
+    feed(state, lastEffortS + IDLE_END_S, 1, 98)
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0].reason).toBe('idle')
+    expect(summaries[0].started_at).toBe(new Date(T0).toISOString())
+    expect(summaries[0].duration_s).toBe(lastEffortS)
+    expect(summaries[0].intent_matched).toBe(true)
+    expect(releases()).toBe(1)
+  })
+
+  test('tick-only path: a sparse feed ends idle on the tick that crosses IDLE_END_S', () => {
+    const { state, events, summaries } = harness(H)
+    ramp(state)
+    feed(state, 16, 600, 145)
+    const lastEffortS = 615
+    // Low-rate feed: one sample a minute, none on the IDLE_END_S mark.
+    for (let m = 1; m * 60 < IDLE_END_S; m++) {
+      state.addSample(T0 + (lastEffortS + m * 60) * 1000, { bpm: 100, rr_ms: [], contact: null })
+    }
+    state.tick(T0 + (lastEffortS + IDLE_END_S - 1) * 1000)
+    expect(summaries).toHaveLength(0)
+    state.tick(T0 + (lastEffortS + IDLE_END_S) * 1000)
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0].reason).toBe('idle')
+    expect(summaries[0].duration_s).toBe(lastEffortS - START_S)
+    // The 60s sample landed: recovery read, archived end = last effort + 60s.
+    expect(summaries[0].recovery_60s_drop).toBe(45)
+    expect(summaries[0].ended_at).toBe(new Date(T0 + (lastEffortS + 60) * 1000).toISOString())
+    expect(rests(events)[0].content).toContain('without effort')
+  })
+
+  test('no sample in the minute after the last effort: recovery unavailable, end = last effort', () => {
+    const { state, events, summaries } = harness(H)
+    ramp(state)
+    feed(state, 16, 600, 145)
+    const lastEffortS = 615
+    // First sample at +90 s (inside the 120 s heard-time bar, so the idle
+    // clock keeps running), then one a minute: none lands on the 60 s mark.
+    for (let k = 0; 90 + k * 60 < IDLE_END_S; k++) {
+      state.addSample(T0 + (lastEffortS + 90 + k * 60) * 1000, { bpm: 100, rr_ms: [], contact: null })
+    }
+    expect(summaries).toHaveLength(0)
+    state.tick(T0 + (lastEffortS + IDLE_END_S) * 1000)
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0].reason).toBe('idle')
+    expect(summaries[0].recovery_60s_drop).toBeNull()
+    expect(summaries[0].ended_at).toBe(new Date(T0 + lastEffortS * 1000).toISOString())
+    expect(rests(events)[0].content).toContain('HR recovery unavailable')
+  })
+
+  test('feed silence still ends as feed_drop, never idle', () => {
+    const { state, summaries } = harness(H)
+    ramp(state)
+    feed(state, 16, 600, 145)
+    const lastS = 615
+    for (let k = 1; k <= 60; k++) {
+      state.tick(T0 + (lastS + k * 30) * 1000)
+      if (summaries.length) break
+    }
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0].reason).toBe('feed_drop')
+  })
+
+  test('silence after a quiet tail is not idle (replayable effort may hide in it): feed_drop owns it', () => {
+    const { state, summaries } = harness(H)
+    ramp(state)
+    feed(state, 16, 600, 145)
+    // A quiet tail long enough that the idle mark (615 + IDLE_END_S) lands
+    // in the silence, before feed_drop: only the freshness guard stops it.
+    const quietS = IDLE_END_S - 500
+    feed(state, 616, quietS, 100)
+    const lastS = 615 + quietS
+    expect(615 + IDLE_END_S).toBeLessThan(lastS + 720)
+    for (let k = 1; k <= 60; k++) {
+      state.tick(T0 + (lastS + k * 30) * 1000)
+      if (summaries.length) break
+    }
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0].reason).toBe('feed_drop')
+  })
+
+  test('an artifact storm (alive feed, every frame rejected) never idle-ends a workout', () => {
+    const { state, summaries } = harness(H)
+    ramp(state)
+    feed(state, 16, 300, 145) // last effort at 315
+    // Quiet accepted rest (none when IDLE_END_S <= 900) so the storm, capped
+    // under the garbage bound, still ends past the idle mark.
+    const quietS = Math.max(0, IDLE_END_S + 100 - 1000)
+    feed(state, 316, quietS, 100)
+    const stormS = 316 + quietS
+    feed(state, stormS, 1000, 223) // ceiling storm: all rejected
+    state.tick(T0 + (stormS + 1000) * 1000) // > IDLE_END_S since the last accepted effort
+    expect(stormS + 1000 - 315).toBeGreaterThan(IDLE_END_S)
+    expect(summaries).toHaveLength(0)
+  })
+})
+
+describe('idle end, production profile (near-line shapes)', () => {
+  // daemon.ts floors max HR at 187: rest 56 / max 187 -> hot (start line)
+  // 115, Z1 floor (the idle effort line) 108, cool 89.
+  const P = { maxHr: 187, restHr: 56 }
+  const rests = (events: Emitted[]) => events.filter((e) => e.cls === 'live.rest')
+  const ramp = (state: LiveState) => {
+    feed(state, 0, 10, 70)
+    feed(state, 10, 6, (i) => 80 + i * 10) // first hot (>= 115) sample: 120 at s=14
+  }
+  const START_S = 14
+  const tickEvery = (state: LiveState, fromS: number, toS: number, stepS = 30) => {
+    for (let t = fromS; t <= toS; t += stepS) state.tick(T0 + t * 1000)
+  }
+
+  test('heavy singles peaking under the start line (rests 96-101) keep one session open', () => {
+    const { state, summaries } = harness(P)
+    ramp(state)
+    feed(state, 16, 150, 125) // warmup sets start the session
+    let t = 166
+    let lastSingleS = 0
+    for (let c = 0; c < 6; c++) {
+      feed(state, t, 20, (i) => 104 + Math.round((i * 9) / 19)) // single: 104 -> 113
+      lastSingleS = t + 19
+      t += 20
+      feed(state, t, 280, (i) => 96 + (i % 6)) // rest 96-101
+      t += 280
+      expect(summaries).toHaveLength(0) // never idle-ended mid-lift
+    }
+    feed(state, t, IDLE_END_S + 100, (i) => 96 + (i % 6))
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0].reason).toBe('idle')
+    // The session covers the singles, not just the warmup.
+    expect(summaries[0].duration_s).toBe(lastSingleS - START_S)
+  })
+
+  test('an easy Z1 stretch at 106-113 (descent, recovery spin) is not idle: one session, intent kept', () => {
+    const { state, summaries, releases } = harness(P)
+    state.noteIntent(T0)
+    feed(state, 0, 600, 122)
+    // Longer than the idle window, all under the start line.
+    const z1S = IDLE_END_S + 300
+    feed(state, 600, z1S, (i) => 106 + (i % 8))
+    feed(state, 600 + z1S, 900, 124)
+    expect(summaries).toHaveLength(0)
+    feed(state, 1500 + z1S, 400, 80)
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0].reason).toBe('cooldown')
+    expect(summaries[0].intent_matched).toBe(true)
+    expect(summaries[0].duration_s).toBe(1500 + z1S)
+    expect(releases()).toBe(1)
+  })
+
+  test('a feed gap shorter than feed_drop counts as unknown, not idle (no split on the returning sample)', () => {
+    const { state, summaries } = harness(P)
+    ramp(state)
+    feed(state, 16, 600, 130) // last effort at 615
+    // Observed rest + the 661 s gap crosses IDLE_END_S on the returning
+    // sample; the observed rest alone does not.
+    const restS = IDLE_END_S - 660
+    feed(state, 616, restS, 100)
+    const lastS = 615 + restS
+    tickEvery(state, lastS + 5, lastS + 645) // 11 min of silence, ticking
+    expect(summaries).toHaveLength(0)
+    feed(state, lastS + 661, 1, 105) // the feed returns below the line
+    expect(lastS + 661 - 615).toBeGreaterThan(IDLE_END_S)
+    state.tick(T0 + (lastS + 666) * 1000)
+    expect(summaries).toHaveLength(0)
+    feed(state, lastS + 662, 300, 130) // the workout was still on
+    feed(state, lastS + 962, 310, 75)
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0].reason).toBe('cooldown')
+    expect(summaries[0].started_at).toBe(new Date(T0 + START_S * 1000).toISOString())
+  })
+
+  test('the gap is discounted, observed quiet still ends idle (IDLE_END_S of HEARD time)', () => {
+    const H = { maxHr: 181, restHr: 56 }
+    const { state, summaries } = harness(H)
+    feed(state, 0, 1800, 140) // last effort at 1799
+    // Observed quiet + the 630 s gap exceeds IDLE_END_S on the returning
+    // sample, so only the discount keeps it open there.
+    const obsS = IDLE_END_S - 300
+    feed(state, 1800, obsS, 100)
+    const lastS = 1799 + obsS
+    tickEvery(state, lastS + 1, lastS + 621)
+    feed(state, lastS + 630, 1, 100) // 630 s gap
+    expect(lastS + 630 - 1799).toBeGreaterThan(IDLE_END_S)
+    state.tick(T0 + (lastS + 636) * 1000)
+    expect(summaries).toHaveLength(0)
+    // Observed idle = (ts - 1799) - 630: reaches IDLE_END_S at this ts.
+    const endS = 1799 + 630 + IDLE_END_S
+    feed(state, lastS + 631, endS - 1 - (lastS + 631) + 1, 100)
+    expect(summaries).toHaveLength(0)
+    feed(state, endS, 1, 100)
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0].reason).toBe('idle')
+    expect(summaries[0].duration_s).toBe(1799)
+  })
+
+  test('a long artifact storm then one low accepted sample does not idle-end a ride that continues', () => {
+    const { state, summaries } = harness(P)
+    ramp(state)
+    feed(state, 16, 600, 150) // last accepted effort at 615
+    // Quiet accepted riding first (none when IDLE_END_S <= 900) so the low
+    // sample after the storm lands past the idle mark.
+    const quietS = Math.max(0, IDLE_END_S - 900)
+    feed(state, 616, quietS, 100)
+    const stormS = 616 + quietS
+    feed(state, stormS, 900, 230) // ceiling storm (ceiling 202): all rejected
+    tickEvery(state, stormS + 14, stormS + 884)
+    feed(state, stormS + 900, 1, 110)
+    expect(stormS + 900 - 615).toBeGreaterThan(IDLE_END_S)
+    feed(state, stormS + 901, 300, 150) // the ride continues
+    expect(summaries).toHaveLength(0)
+    feed(state, stormS + 1201, 310, 75)
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0].reason).toBe('cooldown')
+  })
+
+  test('a one-sample touch of the line every 14 min cannot hold the session open (bounded tail)', () => {
+    const { state, summaries } = harness(P)
+    ramp(state)
+    feed(state, 16, 3600, 140) // last effort at 3615
+    let t = 3616
+    for (let k = 0; k < 12; k++) {
+      feed(state, t, 839, (i) => 95 + ((i * 5) % 14)) // 95-108 wobble
+      t += 839
+      feed(state, t, 1, 116)
+      t += 1
+    }
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0].reason).toBe('idle')
+    expect(summaries[0].duration_s).toBe(3615 - START_S)
+    expect(state.sessionActive()).toBe(false)
+  })
+
+  test('3 h at 100 with one 113 sample every 10 min idle-ends (generic profile, hot 112)', () => {
+    const { state, summaries } = harness({ maxHr: 181, restHr: 56 })
+    feed(state, 0, 1800, 140)
+    feed(state, 1800, 10800, (i) => (i % 600 === 599 ? 113 : 100))
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0].reason).toBe('idle')
+    expect(summaries[0].duration_s).toBe(1799)
+  })
+
+  test('cadence lock (bpm ~92, RR proving ~144) is effort: no mid-ride idle split', () => {
+    const { state, summaries } = harness(P)
+    feed(state, 0, 600, 140, [430, 430])
+    const lockS = IDLE_END_S + 100 // longer than the idle window
+    feed(state, 600, lockS, 92, [415, 420])
+    feed(state, 600 + lockS, 300, 142, [420, 425])
+    expect(summaries).toHaveLength(0)
+    feed(state, 900 + lockS, 310, 75)
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0].reason).toBe('cooldown')
+  })
+
+  test('no live.confirm from the idle tail: confirm and end judge the same work window', () => {
+    const { state, events, summaries } = harness()
+    feed(state, 0, 600, 160, [1000]) // mismatched RR: cadence-lock signature
+    feed(state, 600, IDLE_END_S, 100, [600]) // consistent resting RR in the tail
+    expect(events.filter((e) => e.cls === 'live.confirm')).toHaveLength(0)
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0].reason).toBe('idle')
+    expect(summaries[0].confidence).toBe('low')
+    expect(summaries[0].demoted).toBe(true)
+  })
+
+  test('a yield long after the last effort archives the work, not the tail', () => {
+    const { state, summaries } = harness({ maxHr: 181, restHr: 56 })
+    feed(state, 0, 3600, 140)
+    feed(state, 3600, 840, 100)
+    state.yieldInterrupt(T0 + 4440 * 1000)
+    expect(summaries[0].reason).toBe('yield')
+    expect(summaries[0].duration_s).toBe(3599)
+    expect(summaries[0].avg_bpm).toBe(140)
+    expect(summaries[0].zone_seconds[0]).toBe(0)
+  })
+
+  test('a yield right after the effort keeps its short tail (unchanged)', () => {
+    const { state, summaries } = harness({ maxHr: 181, restHr: 56 })
+    feed(state, 0, 3600, 140)
+    feed(state, 3600, 60, 100)
+    state.yieldInterrupt(T0 + 3660 * 1000)
+    expect(summaries[0].reason).toBe('yield')
+    expect(summaries[0].duration_s).toBe(3660)
+  })
+
+  test('a feed_drop after a long quiet tail archives the work, not the tail', () => {
+    const { state, summaries } = harness({ maxHr: 181, restHr: 56 })
+    feed(state, 0, 3600, 140)
+    feed(state, 3600, 400, 100)
+    tickEvery(state, 4000, 4800)
+    expect(summaries[0].reason).toBe('feed_drop')
+    expect(summaries[0].duration_s).toBe(3599)
+  })
+
+  test('the start sample is the last effort: idle IDLE_END_S after it, recovery read at +60 s', () => {
+    const { state, events, summaries } = harness({ maxHr: 181, restHr: 56 })
+    feed(state, 0, 91, 125) // start at s=90
+    feed(state, 91, IDLE_END_S - 2, 100) // up to s = 90 + IDLE_END_S - 2
+    expect(summaries).toHaveLength(0)
+    feed(state, 90 + IDLE_END_S - 1, 1, 100)
+    expect(summaries).toHaveLength(0)
+    feed(state, 90 + IDLE_END_S, 1, 100)
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0].reason).toBe('idle')
+    expect(summaries[0].recovery_60s_drop).toBe(25)
+    expect(rests(events)[0].content).toContain('HR recovery: -25 bpm')
+  })
+
+  test('live.rest meta carries the end reason, archived ended_at, and the recovery read', () => {
+    const { state, events, summaries } = harness({ maxHr: 181, restHr: 56 })
+    feed(state, 0, 91, 125)
+    feed(state, 91, IDLE_END_S, 100)
+    const meta = rests(events)[0].meta
+    expect(meta.reason).toBe('idle')
+    expect(meta.ended_at).toBe(summaries[0].ended_at)
+    expect(meta.recovery_60s_drop).toBe('25')
+  })
+
+  // Field regression (the probe that raised IDLE_END_S from 900): a 12-min
+  // break after heavy squats, sitting at ~94, idle-ended the lift at 15 min
+  // and the bench, deadlift and accessory work never re-opened a session.
+  const longBreakLift = (breakS: number) => {
+    const h = harness(P)
+    const { state } = h
+    // A rise from `from` to `peak` over rampS, then a decay toward `floor`.
+    let t = 0
+    const set = (rampS: number, from: number, peak: number, restS: number, floor: number, tau: number): number => {
+      feed(state, t, rampS, (i) => Math.round(from + ((peak - from) * i) / (rampS - 1)))
+      const peakS = t + rampS - 1
+      t += rampS
+      feed(state, t, restS, (i) => Math.round(floor + (peak - floor) * Math.exp(-(i + 1) / tau)))
+      t += restS
+      return peakS
+    }
+    feed(state, 0, 600, (i) => 121 + (i % 3)) // 10-min warmup at ~122 starts the session
+    t = 600
+    for (let k = 0; k < 5; k++) set(50, 100, 145, 220, 98, 40) // squat
+    feed(state, t, breakS, 94) // the long break
+    t += breakS
+    for (let k = 0; k < 5; k++) set(40, 100, 130, 180, 97, 40) // bench
+    for (let k = 0; k < 4; k++) set(20, 100, 124, 330, 96, 40) // deadlift singles
+    let lastAccessoryPeakS = 0
+    for (let k = 0; k < 6; k++) lastAccessoryPeakS = set(35, 100, 118, 120, 99, 40) // accessories
+    return { ...h, t, lastAccessoryPeakS }
+  }
+
+  for (const breakMin of [12, 20]) {
+    test(`a ${breakMin}-min break after heavy squats does not split or end the lift (field regression)`, () => {
+      const { state, events, summaries, t, lastAccessoryPeakS } = longBreakLift(breakMin * 60)
+      // Still one open session through the last accessory set and its rest.
+      expect(summaries).toHaveLength(0)
+      expect(rests(events)).toHaveLength(0)
+      expect(state.sessionActive()).toBe(true)
+      feed(state, t, 3000, (i) => 92 + (i % 5)) // 50 min at 92-96 afterwards
+      expect(events.filter((e) => e.cls === 'live.session')).toHaveLength(1)
+      expect(summaries).toHaveLength(1)
+      expect(rests(events)).toHaveLength(1)
+      const s = summaries[0]
+      expect(s.reason).toBe('idle')
+      const startS = (Date.parse(s.started_at) - T0) / 1000
+      expect(startS + s.duration_s).toBeGreaterThanOrEqual(lastAccessoryPeakS)
+    })
+  }
 })

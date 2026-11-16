@@ -214,6 +214,11 @@ const food = new FoodService({
   getConfig: () => config().food,
   getMeta: (k) => store.getMeta(k),
   setMeta: (k, v) => store.setMeta(k, v),
+  getScaleReferenceSources: () => {
+    const v = config().scale?.reference_sources
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.length > 0) : undefined
+  },
+  getScaleProfile: () => config().scale?.profile,
   emit: (cls, key, payload) => engine.actionEvent(cls, key, payload),
   broadcast: (msg) => {
     liveListener.broadcast(msg)
@@ -238,6 +243,13 @@ const food = new FoodService({
 // ingest). Confounder records are personal: they are added at runtime with
 // health__meal confounder_add, never seeded from source.
 try {
+  // S400 fat calibration first (pre-v0.19.1 S400 rows were backfilled at
+  // store open): the replay rule reads the calibrated fat values.
+  food.recalibrateScale()
+} catch (err) {
+  log(`food: boot scale calibration failed: ${err}`)
+}
+try {
   food.reclassifyWeighins()
 } catch (err) {
   log(`food: boot weigh-in re-classification failed: ${err}`)
@@ -245,11 +257,12 @@ try {
 
 // S400 scale weigh-ins over passive BLE (relayer/scale-listen.swift posts
 // raw MiBeacon frames to /scale-adv). Off until config has a scale block.
-// The bindkey is read from the Keychain in the background at start (re-read
-// when frames keep failing to authenticate), never logged.
+// The bindkey is read from the Keychain in the background at start (retried
+// every minute on the settle timer while missing, re-read when frames keep
+// failing to authenticate), never logged.
 const scale = new ScaleService({
   getConfig: () => config().scale,
-  ingest: (samples) => food.ingestBodySamples(samples, []),
+  ingest: (samples, raw) => food.ingestBodySamples(samples, [], raw),
   // Replay guard: the last accepted MiBeacon counter survives restarts.
   loadHighWater: () => {
     const v = store.getMeta('scale.counter_hwm')
@@ -933,6 +946,12 @@ async function mealRpc(p: Record<string, unknown>): Promise<unknown> {
       return food.weighins(typeof p.days === 'number' ? p.days : 14)
     case 'weighin_set':
       return food.setWeighin(p)
+    case 'scale_calibration':
+      return food.scaleCalibration()
+    case 'weighin_pair':
+      return food.weighinPair(p)
+    case 'weighin_unpair':
+      return food.weighinUnpair(p)
     default:
       throw new Error(`unknown health__meal action: ${action}`)
   }

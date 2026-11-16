@@ -23,6 +23,7 @@
 
 import { createCipheriv, timingSafeEqual } from 'node:crypto'
 import type { ScaleConfig } from './types.js'
+import type { ScaleRaw } from './scalecal.js'
 
 // ── constants ───────────────────────────────────────────────────────
 
@@ -527,15 +528,21 @@ export function fatPercent(weight: number, height: number, age: number, sex: 'ma
   return clamp(fat, 5, 75)
 }
 
-/** Body fat as a HealthKit-style fraction (0.236), 3 decimals; null when
- *  the profile or the 50 kHz impedance is missing. */
-export function fatFraction(reading: Pick<ScaleReading, 'kg' | 'impedanceLow' | 'measuredAt'>, profile: Partial<BodyProfile> | undefined): number | null {
+/** Open-formula body fat PERCENT, unrounded; null when the profile or the
+ *  50 kHz impedance is missing. */
+export function readingFatPercent(reading: Pick<ScaleReading, 'kg' | 'impedanceLow' | 'measuredAt'>, profile: Partial<BodyProfile> | undefined): number | null {
   if (!profile || reading.impedanceLow == null) return null
   const { height_cm, birth_date, sex } = profile
   if (typeof height_cm !== 'number' || typeof birth_date !== 'string' || (sex !== 'male' && sex !== 'female')) return null
   const age = ageAt(birth_date, reading.measuredAt)
   if (age == null) return null
-  const pct = fatPercent(reading.kg, height_cm, age, sex, reading.impedanceLow)
+  return fatPercent(reading.kg, height_cm, age, sex, reading.impedanceLow)
+}
+
+/** Body fat as a HealthKit-style fraction (0.236), 3 decimals; null when
+ *  the profile or the 50 kHz impedance is missing. */
+export function fatFraction(reading: Pick<ScaleReading, 'kg' | 'impedanceLow' | 'measuredAt'>, profile: Partial<BodyProfile> | undefined): number | null {
+  const pct = readingFatPercent(reading, profile)
   return pct == null ? null : Math.round(pct * 10) / 1000
 }
 
@@ -599,8 +606,11 @@ export interface BodySampleIn {
 
 export interface ScaleDeps {
   getConfig: () => ScaleConfig | undefined
-  /** Ingest path (FoodService.ingestBodySamples in the daemon). */
-  ingest: (samples: BodySampleIn[]) => { received: number; added: number; deleted: number } | null
+  /** Ingest path (FoodService.ingestBodySamples in the daemon). `raw` is the
+   *  reading itself (impedances, open-formula fat %) for scale_readings and
+   *  the Xiaomi calibration; the fat SAMPLE is rewritten there when a
+   *  calibration model exists. */
+  ingest: (samples: BodySampleIn[], raw: ScaleRaw) => { received: number; added: number; deleted: number } | null
   /** Bindkey source (default: the Keychain). May be sync or async. */
   readBindkey?: (cfg: ScaleConfig | undefined) => Buffer | null | Promise<Buffer | null>
   /** Persisted MiBeacon counter high-water mark (replay guard across restarts). */
@@ -623,9 +633,56 @@ export function allowedProductIds(cfg: ScaleConfig | undefined): Set<number> {
  *  when plausible (stable across scanner retries and daemon restarts), else
  *  counter + measured time. */
 export function readingUuid(r: Pick<ScaleReading, 'counter' | 'measuredAt'> & { scaleTs?: number | null }, kind: 'mass' | 'fat'): string {
-  const k = kind === 'mass' ? 'm' : 'f'
-  if (r.scaleTs != null) return `s400-t${r.scaleTs.toString(16).padStart(8, '0')}-${k}`
-  return `s400-${r.counter.toString(16).padStart(8, '0')}-${r.measuredAt}-${k}`
+  return `${readingStem(r)}-${kind === 'mass' ? 'm' : 'f'}`
+}
+
+/** The id a reading's samples share (scale_readings.uuid). */
+export function readingStem(r: Pick<ScaleReading, 'counter' | 'measuredAt'> & { scaleTs?: number | null }): string {
+  if (r.scaleTs != null) return `s400-t${r.scaleTs.toString(16).padStart(8, '0')}`
+  return `s400-${r.counter.toString(16).padStart(8, '0')}-${r.measuredAt}`
+}
+
+/** The raw reading for scale_readings: impedances, hr, scale ts, and the open
+ *  formula's fat % at full precision (the calibration input; one rounding
+ *  step to the 0.1-point sample, exactly as fatFraction rounds). */
+export function readingRaw(r: ScaleReading, profile: ScaleConfig['profile']): ScaleRaw {
+  const pct = readingFatPercent(r, profile)
+  return {
+    uuid: readingStem(r),
+    measured_at: new Date(r.measuredAt).toISOString(),
+    kg: r.kg,
+    impedance_low: r.impedanceLow,
+    impedance_high: r.impedanceHigh,
+    hr: r.heartRate,
+    scale_ts: r.scaleTs,
+    fat_raw_pct: pct,
+  }
+}
+
+/** The ONE reject reason the listener retries: the bindkey is still loading
+ *  (daemon boot), so the same frame decodes once the key lands. Every other
+ *  reject (mac_mismatch, decrypt_failed, replay, unencrypted, malformed,
+ *  unsupported, not_s400, no_mac) is permanent for that frame. */
+export const LISTENER_RETRY_REASON = 'no_key'
+
+/** The listener's dedupe contract, line for line the same rule as `classify`
+ *  in relayer/scale-listen.swift (keep the two identical; a test pins the
+ *  reason string in the Swift source). A frame is FORGOTTEN (re-posted on its
+ *  next advertisement) ONLY when the daemon answered 2xx with accepted:false
+ *  and reason LISTENER_RETRY_REASON. Everything else stays remembered
+ *  (suppressed for 60 s): an accepted frame; every other reject, which would
+ *  otherwise be re-posted on each advertisement (several a second); a 4xx
+ *  (a malformed post never improves); a 401 (re-posting never fixes a token
+ *  mismatch); a transport failure (status 0) or 5xx, whose frame already
+ *  sits once in the retry buffer. */
+export function listenerRemembers(status: number, body: unknown): boolean {
+  if (status === 0 || status >= 500) return true // .failed
+  if (status === 401) return true // .unauthorized
+  if (status >= 200 && status < 300) {
+    const b = typeof body === 'object' && body != null ? (body as { accepted?: unknown; reason?: unknown }) : {}
+    return !(b.accepted === false && b.reason === LISTENER_RETRY_REASON) // .keyPending forgets
+  }
+  return true // .refused
 }
 
 export function readingSamples(r: ScaleReading, profile: ScaleConfig['profile']): BodySampleIn[] {
@@ -730,8 +787,17 @@ export class ScaleService {
       }
       return
     }
-    if (!prev) this.deps.log(`scale: no bindkey in Keychain (service ${KEYCHAIN_SERVICE}); frames are dropped until it exists`)
+    if (!prev) {
+      // Retried every minute: say so once per LOG_EVERY_MS, not per retry.
+      const now = this.now()
+      if (now - this.noKeyLoggedAt > LOG_EVERY_MS) {
+        this.noKeyLoggedAt = now
+        this.deps.log(`scale: no bindkey in Keychain (service ${KEYCHAIN_SERVICE}); frames are dropped until it exists`)
+      }
+    }
   }
+
+  private noKeyLoggedAt = -Infinity
 
   private highWater(): number | null {
     if (this.hwm === undefined) {
@@ -776,6 +842,10 @@ export class ScaleService {
   }
 
   tick(): number {
+    // A key missing at boot (Keychain locked, not stored yet) is retried on
+    // the timer (loadKey rate-limits to once a minute), not only when a frame
+    // arrives: frames of a weigh-in must find the key already loaded.
+    if (!this.key) this.loadKey()
     return this.emit(this.assembler.tick(this.now()))
   }
 
@@ -822,8 +892,9 @@ export class ScaleService {
   private emit(readings: ScaleReading[]): number {
     let n = 0
     for (const r of readings) {
-      const samples = readingSamples(r, this.deps.getConfig()?.profile)
-      const res = this.deps.ingest(samples)
+      const profile = this.deps.getConfig()?.profile
+      const samples = readingSamples(r, profile)
+      const res = this.deps.ingest(samples, readingRaw(r, profile))
       if (res) {
         n++
         this.stats.readings++

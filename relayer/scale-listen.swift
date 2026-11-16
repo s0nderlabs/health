@@ -6,6 +6,15 @@
 // live listener at POST /scale-adv. Decryption, parsing, and the weigh-in
 // collapse all happen daemon-side (src/scale.ts); this binary holds no key.
 // Identical frames (same bytes = same frame counter) are sent once per 60 s.
+// A frame is forgotten (posted again on its next advertisement) ONLY when the
+// daemon answered 2xx with JSON {accepted:false, reason:"no_key"}: the bindkey
+// is still loading at boot, so the same frame decodes once it lands. Every
+// other reject (mac_mismatch, decrypt_failed, replay, ...) is permanent for
+// that frame and stays suppressed, or a neighbour's S400 would be re-posted on
+// every advertisement. A 4xx and a 401 stay suppressed (re-posting fixes
+// neither). A transport failure or 5xx stays suppressed too: the frame already
+// sits (once, deduped by frame hex) in the retry buffer. (listenerRemembers in
+// src/scale.ts is the same rule, line for line.)
 //
 // Build: scripts/build-scale.sh   Run: bin/scale-listen
 // Config: reads live.port/live.bind/live.token and the optional scale block
@@ -79,9 +88,11 @@ final class Poster {
     private let config: Config
     private let session: URLSession
     // Frames that failed to post (daemon restarting): retried, then dropped.
-    // The daemon trusts the original receive time for up to 10 minutes.
-    private var pending: [(body: Data, at: Date)] = []
+    // The daemon trusts the original receive time for up to 10 minutes. One
+    // slot per distinct frame: a frame already buffered is never added twice.
+    private var pending: [(hex: String, body: Data, at: Date, outcome: ((PostOutcome) -> Void)?)] = []
     private var failures = 0
+    private var unauthorizedLoggedAt = Date.distantPast
 
     init(config: Config) {
         self.config = config
@@ -92,37 +103,48 @@ final class Poster {
         Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in self?.retry() }
     }
 
-    func send(frameHex: String, rssi: Int, at: Date) {
+    /// outcome .keyPending = the daemon answered no_key (bindkey loading):
+    /// the caller forgets the frame. Every other outcome keeps it deduped.
+    func send(frameHex: String, rssi: Int, at: Date, outcome: @escaping (PostOutcome) -> Void) {
         let obj: [String: Any] = [
             "frame_hex": frameHex,
             "rssi": rssi,
             "ts": Int(at.timeIntervalSince1970 * 1000),
         ]
-        guard let body = try? JSONSerialization.data(withJSONObject: obj) else { return }
-        post(body, at: at)
+        guard let body = try? JSONSerialization.data(withJSONObject: obj) else { return outcome(.refused) }
+        post(frameHex, body, at: at, outcome: outcome)
     }
 
-    private func post(_ body: Data, at: Date) {
+    private func post(_ hex: String, _ body: Data, at: Date, outcome: ((PostOutcome) -> Void)? = nil) {
         var req = URLRequest(url: config.url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("Bearer \(config.token)", forHTTPHeaderField: "Authorization")
         req.httpBody = body
-        session.dataTask(with: req) { [weak self] _, resp, err in
+        session.dataTask(with: req) { [weak self] data, resp, err in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-                if err != nil || code == 0 || code >= 500 {
+                let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+                let result = classify(err: err, code: code, accepted: json?["accepted"] as? Bool,
+                                      reason: json?["reason"] as? String)
+                if result == .failed {
                     self.failures += 1
                     if self.failures == 1 || self.failures % 50 == 0 {
                         log("post failed (\(err?.localizedDescription ?? "HTTP \(code)")); buffering")
                     }
-                    if self.pending.count < 64 { self.pending.append((body, at)) }
+                    if self.pending.count < 64, !self.pending.contains(where: { $0.hex == hex }) {
+                        self.pending.append((hex, body, at, outcome))
+                    }
                 } else {
                     if self.failures > 0 { log("daemon reachable again") }
                     self.failures = 0
-                    if code == 401 { log("daemon rejected the token (401): re-read config by restarting") }
+                    if result == .unauthorized, Date().timeIntervalSince(self.unauthorizedLoggedAt) >= 60 {
+                        self.unauthorizedLoggedAt = Date()
+                        log("daemon rejected the token (401): re-read config by restarting")
+                    }
                 }
+                outcome?(result)
             }
         }.resume()
     }
@@ -131,8 +153,24 @@ final class Poster {
         let now = Date()
         let batch = pending.filter { now.timeIntervalSince($0.at) < 9 * 60 }
         pending.removeAll()
-        for item in batch { post(item.body, at: item.at) }
+        for item in batch { post(item.hex, item.body, at: item.at, outcome: item.outcome) }
     }
+}
+
+/// .keyPending is the ONLY outcome that forgets a frame (see the header).
+enum PostOutcome { case accepted, refused, keyPending, unauthorized, failed }
+
+/// The dedupe contract. listenerRemembers in src/scale.ts is the same rule,
+/// line for line (it returns false exactly where this returns .keyPending),
+/// and a test pins the reason string below in this source.
+func classify(err: Error?, code: Int, accepted: Bool?, reason: String?) -> PostOutcome {
+    if err != nil || code == 0 || code >= 500 { return .failed }
+    if code == 401 { return .unauthorized }
+    if (200..<300).contains(code) {
+        if accepted == false && reason == "no_key" { return .keyPending }
+        return accepted == false ? .refused : .accepted
+    }
+    return .refused
 }
 
 // ── BLE leg (scan only, never connect) ──────────────────────────────
@@ -185,8 +223,14 @@ final class Scanner: NSObject, CBCentralManagerDelegate {
         let hex = bytes.map { String(format: "%02x", $0) }.joined()
         let now = Date()
         if let at = seen[hex], now.timeIntervalSince(at) < DEDUPE_SECONDS { return }
-        seen[hex] = now
-        poster.send(frameHex: hex, rssi: rssi.intValue, at: now)
+        seen[hex] = now // suppresses copies while the post is in flight
+        poster.send(frameHex: hex, rssi: rssi.intValue, at: now) { [weak self] outcome in
+            // Only a frame the daemon could not decode YET (no_key at boot)
+            // is posted again on its next advertisement. Any other reject is
+            // permanent for this frame; a failed post sits in the retry
+            // buffer; a 401 is not fixed by re-posting.
+            if outcome == .keyPending, self?.seen[hex] == now { self?.seen[hex] = nil }
+        }
     }
 
     private func prune() {
