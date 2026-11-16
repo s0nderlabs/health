@@ -24,11 +24,8 @@ struct HealthRelayApp: App {
                     if phase == .active {
                         SessionProgress.shared.noteSceneActive()
                         plan.refresh()
-                        steps.syncNow()
-                        weight.syncNow()
                         food.refresh()
-                        food.flush() // anything captured offline goes out now
-                        MoneyOutbox.shared.flush()
+                        resyncOutbound()
                         relay.kick() // trade a long-stale pending connect for a scan
                         // Heals a missed boot lookup or a stale tailnet IP
                         // without a cold launch (throttled, one UDP packet).
@@ -45,13 +42,23 @@ struct HealthRelayApp: App {
         }
     }
 
+    /// Everything queued for the daemon, in one place: called on foreground
+    /// and on every socket reconnect, so a new outbound courier is wired once.
+    private func resyncOutbound() {
+        food.flush() // meals / fixes captured offline
+        MoneyOutbox.shared.flush() // money notifications queued while offline
+        steps.syncNow()
+        weight.syncNow()
+    }
+
     private func boot() {
         RestNotificationDelegate.shared.install()
         relay.onPlanUpdated = { plan.refresh() }
         relay.onMealsUpdated = { food.refresh() }
-        relay.onSocketUp = {
-            food.flush()
-            MoneyOutbox.shared.flush() // money notifications queued while offline
+        relay.onSocketUp = { resyncOutbound() }
+        relay.onSocketDown = {
+            steps.releaseInFlight()
+            weight.releaseInFlight()
         }
         #if DEBUG
         if ProcessInfo.processInfo.environment["HR_DEMO"] != nil {

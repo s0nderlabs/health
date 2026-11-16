@@ -12,10 +12,11 @@
 //     {type:'status', connected:bool, device?, rssi?, transport?}
 //     {type:'transport', transport:'wifi'|'cellular'}   (network path changed)
 //     {type:'battery', level:0..1, charging:bool}       (phone power state changed)
-//     {type:'steps', samples:[{uuid,start,end,count}]}  -> {type:'steps_ack', received, added}
+//     {type:'steps', samples:[{uuid,start,end,count}], batch?}  -> {type:'steps_ack', received, added, batch?}
 //     {type:'intent', activity}                         -> {type:'intent_ack', activity, surfaced}
-//     {type:'body_mass', samples:[{uuid,ts,kind:'mass'|'fat',value,source?}], deleted?:[uuid]}
-//                                                       -> {type:'body_mass_ack', received, added, deleted}
+//     {type:'body_mass', samples:[{uuid,ts,kind:'mass'|'fat',value,source?}], deleted?:[uuid], batch?}
+//                                                       -> {type:'body_mass_ack', received, added, deleted, batch?}
+//     batch (optional int): echoed on the ack so the phone matches acks to batches
 //   daemon -> relayer (arbitration; the band normally serves ONE receiver, but
 //   accepts a second central when two connects land inside its post-drop
 //   advertising window; the daemon exploits that deliberately, see dual-up):
@@ -78,6 +79,11 @@ export function parseSignedUntil(v: unknown): string | null {
 
 function parseTransport(v: unknown): 'wifi' | 'cellular' | 'unknown' {
   return v === 'wifi' || v === 'cellular' ? v : 'unknown'
+}
+
+/** Echo a relayer's batch id on an ack, only when it is a sane integer. */
+export function batchEcho(v: unknown): { batch?: number } {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0 && v < 2 ** 31 ? { batch: v } : {}
 }
 
 export interface StepsSample {
@@ -969,7 +975,9 @@ export class LiveListener {
         if (ws.data.source !== 'mac' && ws.data.source !== 'unknown') this.phoneSeen()
         // The ack is what lets the phone advance its HealthKit anchor, so it
         // must be sent for every well-formed batch (even an all-deletes one).
-        this.push(ws, { type: 'steps_ack', received: clean.length, added, deleted: removed })
+        // `batch` is echoed so the phone commits ONLY the ack for the batch it
+        // is waiting on (a buffered older frame can be delivered late).
+        this.push(ws, { type: 'steps_ack', received: clean.length, added, deleted: removed, ...batchEcho(msg.batch) })
         if (clean.length > 0 || deleted.length > 0)
           log(`steps: ${clean.length} samples (${added} new) + ${deleted.length} deletions (${removed} removed) from ${ws.data.source}`)
         break
@@ -988,7 +996,7 @@ export class LiveListener {
         }
         if (ws.data.source !== 'mac' && ws.data.source !== 'unknown') this.phoneSeen()
         // Ack-gated like steps: the phone advances its HealthKit anchor on this.
-        this.push(ws, { type: 'body_mass_ack', ...res })
+        this.push(ws, { type: 'body_mass_ack', ...res, ...batchEcho(msg.batch) })
         if (res.added > 0 || res.deleted > 0)
           log(`body mass: ${res.received} samples (${res.added} new, ${res.deleted} removed) from ${ws.data.source}`)
         break

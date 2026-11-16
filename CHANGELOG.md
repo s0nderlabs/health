@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.17.1 - 2026-11-16
+
+### Fixed
+
+- **Steps and weigh-ins can no longer stall after a dropped connection.**
+  A batch sent just before the socket died could leave the phone waiting
+  forever for an ack, so steps stopped syncing until the app was
+  relaunched. Now a batch is released the moment the socket goes down,
+  nothing is queried while it is down (the samples wait safely in
+  HealthKit, since the anchor never moved), and every reconnect and
+  foreground re-syncs through one shared path.
+- Acks are matched to batches: the phone tags each steps / weigh-in batch
+  and the daemon echoes the id on `steps_ack` / `body_mass_ack`. A late ack
+  for a released batch (its frame can still be delivered from the socket's
+  buffer after a reconnect) never commits a newer batch's anchor. Older
+  apps that send no id keep the old behaviour.
+- A denied Health permission is no longer overwritten by a misleading "no
+  WHOOP steps" state on reconnect.
+- App version 0.17.1 (6).
+
 ## 0.17.0 - 2026-11-16
 
 ### Added

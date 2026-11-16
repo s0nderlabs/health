@@ -32,7 +32,7 @@ final class WeightCourier: ObservableObject {
 
     func attach(_ relay: RelayController) {
         self.relay = relay
-        relay.onBodyMassAck = { [weak self] in self?.acked() }
+        relay.onBodyMassAck = { [weak self] batch in self?.acked(batch: batch) }
     }
 
     func startIfAuthorized() {
@@ -68,7 +68,10 @@ final class WeightCourier: ObservableObject {
     }
 
     func syncNow() {
-        guard HKHealthStore.isHealthDataAvailable(), !inFlight, relay != nil else { return }
+        // Socket down: query nothing (anchors unchanged, data waits in
+        // HealthKit; the reconnect re-syncs). Denied: nothing to read.
+        guard HKHealthStore.isHealthDataAvailable(), !inFlight, !denied,
+              let relay = relay, relay.socketConnected else { return }
         // Query both types, then send one combined batch.
         var collected: [(kind: String, samples: [HKQuantitySample], raw: Int, deleted: [String], anchor: HKQueryAnchor?)] = []
         let group = DispatchGroup()
@@ -127,21 +130,22 @@ final class WeightCourier: ObservableObject {
         moreToDrain = fullPage
         inFlight = true
         batchGen += 1
-        let gen = batchGen
-        relay?.sendBodyMass(payload, deleted: deleted)
+        relay?.sendBodyMass(payload, deleted: deleted, batch: batchGen)
         lastSyncAt = Date()
         rlog("weight: sent \(payload.count) samples + \(deleted.count) deletions, awaiting ack")
-        // A send into a dead socket never acks; un-stick after a while so the
-        // next observer wakeup or foreground can re-query (anchor unchanged).
-        DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in
-            guard let self = self, self.inFlight, self.batchGen == gen else { return }
-            self.inFlight = false
-            self.pendingAnchors = [:]
-        }
     }
 
-    private func acked() {
+    /// Socket down with a batch out: release it (see StepsCourier.releaseInFlight).
+    func releaseInFlight() {
         guard inFlight else { return }
+        inFlight = false
+        pendingAnchors = [:]
+        moreToDrain = false
+    }
+
+    private func acked(batch: Int?) {
+        guard inFlight else { return }
+        if let b = batch, b != batchGen { return } // a late ack for a released batch
         inFlight = false
         pendingAnchors.forEach { Self.saveAnchor($0.value, $0.key) }
         pendingAnchors = [:]
@@ -150,7 +154,6 @@ final class WeightCourier: ObservableObject {
             syncNow()
         }
     }
-
 
     private static func key(_ kind: String) -> String { "weight_anchor_\(kind)_v1" }
 

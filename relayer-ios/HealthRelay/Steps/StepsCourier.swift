@@ -55,13 +55,14 @@ final class StepsCourier: ObservableObject {
     private var pendingAnchor: HKQueryAnchor?
     private var inFlight = false // a batch is out awaiting ack; don't double-query
     private var moreToDrain = false // last batch hit the limit: page again on ack
+    private var batchGen = 0 // id of the batch in flight; the daemon echoes it on the ack
     private var whoopSources: Set<HKSource> = []
 
     private static let anchorKey = "steps_anchor_v1"
 
     func attach(_ relay: RelayController) {
         self.relay = relay
-        relay.onStepsAck = { [weak self] in self?.stepsAcked() }
+        relay.onStepsAck = { [weak self] batch in self?.stepsAcked(batch: batch) }
     }
 
     func startIfAuthorized() {
@@ -99,6 +100,14 @@ final class StepsCourier: ObservableObject {
 
     func syncNow() {
         guard HKHealthStore.isHealthDataAvailable() else { return }
+        // Denied (or never attached): a source query would only come back
+        // empty and mislabel the state as "WHOOP never wrote steps".
+        guard state != .denied, let relay = relay else { return }
+        // Socket down: query nothing. The anchor has not moved, so the samples
+        // wait safely in HealthKit, and the reconnect (onSocketUp) re-syncs.
+        // Querying now would only stack duplicate frames in the socket's
+        // in-memory buffer.
+        guard relay.socketConnected else { return }
         // Resolve WHOOP as a source first; without it there is nothing to relay.
         // A batch is already out awaiting ack; the ack path drains the rest,
         // so a second observer wakeup must not start a parallel query.
@@ -155,7 +164,8 @@ final class StepsCourier: ObservableObject {
                 self.pendingAnchor = newAnchor
                 self.moreToDrain = quantities.count >= STEPS_BATCH_LIMIT
                 self.inFlight = true
-                self.relay?.sendSteps(payload, deleted: deletedUuids)
+                self.batchGen += 1
+                self.relay?.sendSteps(payload, deleted: deletedUuids, batch: self.batchGen)
                 self.lastSyncAt = Date()
                 self.lastBatchCount = payload.count
                 rlog("steps: sent \(payload.count) samples + \(deletedUuids.count) deletions, awaiting ack")
@@ -164,10 +174,26 @@ final class StepsCourier: ObservableObject {
         store.execute(query)
     }
 
-    /// Daemon confirmed the batch: NOW it is safe to advance the anchor. If the
-    /// batch filled the limit there may be more history to page.
-    private func stepsAcked() {
+    /// The socket went down with a batch out: release it. Its frame may still
+    /// sit in the socket's buffer and be delivered later, but its ack then
+    /// carries an old batch id and is ignored; the re-query after reconnect
+    /// sends a fresh batch (the daemon dedupes samples by UUID).
+    func releaseInFlight() {
         guard inFlight else { return }
+        inFlight = false
+        pendingAnchor = nil
+        moreToDrain = false
+    }
+
+    /// Daemon confirmed the batch: NOW it is safe to advance the anchor. If the
+    /// batch filled the limit there may be more history to page. An ack for
+    /// any other batch (a released one delivered late) never commits.
+    private func stepsAcked(batch: Int?) {
+        guard inFlight else { return }
+        if let b = batch, b != batchGen {
+            rlog("steps: ignoring a late ack for batch \(b) (waiting on \(batchGen))")
+            return
+        }
         inFlight = false
         if let a = pendingAnchor { Self.saveAnchor(a) }
         pendingAnchor = nil

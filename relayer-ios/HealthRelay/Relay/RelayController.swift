@@ -51,11 +51,14 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
     /// socket reconnects (a push may have been missed while it was down).
     var onPlanUpdated: (() -> Void)?
     /// Set by StepsCourier: fired when the daemon acks a steps batch.
-    var onStepsAck: (() -> Void)?
+    /// Steps batch confirmed; carries the echoed batch id (nil from an older daemon).
+    var onStepsAck: ((Int?) -> Void)?
     /// The food log changed daemon-side (an estimate landed): refetch the day.
     var onMealsUpdated: (() -> Void)?
     /// Weigh-in batch confirmed: the courier may commit its HealthKit anchors.
-    var onBodyMassAck: (() -> Void)?
+    var onBodyMassAck: ((Int?) -> Void)?
+    /// The daemon socket went down: couriers release their in-flight batch.
+    var onSocketDown: (() -> Void)?
     /// The daemon socket came up: a good moment to drain the food outbox.
     var onSocketUp: (() -> Void)?
 
@@ -215,14 +218,14 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
         }
     }
 
-    func sendBodyMass(_ samples: [[String: Any]], deleted: [String] = []) {
+    func sendBodyMass(_ samples: [[String: Any]], deleted: [String] = [], batch: Int) {
         guard !samples.isEmpty || !deleted.isEmpty else { return }
-        socket.sendJSON(["type": "body_mass", "samples": samples, "deleted": deleted])
+        socket.sendJSON(["type": "body_mass", "samples": samples, "deleted": deleted, "batch": batch])
     }
 
-    func sendSteps(_ samples: [[String: Any]], deleted: [String] = []) {
+    func sendSteps(_ samples: [[String: Any]], deleted: [String] = [], batch: Int) {
         guard !samples.isEmpty || !deleted.isEmpty else { return }
-        socket.sendJSON(["type": "steps", "samples": samples, "deleted": deleted])
+        socket.sendJSON(["type": "steps", "samples": samples, "deleted": deleted, "batch": batch])
     }
 
     private func applyMode(_ newMode: ServerMode) {
@@ -307,6 +310,7 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
     func socketDidDisconnect(reason: String) {
         guard !Demo.active else { return }
         socketConnected = false
+        onSocketDown?()
         // Two straight failures: maybe no IP yet or a stale one. One UDP
         // packet, throttled; it never touches the band.
         socketFailures += 1
@@ -410,14 +414,14 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
             let added = (payload["added"] as? Int) ?? 0
             let removed = (payload["deleted"] as? Int) ?? 0
             lastAck = removed > 0 ? "steps synced (\(added) new, \(removed) revised)" : "steps synced (\(added) new)"
-            onStepsAck?() // commit the anchor + drain any remaining pages
+            onStepsAck?(payload["batch"] as? Int) // commit the anchor + drain any remaining pages
 
         case "meals_updated":
             onMealsUpdated?()
         case "body_mass_ack":
             let added = (payload["added"] as? Int) ?? 0
             lastAck = "weigh-ins synced (\(added) new)"
-            onBodyMassAck?()
+            onBodyMassAck?(payload["batch"] as? Int)
         case "intent_ack":
             let activity = (payload["activity"] as? String) ?? ""
             lastAck = "intent logged: \(activity)"

@@ -1231,3 +1231,27 @@ describe('money notifications over the listener', () => {
     expect(hits).toBe(1)
   })
 })
+
+describe('ack batch echo', () => {
+  const cleanup: Array<() => void> = []
+  afterEach(() => {
+    while (cleanup.length) cleanup.pop()!()
+  })
+
+  test('steps_ack and body_mass_ack echo the batch id; junk ids are not echoed', async () => {
+    const { listener, port } = makeArbListener({
+      onSteps: () => ({ added: 0, deleted: 0 }),
+      onBodyMass: () => ({ received: 0, added: 0, deleted: 0 }),
+    })
+    cleanup.push(() => listener.stop())
+    const phone = await relayer(port, 'phone')
+    phone.ws.send(JSON.stringify({ type: 'steps', samples: [], batch: 7 }))
+    phone.ws.send(JSON.stringify({ type: 'body_mass', samples: [], batch: 8 }))
+    phone.ws.send(JSON.stringify({ type: 'steps', samples: [], batch: 'x' }))
+    phone.ws.send(JSON.stringify({ type: 'steps', samples: [] }))
+    await waitFor(() => parsed(phone.msgs).filter((m) => m.type === 'steps_ack').length === 3 && has(phone.msgs, 'body_mass_ack'))
+    const acks = parsed(phone.msgs).filter((m) => m.type.endsWith('_ack')) as Array<{ type: string; batch?: number }>
+    expect(acks.map((a) => `${a.type}:${a.batch ?? '-'}`)).toEqual(['steps_ack:7', 'body_mass_ack:8', 'steps_ack:-', 'steps_ack:-'])
+    phone.ws.close()
+  })
+})
