@@ -215,7 +215,7 @@ describe('food service: phone front door', () => {
     const day = await food.handleHttp(new Request('http://x/meals'), new URL('http://x/meals'))
     const body = (await day!.json()) as { meals: unknown[]; targets: { protein_g: number; kcal: number | null } }
     expect(body.meals).toHaveLength(1)
-    expect(body.targets).toEqual({ protein_g: 165, kcal: null, kcal_set_at: null } as never)
+    expect(body.targets).toEqual({ protein_g: 165, kcal: null, kcal_set_at: null, kcal_provisional: false } as never)
   })
 
   test('phone fix line raises meal.amended once per distinct text', async () => {

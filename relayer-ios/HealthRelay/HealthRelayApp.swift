@@ -229,7 +229,7 @@ enum DemoNotify {
             "type": "notify",
             "id": "demo-resign",
             "title": "Phone app signature: 20h left",
-            "body": "Auto re-sign hasn't renewed the health app yet. Be home on Wi-Fi with the phone unlocked for a minute (or open the app) so it can install.",
+            "body": "Auto re-sign hasn't renewed elpabl0s yet. Be home on Wi-Fi with the phone unlocked for a minute (or open the app) so it can install.",
             "level": level,
         ]
         let center = UNUserNotificationCenter.current()

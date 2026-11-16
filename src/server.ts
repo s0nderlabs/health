@@ -11,7 +11,7 @@ import { DB_PATH } from './config.js'
 import { existsSync } from 'fs'
 import { readPhotoFiles } from './photos.js'
 
-const VERSION = '0.18.1'
+const VERSION = '0.19.0'
 
 const INSTRUCTIONS = `
 health: WHOOP recovery, sleep, and strain as a live channel. The daemon on this
@@ -268,6 +268,48 @@ until the baseline is ready (14 complete days + 8 weigh-ins): before that,
 report intake and protein vs its target only, never a made-up kcal target.
 health__meal {action:'baseline'} gives the maintenance read; accept:true sets
 the target (maintenance minus the configured deficit) only once he agrees.
+ENERGY (day.energy on every day read; baseline.energy for the window).
+burn_kcal = WHOOP cycle energy mapped WHOLE onto the food day it overlaps most
+(no pro-rata split). coverage: full = one cycle lines up with the day; partial
+= it does not (reason in baseline.energy.days: split_cycle, sleep_after_0400,
+partial_day, unscored, in_progress); none = no scored cycle. calibrated=false:
+report it as "Burned (WHOOP, uncalibrated)" next to intake and NEVER call the
+day a deficit or surplus (wrist kJ overstates; the raw gap is meaningless).
+calibrated=true: factor = measured maintenance / mean WHOOP burn over the same
+complete, fully covered days (expect < 1); balance_kcal = intake - burn x
+factor, negative = deficit, positive = surplus, always with its band
+(balance_lo to balance_hi), e.g. "-450 deficit (-700 to -200)". so_far=true
+(today) = intake so far vs burn so far: say "so far", never project the day.
+No balance while a meal is still pending (its kcal is missing) or on a past
+day not fully logged: say why, never fill it in. provisional=true = the
+factor was fitted while a confounder window was open: say "provisional".
+A partial-coverage balance is shown but loose: say so in a few words. The
+coverage block lists exclusion counts; its flag (sleep after 04:00 on > 30%
+of days) is a suggestion to raise once, not a fault. The factor refreshes
+weekly (recalibrate:true forces it); calibration_issue says why there is
+none (e.g. an implausible value is rejected, never used); calibration.flag
+marks covered days eating differently from the rest.
+CONFOUNDERS (baseline.confounders): dated changes that bend the weight trend
+(creatine water, an intake step-down). status provisional = a window is open:
+show intake stats + the raw slope, the bracket (maintenance range + central
+over fixed water curves, NOT a fit) and the early_slope caveat; there is no
+suggested target, and accept:true takes the provisional central one only when
+he explicitly accepts. Each confounder carries ONE plain sentence: use it, no
+alarmism (water is water, not fat). After every window closes the clean fit
+uses only later weigh-ins (clean_from; ~2 weeks of new data). Add or close
+records with confounder_add {kind, date?, details, window_days?, bracket?} /
+confounder_close {id | kind, date?} when he reports such a change (kinds
+creatine_start and intake_step_down bring their own window, effect and
+bracket; a close date cannot be in the future).
+GOAL (baseline.goal, optional): target fat %, milestone kg, lean-mass reference;
+derived weight at target (lean mass held) and the creatine-adjusted figure.
+The scale's fat % is a trend only, never a goal check. Set with goal_set,
+remove with goal_clear, only on his word.
+body.weighin also carries the 7-day average (+ change vs the week before)
+once 3 readings count, and the active confounders line. Readings after a
+meal logged that food day ("after a meal") and exact repeats of the previous
+reading in both weight and fat ("possible replay") are excluded but still
+announced: mention it in one line, he can include one with weighin_set.
 
 MONEY NOTIFICATIONS. money.notif: a bank / wallet notification (SeaBank,
 Plasma One, GoPay, ShopeePay, Pintu, ...) was forwarded from the phone the
@@ -293,7 +335,7 @@ health__workout_intent (user says they are starting a workout NOW; WHOOP
 cannot detect starts), health__live (live BPM/zone/HRV while the band
 broadcasts), health__strava (write the composed title/description for a
 ride.landed activity), health__meal (food log: log / estimate / void /
-day / presets / baseline), health__money (recent money notifications),
+day / presets / baseline / confounders / goal), health__money (recent money notifications),
 health__config (event toggles, thresholds, quiet hours, food targets),
 health__status (daemon).
 `.trim()
@@ -366,13 +408,16 @@ export function createServer(ipc: IpcClient) {
       {
         name: 'health__meal',
         description:
-          'Food log (calorie + protein tracker), equal to the phone app. action: log (new meal from chat: items and/or photos), estimate (FULL REPLACE of an existing meal\'s items; corrections re-send the whole list), void, day (one day: meals, totals, targets), day_complete (mark a day fully logged or not; baseline uses complete days), preset_save / preset_list / preset_delete (repeat meals), baseline (maintenance from logged intake + weigh-in trend; accept:true sets the kcal target), weighins (recent scale readings with their verdict: counted, or excluded and why), weighin_set (include:true counts a reading, include:false excludes it with a reason; find it by uuid or measured_at). The daemon computes all totals from items.',
+          'Food log (calorie + protein tracker), equal to the phone app. action: log (new meal from chat: items and/or photos), estimate (FULL REPLACE of an existing meal\'s items; corrections re-send the whole list), void, day (one day: meals, totals, targets), day_complete (mark a day fully logged or not; baseline uses complete days), preset_save / preset_list / preset_delete (repeat meals), baseline (maintenance from logged intake + weigh-in trend; accept:true sets the kcal target), weighins (recent scale readings with their verdict: counted, or excluded and why), weighin_set (include:true counts a reading, include:false excludes it with a reason; find it by uuid or measured_at), confounder_add / confounder_close (dated changes that bend the weight trend: creatine, an intake step-down, illness; the baseline stays provisional while one is open), goal_set / goal_clear (target fat %, milestone kg, lean-mass reference). day and baseline also return energy: WHOOP burn mapped to the food day, and once calibrated the balance (intake - burn x factor) with its band. The daemon computes all totals from items.',
         inputSchema: {
           type: 'object' as const,
           properties: {
             action: {
               type: 'string',
-              enum: ['log', 'estimate', 'void', 'day', 'day_complete', 'preset_save', 'preset_list', 'preset_delete', 'baseline', 'weighins', 'weighin_set'],
+              enum: [
+                'log', 'estimate', 'void', 'day', 'day_complete', 'preset_save', 'preset_list', 'preset_delete', 'baseline',
+                'weighins', 'weighin_set', 'confounder_add', 'confounder_close', 'goal_set', 'goal_clear',
+              ],
             },
             meal_id: { type: 'number', description: 'estimate / void: the meal (from meal.logged meta or a day read)' },
             expected_revision: {
@@ -397,7 +442,10 @@ export function createServer(ipc: IpcClient) {
               description: 'log / estimate: when it was EATEN, ISO 8601 or local HH:MM (a time ahead of now = last night). The food day rolls over at 04:00.',
             },
             reason: { type: 'string', description: 'estimate: why it changed (e.g. "he said soto, not gulai"); void: why it is removed; weighin_set (include:false): why it is excluded' },
-            date: { type: 'string', description: 'day / day_complete: YYYY-MM-DD food day (default today)' },
+            date: {
+              type: 'string',
+              description: 'day / day_complete: YYYY-MM-DD food day (default today); confounder_add: the day it started; confounder_close: the day it ended (default today)',
+            },
             complete: { type: 'boolean', description: 'day_complete: true = fully logged (default), false = missing meals, exclude from the baseline' },
             slug: { type: 'string', description: 'preset_save / preset_delete: preset id (derived from name when omitted)' },
             name: { type: 'string', description: 'preset_save: display name, e.g. "Soto betawi (mom\'s, with sengkel)"' },
@@ -408,6 +456,22 @@ export function createServer(ipc: IpcClient) {
             uuid: { type: 'string', description: 'weighin_set: a sample uuid (from weighins) instead of measured_at' },
             days: { type: 'number', description: 'weighins: how many days back (default 14)' },
             target_kcal: { type: 'number', description: 'baseline: set an explicit kcal budget instead of the suggestion' },
+            recalibrate: { type: 'boolean', description: 'baseline: recompute the WHOOP calibration factor now (it otherwise refreshes weekly)' },
+            kind: { type: 'string', description: 'confounder_add: short kind, e.g. "creatine_start", "illness", "travel"; confounder_close: close the open one of this kind' },
+            details: {
+              type: ['object', 'string'],
+              description: 'confounder_add: what happened. A string, or {summary, effect (what it does to the scale), label (provisional label, "{to}" = window end)}',
+            },
+            window_days: { type: 'number', description: 'confounder_add: how long it bends the trend (default 14, max 120)' },
+            bracket: {
+              type: 'object',
+              description: 'confounder_add (optional): fixed offset curve for the bracket, {sign: 1 adds scale weight | -1 removes it, kg: [low, central, high], tau_days}',
+            },
+            id: { type: 'number', description: 'confounder_close: the record id (from baseline.confounders)' },
+            target_bf_pct: { type: 'number', description: 'goal_set: target body fat %' },
+            milestone_kg: { type: 'number', description: 'goal_set: next scale milestone (kg)' },
+            lean_mass_ref_kg: { type: 'number', description: 'goal_set: lean mass reference (kg) from a body-composition scan' },
+            lean_mass_ref_source: { type: 'string', description: 'goal_set: where the lean mass figure came from, e.g. the scan and its date' },
           },
           required: ['action'],
         },

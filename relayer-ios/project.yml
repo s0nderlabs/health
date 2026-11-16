@@ -20,8 +20,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.s0nderlabs.HealthRelay
         PRODUCT_NAME: HealthRelay
-        MARKETING_VERSION: "0.18.1"
-        CURRENT_PROJECT_VERSION: "8"
+        MARKETING_VERSION: "0.19.0"
+        CURRENT_PROJECT_VERSION: "9"
         SWIFT_VERSION: "5.9"
         TARGETED_DEVICE_FAMILY: "1"
         CODE_SIGN_STYLE: Automatic
@@ -32,7 +32,7 @@ targets:
     info:
       path: HealthRelay/Info.plist
       properties:
-        CFBundleDisplayName: health
+        CFBundleDisplayName: elpabl0s
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         # Empty dict = modern launch screen. Without this key iOS letterboxes
@@ -78,8 +78,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.s0nderlabs.HealthRelay.widgets
         PRODUCT_NAME: HealthRelayWidgets
-        MARKETING_VERSION: "0.18.1"
-        CURRENT_PROJECT_VERSION: "8"
+        MARKETING_VERSION: "0.19.0"
+        CURRENT_PROJECT_VERSION: "9"
         SWIFT_VERSION: "5.9"
         TARGETED_DEVICE_FAMILY: "1"
         CODE_SIGN_STYLE: Automatic
@@ -88,7 +88,7 @@ targets:
     info:
       path: HealthRelayWidgets/Info.plist
       properties:
-        CFBundleDisplayName: health
+        CFBundleDisplayName: elpabl0s
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSExtension:

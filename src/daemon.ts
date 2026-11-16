@@ -24,7 +24,9 @@ import {
 } from './resign/hooks.js'
 import { ensureRuntimeDir, loadConfig, saveConfig, configFileWritable, inQuietHours, resolvePlanPath, PID_PATH, SOCKET_PATH, RUNTIME_DIR, ROUTES_DIR, MEALS_DIR } from './config.js'
 import { FoodService } from './food.js'
+import { KJ_PER_KCAL } from './energy.js'
 import { MoneyService } from './money.js'
+import { ScaleService } from './scale.js'
 import { piercesQuietHours } from './types.js'
 import { Store } from './store.js'
 import { Engine } from './engine.js'
@@ -216,20 +218,58 @@ const food = new FoodService({
   broadcast: (msg) => {
     liveListener.broadcast(msg)
   },
-  whoopKcalSince: (sinceIso) =>
+  // Every cycle overlapping the range, the in-progress one included (end
+  // NULL): the energy mapping decides coverage, never this query.
+  whoopCyclesSince: (sinceIso) =>
     (
       store.db
-        .query('SELECT start, kilojoule FROM cycles WHERE start >= ? AND end IS NOT NULL AND kilojoule IS NOT NULL')
-        .all(sinceIso) as Array<{ start: string; kilojoule: number }>
-    ).map((c) => ({ start: c.start, kcal: c.kilojoule / 4.184 })),
+        .query('SELECT id, start, end, score_state, kilojoule FROM cycles WHERE (end IS NULL OR end >= ?) ORDER BY start ASC')
+        .all(sinceIso) as Array<{ id: number; start: string; end: string | null; score_state: string | null; kilojoule: number | null }>
+    ).map((c) => ({
+      id: c.id,
+      start: c.start,
+      end: c.end || null,
+      score_state: c.score_state,
+      kcal: c.kilojoule == null ? null : c.kilojoule / KJ_PER_KCAL,
+    })),
   log: (msg) => log(`food: ${msg}`),
 })
+// Boot: run the weigh-in rules over stored rows (they used to run only on
+// ingest). Confounder records are personal: they are added at runtime with
+// health__meal confounder_add, never seeded from source.
+try {
+  food.reclassifyWeighins()
+} catch (err) {
+  log(`food: boot weigh-in re-classification failed: ${err}`)
+}
+
+// S400 scale weigh-ins over passive BLE (relayer/scale-listen.swift posts
+// raw MiBeacon frames to /scale-adv). Off until config has a scale block.
+// The bindkey is read from the Keychain in the background at start (re-read
+// when frames keep failing to authenticate), never logged.
+const scale = new ScaleService({
+  getConfig: () => config().scale,
+  ingest: (samples) => food.ingestBodySamples(samples, []),
+  // Replay guard: the last accepted MiBeacon counter survives restarts.
+  loadHighWater: () => {
+    const v = store.getMeta('scale.counter_hwm')
+    return v && /^\d+$/.test(v) ? Number(v) : null
+  },
+  saveHighWater: (n) => store.setMeta('scale.counter_hwm', n == null ? '' : String(n)),
+  log: (msg) => log(msg),
+})
+let scaleStarted = false
+if (config().scale) {
+  scaleStarted = true
+  scale.start()
+}
 
 // Money notifications (bank / wallet alerts forwarded by the phone).
 const money = new MoneyService({
   db: store.db,
   emit: (key, payload) => engine.actionEvent('money.notif', key, payload),
   log: (msg) => log(`money: ${msg}`),
+  ownNames: () => config().money?.own_names ?? [],
 })
 
 // Loud signing pushes (phone + Mac notifications), on top of system.health.
@@ -254,6 +294,15 @@ const liveListener = new LiveListener(liveState, () => config().live.token, {
   foodHttp: (req, url) => food.handleHttp(req, url),
   onNotifyAck: (id, shown, reason) => signingPush.onAck(id, shown, reason),
   moneyHttp: (req, url) => money.handleHttp(req, url),
+  // Lazy start: a scale block added after boot arms the leg on first frame.
+  scaleHttp: (req, url) => {
+    if (!config().scale) return Promise.resolve(null)
+    if (!scaleStarted) {
+      scaleStarted = true
+      scale.start()
+    }
+    return scale.handleHttp(req, url)
+  },
   onBodyMass: (samples, deleted) => food.ingestBodySamples(samples, deleted),
   // Phone-side surfaces: intent taps ride the same event path as the MCP tool,
   // steps land in the archive, plan reads come from the /gym-authored file,
@@ -623,7 +672,7 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
         food_today: (() => {
           try {
             const d = food.day()
-            return { date: d.date, totals: d.totals, targets: d.targets, baseline: d.baseline, weight: d.weight }
+            return { date: d.date, totals: d.totals, targets: d.targets, baseline: d.baseline, energy: d.energy, weight: d.weight }
           } catch (err) {
             return { error: String(err) }
           }
@@ -782,6 +831,8 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
       if (!(Number.isInteger(f.rollover_hour) && f.rollover_hour >= 0 && f.rollover_hour <= 12))
         throw new Error('food.rollover_hour must be an integer 0-12')
       if (!(f.deficit_kcal >= 0 && f.deficit_kcal <= 1500)) throw new Error('food.deficit_kcal must be 0-1500')
+      if (f.weighins_from != null && !(typeof f.weighins_from === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(f.weighins_from) && Number.isFinite(Date.parse(f.weighins_from))))
+        throw new Error('food.weighins_from must be YYYY-MM-DD or null')
       if (merged.quiet_hours && (!merged.quiet_hours.start || !merged.quiet_hours.end)) {
         throw new Error('quiet_hours needs both start and end (or null to disable)')
       }
@@ -793,6 +844,13 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
       }
       const { saveConfig } = await import('./config.js')
       saveConfig(merged)
+      // A new weighins_from re-decides the date rule over stored readings now,
+      // not at the next ingest (config() re-reads the file just saved).
+      try {
+        food.onConfigChanged(current.food, merged.food)
+      } catch (err) {
+        log(`food: weigh-in re-classification after config_set failed: ${err}`)
+      }
       // The poll interval is picked up live by the self-rescheduling poll timer.
       // The webhook listener binds once at startup and cannot rebind live, so a
       // port/path change needs a daemon restart to take effect.
@@ -856,7 +914,21 @@ async function mealRpc(p: Record<string, unknown>): Promise<unknown> {
     }
     case 'baseline':
       if (p.accept === true || p.target_kcal != null) return food.acceptTarget(p)
-      return { ...food.baseline(), current_target_kcal: food.targetKcal() }
+      // The WHOOP factor refreshes weekly (or when a provisional one outlives
+      // its window); recalibrate:true forces a recompute now.
+      return {
+        ...food.baseline({ refreshCalibration: p.recalibrate === true }),
+        current_target_kcal: food.targetKcal(),
+        current_target_provisional: store.getMeta('food_target_provisional') === '1',
+      }
+    case 'confounder_add':
+      return food.addConfounder(p)
+    case 'confounder_close':
+      return food.closeConfounder(p)
+    case 'goal_set':
+      return food.setGoal(p)
+    case 'goal_clear':
+      return food.clearGoal()
     case 'weighins':
       return food.weighins(typeof p.days === 'number' ? p.days : 14)
     case 'weighin_set':
@@ -1167,6 +1239,7 @@ function shutdown(reason: string): void {
   log(`shutting down (${reason})`)
   try { webhookServer.stop(true) } catch {}
   try { liveListener.stop() } catch {}
+  try { scale.stop() } catch {}
   try { ipc.stop() } catch {}
   try { store.close() } catch {}
   try { if (existsSync(PID_PATH)) unlinkSync(PID_PATH) } catch {}

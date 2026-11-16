@@ -62,7 +62,7 @@ describe('loud push policy', () => {
     expect(p).toHaveLength(1)
     expect(p[0].id).toBe(`phone-sign-urgent:${at(20)}`)
     expect(p[0].level).toBe('loud')
-    expect(p[0].title).toBe('Health app signature')
+    expect(p[0].title).toBe('elpabl0s signature')
     expect(p[0].body).toContain('20h')
     expect(p[0].body).toContain(pushClock(at(20))!)
     expect(p[0].body).toContain('Unlock your phone at home on Wi-Fi')
@@ -90,7 +90,7 @@ describe('loud push policy', () => {
   test('pending confirm: the action is to open the app', () => {
     const s = st({ pending_confirm: { first_installed_at: at(-1), version: '0.17.0 (6)' } as never })
     const p = watchdog(at(6), s)
-    expect(p[0].body).toContain('Open HealthRelay once')
+    expect(p[0].body).toContain('Open elpabl0s once')
   })
 
   test('a hard episode is loud only at <=24h, level by hours left', () => {
@@ -99,7 +99,7 @@ describe('loud push policy', () => {
     const fail = loud.find((x) => x.id.startsWith('resign-fail:'))!
     expect(fail.id).toBe(`resign-fail:keychain_prompt:${at(-1)}`)
     expect(fail.level).toBe('loud')
-    expect(fail.title).toBe('Health app: re-sign failed')
+    expect(fail.title).toBe('elpabl0s: re-sign failed')
     expect(fail.body).toContain('keychain_prompt')
     expect(fail.body).toContain('20h left')
     expect(fail.body).toContain('Always Allow')
@@ -178,7 +178,7 @@ describe('loud push policy', () => {
 
 // ── Delivery ──────────────────────────────────────────────────────
 
-const P = (id: string): SigningPush => ({ id, title: 'Health app signature', body: `body ${id}`, level: 'loud' })
+const P = (id: string): SigningPush => ({ id, title: 'elpabl0s signature', body: `body ${id}`, level: 'loud' })
 
 function harness(opts: { phones?: number; exec?: ExecFn; meta?: Map<string, string>; clock?: { t: number } } = {}) {
   const meta = opts.meta ?? new Map<string, string>()
@@ -220,7 +220,7 @@ describe('signing push delivery', () => {
     await h.d.tick([P('x')])
     await h.d.tick([P('x')])
     expect(h.sent).toHaveLength(2)
-    expect(h.sent[0]).toEqual({ type: 'notify', id: 'x', title: 'Health app signature', body: 'body x', level: 'loud' })
+    expect(h.sent[0]).toEqual({ type: 'notify', id: 'x', title: 'elpabl0s signature', body: 'body x', level: 'loud' })
     expect(h.calls).toHaveLength(1)
     expect(h.calls[0].opts.timeoutMs).toBe(MAC_NOTIFY_TIMEOUT_MS)
     expect(h.calls[0].argv[0]).toBe('/usr/bin/osascript')

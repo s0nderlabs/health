@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'fs'
+import { readFileSync, writeFileSync, mkdirSync, renameSync, chmodSync } from 'fs'
 import { join, dirname } from 'path'
 import { homedir } from 'os'
 import type { HealthConfig } from './types.js'
@@ -48,8 +48,16 @@ export function loadConfig(): HealthConfig {
       live: { ...DEFAULT_CONFIG.live, ...parsed.live },
       plan_path: parsed.plan_path ?? DEFAULT_CONFIG.plan_path,
       food: { ...DEFAULT_CONFIG.food, ...parsed.food },
+      money: {
+        own_names: Array.isArray(parsed.money?.own_names)
+          ? parsed.money.own_names.filter((x: unknown): x is string => typeof x === 'string').slice(0, 10)
+          : [],
+      },
       // Field-by-field tolerant: a malformed value falls back to the default.
       resign: resolveResignConfig(parsed.resign, DEFAULT_CONFIG.resign),
+      // Passed through as-is (src/scale.ts validates per field): dropping it
+      // here would make every saveConfig() erase the block from disk.
+      ...(parsed.scale && typeof parsed.scale === 'object' ? { scale: parsed.scale } : {}),
     }
   } catch {
     return structuredClone(DEFAULT_CONFIG)
@@ -64,7 +72,10 @@ export function resolvePlanPath(config: HealthConfig): string {
 export function saveConfig(config: HealthConfig): void {
   mkdirSync(dirname(CONFIG_PATH), { recursive: true })
   // Atomic: a crash mid-write must never leave a truncated config behind.
-  writeFileSync(CONFIG_PATH + '.tmp', JSON.stringify(config, null, 2) + '\n')
+  // Owner-only: the file carries live.token, the bearer for every live route.
+  // (mode applies only on create; chmod covers a leftover .tmp.)
+  writeFileSync(CONFIG_PATH + '.tmp', JSON.stringify(config, null, 2) + '\n', { mode: 0o600 })
+  chmodSync(CONFIG_PATH + '.tmp', 0o600)
   renameSync(CONFIG_PATH + '.tmp', CONFIG_PATH)
 }
 

@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.19.0 - 2026-11-16
+
+### Added
+
+- **Energy balance.** WHOOP's daily burn (kJ / 4.184) is mapped onto each
+  food day: a scored cycle claims the day it overlaps most, and a day counts
+  as fully covered only when one cycle covers it cleanly (no pro-rata split).
+  Days that do not line up (late sleep, split or unscored cycles, partial
+  days, the cycle in progress) are shown and labelled, and the baseline
+  reports the exclusion rate by reason, with a plain flag when late or
+  early sleep keeps too many days out. Before calibration the Food tab
+  shows "Burned (WHOOP, uncalibrated)" and makes no deficit or surplus
+  claim. Once the intake-and-weight baseline exists, a calibration factor
+  (measured maintenance / mean WHOOP burn, bounded 0.6 to 1.1) turns burn
+  into a balance with an error band; today reads "so far", never
+  projected, and a day with a pending or missing meal gets no balance.
+- **Confounders.** Records for anything that moves the scale without
+  changing fat (a creatine start, an intake step-down, travel, illness),
+  added and closed through `health__meal`. While one is open the baseline
+  is provisional: it reports maintenance as the range across a fixed 3x3
+  bracket of water-shift curves rather than one number, offers a target
+  only on explicit acceptance, and flags the earliest slope as the least
+  trustworthy. Personal records live in the local database, never in code.
+- **Goal record.** Target body-fat %, a milestone weight and a lean-mass
+  reference, with the weight that target implies at constant lean mass.
+- **Weigh-in upgrades.** A 7-day average and its change, the active
+  confounders line, an "after a meal" exclusion (a meal logged earlier that
+  food day), and a "possible replay" exclusion for a reading identical to
+  the previous one. The rules re-run when the start date changes, at
+  daemon start, and after meal edits, and only the rules' own exclusions
+  are ever lifted automatically.
+- **Zero-tap S400 scale.** A passive Mac Bluetooth listener
+  (`relayer/scale-listen.swift`, never connects to anything) forwards the
+  scale's encrypted MiBeacon frames to the daemon, which decrypts them with
+  the scale's bindkey (macOS Keychain only), collapses one weigh-in's
+  repeats into one reading, derives body fat from impedance, and files it
+  as source "S400 BLE" through the same weigh-in path. Unencrypted and
+  replayed frames are rejected. `scripts/scale-bindkey.ts` fetches the
+  bindkey once through a QR-code login to the Xiaomi cloud (no password;
+  the session lives only in memory and only the key is kept).
+- **Money: more exact formats.** Jago pocket moves and transfers from your
+  own names (`money.own_names`, local config) are a new `internal` kind
+  (never spending, never income); Jago card authorization requests are
+  `auth_request` (pending, not spending); SeaBank real-time transfers carry
+  their own timestamp.
+
+### Changed
+
+- **Money marketing filter.** Loan, credit, contest and giveaway pushes,
+  and amountless ads that merely mention a transaction word, are dropped as
+  noise, but never a text saying something happened (an auto-debited
+  instalment, a disbursed loan, a credited reward).
+- **The phone app is now displayed as "elpabl0s"** (home screen, Settings,
+  its notifications, re-sign alerts). Cosmetic only: bundle identifier,
+  intents, plugin and tool names are unchanged.
+- The Food tab shows the energy row (uncalibrated burn, provisional or
+  calibrated balance, so-far, coverage notes) and survives a malformed
+  energy payload. App version 0.19.0 (9).
+
 ## 0.18.1 - 2026-11-16
 
 ### Added

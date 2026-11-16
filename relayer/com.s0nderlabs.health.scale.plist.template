@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent template for the S400 scale listener. Replace __HOME__ with the
+  absolute home directory, save as ~/Library/LaunchAgents/com.s0nderlabs.health.scale.plist.
+  The binary must live OUTSIDE ~/Documents (TCC wedges launchd spawns there):
+    scripts/build-scale.sh && cp bin/scale-listen __HOME__/.local/bin/scale-listen
+-->
+<plist version="1.0">
+<dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>com.s0nderlabs.health.scale</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__HOME__/.local/bin/scale-listen</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>__HOME__/.claude/channels/health/scale.log</string>
+	<key>StandardOutPath</key>
+	<string>__HOME__/.claude/channels/health/scale.log</string>
+</dict>
+</plist>

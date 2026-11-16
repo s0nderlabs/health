@@ -182,10 +182,103 @@ struct FoodView: View {
                 }
                 Spacer(minLength: 0)
             }
+            if let e = day.energy {
+                Rectangle().fill(Theme.hairline).frame(height: 1)
+                energyRow(e)
+            }
             baselineLine(day)
         }
         .padding(20)
         .glassCard(strong: true)
+    }
+
+    /// Burn and balance, quietly. Before calibration it is only WHOOP's raw
+    /// burn, labelled as such, and never a deficit or surplus claim. After,
+    /// the balance (intake minus calibrated burn) with its band; today reads
+    /// "so far" and is never projected.
+    @ViewBuilder
+    private func energyRow(_ e: FoodEnergy) -> some View {
+        let balance = e.calibrated ? e.balance_kcal : nil
+        let note = e.note ?? energyFallbackNote(e)
+        VStack(alignment: .leading, spacing: 4) {
+            if let b = balance {
+                let word = b.rounded() < 0 ? "deficit" : b.rounded() > 0 ? "surplus" : "even"
+                let band = FoodFormat.band(b, e.balance_lo, e.balance_hi)
+                // A provisional factor (fitted while a confounder window was
+                // open) says so in the tag, not only in the note.
+                let kind = e.provisional == true ? "provisional" : "calibrated"
+                energyHeader(e.so_far ? "BALANCE SO FAR" : "BALANCE",
+                             tag: e.factor.map { "WHOOP, \(kind) \u{00D7}" + String(format: "%.2f", $0) } ?? "WHOOP, \(kind)")
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Text(FoodFormat.signed(b))
+                        .font(Theme.rounded(22, .semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.textPrimary)
+                    Text(word)
+                        .font(Theme.rounded(13))
+                        .foregroundStyle(Theme.textSecondary)
+                    if let band = band {
+                        Text(band)
+                            .font(Theme.rounded(12.5))
+                            .monospacedDigit()
+                            .foregroundStyle(Theme.textTertiary)
+                            .padding(.leading, 4)
+                    }
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(FoodFormat.signed(b)) kcal \(word)\(band.map { ", band \($0)" } ?? "")\(e.so_far ? ", so far" : "")\(e.provisional == true ? ", provisional" : "")")
+                .accessibilityIdentifier("food.energy.value")
+            } else if let burn = e.burn_kcal {
+                energyHeader(e.so_far ? "BURNED SO FAR" : "BURNED",
+                             tag: e.calibrated ? "WHOOP, raw" : "WHOOP, uncalibrated")
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Text(FoodFormat.int(burn))
+                        .font(Theme.rounded(22, .semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.textPrimary)
+                    Text("kcal")
+                        .font(Theme.rounded(13))
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Burned \(FoodFormat.int(burn)) kcal\(e.so_far ? " so far" : ""), WHOOP\(e.calibrated ? "" : ", uncalibrated")")
+                .accessibilityIdentifier("food.energy.value")
+            } else {
+                energyHeader("BURNED", tag: "WHOOP")
+            }
+            if let note = note {
+                Text(note)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("food.energy.note")
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("food.energy")
+    }
+
+    private func energyHeader(_ label: String, tag: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label)
+                .font(Theme.sectionLabel(9.5))
+                .kerning(1.3)
+                .foregroundStyle(Theme.textTertiary)
+            Spacer(minLength: 8)
+            Text(tag)
+                .font(Theme.rounded(11))
+                .foregroundStyle(Theme.textTertiary)
+                .accessibilityIdentifier("food.energy.tag")
+        }
+    }
+
+    /// Used only when the daemon sends no note of its own.
+    private func energyFallbackNote(_ e: FoodEnergy) -> String? {
+        switch e.coverage {
+        case "none": return "No scored WHOOP cycle for this day yet."
+        case "partial": return e.so_far ? "Cycle still running. Nothing projected." : "Partial WHOOP coverage for this day."
+        default: return nil
+        }
     }
 
     private func stat(_ label: String, value: String, unit: String?) -> some View {
@@ -219,7 +312,13 @@ struct FoodView: View {
                 .foregroundStyle(Theme.textTertiary)
             Group {
                 if day.targets.kcal != nil {
-                    Text("Budget set from your baseline")
+                    Text(day.targets.kcal_provisional == true
+                         ? "Provisional budget (confounder window)"
+                         : "Budget set from your baseline")
+                } else if b.status == "provisional" {
+                    // No budget is suggested while a confounder window is open.
+                    Text(b.provisional_until.flatMap(FoodFormat.monthDay).map { "Baseline provisional until \($0)" }
+                         ?? "Baseline provisional (confounder window)")
                 } else if b.ready {
                     Text("Baseline ready. Ask Claude for your budget.")
                 } else {
@@ -886,14 +985,21 @@ enum DemoFood {
             return FoodDay(
                 date: FoodStore.localFoodDay(), today: FoodStore.localFoodDay(), meals: [],
                 totals: FoodTotals(kcal: 0, kcal_lo: 0, kcal_hi: 0, protein_g: 0, estimated: 0, pending: 0),
-                complete: true, targets: FoodTargets(protein_g: 165, kcal: nil),
+                complete: true, targets: FoodTargets(protein_g: 140, kcal: nil),
                 baseline: FoodBaseline(ready: false, complete_days: 0, days_needed: 14, weigh_ins: 0, weigh_ins_needed: 8),
                 weight: nil)
         }
         let target = mode == "target"
+        // Energy modes (synthetic numbers only): energy-uncal, energy-deficit,
+        // energy-surplus, energy-none, energy-provisional and energy-malformed
+        // are a finished day (yesterday); energy-sofar and energy-pending are
+        // today with the cycle still running.
+        let energyMode = mode.hasPrefix("energy-") ? String(mode.dropFirst(7)) : nil
+        let pastDay = energyMode != nil && energyMode != "sofar" && energyMode != "pending"
+        let dayDate = pastDay ? Calendar.current.date(byAdding: .day, value: -1, to: Date()) ?? Date() : Date()
         let iso = ISO8601DateFormatter()
         let at = { (h: Int, m: Int) -> String in
-            var c = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+            var c = Calendar.current.dateComponents([.year, .month, .day], from: dayDate)
             c.hour = h
             c.minute = m
             return iso.string(from: Calendar.current.date(from: c) ?? Date())
@@ -924,14 +1030,109 @@ enum DemoFood {
             id: 4, source: "app", status: "pending", eaten_at: at(19, 25), label: nil, note: "soto mama, 1 centong",
             confidence: nil, revision: 0, kcal: nil, kcal_lo: nil, kcal_hi: nil, protein_g: nil, fix_text: nil,
             items: [], photos: [FoodPhoto(n: 0, url: "/meal-photo?meal=4&n=0", thumb_url: "/meal-photo?meal=4&n=0&thumb=1")])
+        if let e = energyMode {
+            return energyDay(e, at: at, date: dayDate, morning: [latte, lunch, americano], pending: dinner, item: item)
+        }
         let meals = [latte, lunch, americano, dinner]
         return FoodDay(
             date: FoodStore.localFoodDay(), today: FoodStore.localFoodDay(), meals: meals,
             totals: FoodTotals(kcal: 920, kcal_lo: 770, kcal_hi: 1090, protein_g: 50, estimated: 3, pending: 1),
-            complete: false, targets: FoodTargets(protein_g: 165, kcal: target ? 2300 : nil),
+            complete: false, targets: FoodTargets(protein_g: 140, kcal: target ? 2300 : nil),
             baseline: target
                 ? FoodBaseline(ready: true, complete_days: 18, days_needed: 14, weigh_ins: 15, weigh_ins_needed: 8)
                 : FoodBaseline(ready: false, complete_days: 2, days_needed: 14, weigh_ins: 3, weigh_ins_needed: 8),
-            weight: FoodWeight(kg: target ? 82.6 : 83.4, at: at(7, 5), fat_pct: 23.6))
+            weight: FoodWeight(kg: target ? 74.6 : 75.4, at: at(7, 5), fat_pct: 20.6))
+    }
+
+    /// The energy-row states. Intake, burn and factor are made up but kept
+    /// arithmetically consistent: balance = intake - burn * factor. Every
+    /// note is the EXACT string the daemon's dayEnergy() sends for that state
+    /// (the daemon's note always wins on device), so the mock is what ships.
+    private static func energyDay(
+        _ mode: String, at: (Int, Int) -> String, date: Date, morning: [FoodMeal], pending: FoodMeal,
+        item: (String, Double?, Double, Double, Double, Double, String?) -> FoodItem
+    ) -> FoodDay? {
+        let dinner = FoodMeal(
+            id: 5, source: "app", status: "estimated", eaten_at: at(19, 25), label: "Soto ayam + nasi", note: "soto, 1 centong",
+            confidence: "medium", revision: 1, kcal: 690, kcal_lo: 580, kcal_hi: 820, protein_g: 38, fix_text: nil,
+            items: [item("Soto ayam", 450, 340, 290, 400, 30, nil), item("Rice, 1 centong", 150, 195, 175, 215, 4, nil),
+                    item("Emping + sambal", 30, 155, 115, 205, 4, nil)],
+            photos: [FoodPhoto(n: 0, url: "/meal-photo?meal=4&n=0", thumb_url: "/meal-photo?meal=4&n=0&thumb=1")])
+        let snack = FoodMeal(
+            id: 6, source: "chat", status: "estimated", eaten_at: at(22, 10), label: "Banana bread, 2 slices", note: "banana bread 2 slices",
+            confidence: "low", revision: 1, kcal: 560, kcal_lo: 450, kcal_hi: 700, protein_g: 10, fix_text: nil,
+            items: [item("Banana bread, 2 slices", 160, 560, 450, 700, 10, nil)], photos: [])
+        let today = FoodStore.localFoodDay()
+        let day = FoodStore.localFoodDay(date)
+        let uncal = FoodBaseline(ready: false, complete_days: 9, days_needed: 14, weigh_ins: 6, weigh_ins_needed: 8, status: "collecting")
+        let ready = FoodBaseline(ready: true, complete_days: 16, days_needed: 14, weigh_ins: 11, weigh_ins_needed: 8, status: "ready")
+        let until = FoodStore.localFoodDay(Calendar.current.date(byAdding: .day, value: 12, to: Date()) ?? Date())
+        let provisional = FoodBaseline(ready: true, complete_days: 15, days_needed: 14, weigh_ins: 10, weigh_ins_needed: 8,
+                                       status: "provisional", provisional_until: until)
+        // Synthetic body values (not anyone's real numbers).
+        let weight = FoodWeight(kg: 75.0, at: at(7, 5), fat_pct: 20.0)
+        let protein = FoodTargets(protein_g: 140, kcal: nil)
+        func full(_ meals: [FoodMeal], _ t: FoodTotals, _ b: FoodBaseline, _ e: FoodEnergy) -> FoodDay {
+            FoodDay(date: day, today: today, meals: meals, totals: t, complete: true,
+                    targets: protein, baseline: b, weight: weight, energy: e)
+        }
+        let base = morning + [dinner]
+        let baseTotals = FoodTotals(kcal: 1610, kcal_lo: 1350, kcal_hi: 1910, protein_g: 88, estimated: 4, pending: 0)
+        let morningTotals = FoodTotals(kcal: 920, kcal_lo: 770, kcal_hi: 1090, protein_g: 50, estimated: 3, pending: 0)
+        switch mode {
+        case "uncal":
+            return full(base, baseTotals, uncal, FoodEnergy(
+                burn_kcal: 2350, calibrated: false, factor: nil, balance_kcal: nil, balance_lo: nil, balance_hi: nil,
+                so_far: false, coverage: "full", note: "No balance until the baseline calibrates WHOOP.", provisional: false))
+        case "surplus":
+            // Partial coverage (the longest note a balance row carries):
+            // 2,170 - 2,291 x 0.86 = +200.
+            return full(base + [snack], FoodTotals(kcal: 2170, kcal_lo: 1800, kcal_hi: 2610, protein_g: 98, estimated: 5, pending: 0),
+                        ready, FoodEnergy(burn_kcal: 2291, calibrated: true, factor: 0.86, balance_kcal: 200,
+                                          balance_lo: 30, balance_hi: 370, so_far: false, coverage: "partial",
+                                          note: "Two WHOOP cycles share this day, so the burn is loose.", provisional: false))
+        case "none":
+            return full(base, baseTotals, ready, FoodEnergy(
+                burn_kcal: nil, calibrated: true, factor: 0.86, balance_kcal: nil, balance_lo: nil, balance_hi: nil,
+                so_far: false, coverage: "none", note: "No scored WHOOP cycle for this day.", provisional: false))
+        case "sofar":
+            // Today, cycle running, every meal estimated: 920 - 1,240 x 0.86 = -146, so far.
+            return FoodDay(
+                date: today, today: today, meals: morning, totals: morningTotals,
+                complete: true, targets: protein, baseline: ready, weight: weight,
+                energy: FoodEnergy(burn_kcal: 1240, calibrated: true, factor: 0.86, balance_kcal: -146,
+                                   balance_lo: -261, balance_hi: -31, so_far: true, coverage: "partial",
+                                   note: "So far today, not a projection.", provisional: false))
+        case "pending":
+            // Today with a meal still pending: its kcal is missing, so no balance.
+            return FoodDay(
+                date: today, today: today, meals: morning + [pending],
+                totals: FoodTotals(kcal: 920, kcal_lo: 770, kcal_hi: 1090, protein_g: 50, estimated: 3, pending: 1),
+                complete: false, targets: protein, baseline: ready, weight: weight,
+                energy: FoodEnergy(burn_kcal: 1240, calibrated: true, factor: 0.86, balance_kcal: nil,
+                                   balance_lo: nil, balance_hi: nil, so_far: true, coverage: "partial",
+                                   note: "1 meal not estimated yet, so no balance yet.", provisional: false))
+        case "provisional":
+            // Factor fitted while a confounder window is open: 1,610 - 2,395 x 0.86 = -450.
+            return full(base, baseTotals, provisional, FoodEnergy(
+                burn_kcal: 2395, calibrated: true, factor: 0.86, balance_kcal: -450, balance_lo: -630, balance_hi: -270,
+                so_far: false, coverage: "full", note: "Provisional factor (confounder window).", provisional: true))
+        case "malformed":
+            // A daemon sending a broken energy object: decoded through the
+            // real wire decoder, the day must still render (no energy row).
+            let json = """
+            {"date":"\(day)","today":"\(today)","meals":[],"complete":true,
+             "totals":{"kcal":1610,"kcal_lo":1350,"kcal_hi":1910,"protein_g":88,"estimated":4,"pending":0},
+             "targets":{"protein_g":140,"kcal":null},
+             "baseline":{"ready":true,"complete_days":16,"days_needed":14,"weigh_ins":11,"weigh_ins_needed":8},
+             "weight":null,
+             "energy":{"burn_kcal":"2395","calibrated":true}}
+            """
+            return try? JSONDecoder().decode(FoodDay.self, from: Data(json.utf8))
+        default: // deficit, full coverage, nothing to add: the daemon sends no note.
+            return full(base, baseTotals, ready, FoodEnergy(
+                burn_kcal: 2395, calibrated: true, factor: 0.86, balance_kcal: -450, balance_lo: -630, balance_hi: -270,
+                so_far: false, coverage: "full", note: nil, provisional: false))
+        }
     }
 }

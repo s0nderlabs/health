@@ -31,6 +31,7 @@
 		A239F28AA97AD2844BF82AFA /* Settings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48C4EF4AB3A7E881A50E208A /* Settings.swift */; };
 		ABC8D64C5466F7F9F993AF41 /* LiveActivityController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54A8187D9DBB0F6A24ECF7FE /* LiveActivityController.swift */; };
 		AE5A906D6DC070E3693F3897 /* RestChime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D4B7FD975836D714362DE5D /* RestChime.swift */; };
+		B3A064577058AB34FD933985 /* EnergyRowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB6811BB8A0DF69304D53B06 /* EnergyRowTests.swift */; };
 		B6FE2305C8D8850525F16367 /* TailnetTunnel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0B118E569EC868CBBAF77A4 /* TailnetTunnel.swift */; };
 		B7E528A9D02835BAF5A02C53 /* ComposeSheetLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51C8A73AFA15B5E741B4AB4B /* ComposeSheetLayoutTests.swift */; };
 		BB140371ECD3394B5878D0A9 /* StepsCourier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30521B200C323A43A1C00934 /* StepsCourier.swift */; };
@@ -112,6 +113,7 @@
 		F51C6B23C65BB01F03022C0C /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		F6B8F07C72771C974D660880 /* SessionProgress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionProgress.swift; sourceTree = "<group>"; };
 		F9582FF7521F2BE06326B5A6 /* EndSessionIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EndSessionIntent.swift; sourceTree = "<group>"; };
+		FB6811BB8A0DF69304D53B06 /* EnergyRowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnergyRowTests.swift; sourceTree = "<group>"; };
 		FCEA0F403F414A3D81713AF0 /* LiveView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -120,6 +122,7 @@
 			isa = PBXGroup;
 			children = (
 				51C8A73AFA15B5E741B4AB4B /* ComposeSheetLayoutTests.swift */,
+				FB6811BB8A0DF69304D53B06 /* EnergyRowTests.swift */,
 			);
 			path = HealthRelayUITests;
 			sourceTree = "<group>";
@@ -395,6 +398,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				B7E528A9D02835BAF5A02C53 /* ComposeSheetLayoutTests.swift in Sources */,
+				B3A064577058AB34FD933985 /* EnergyRowTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -495,7 +499,7 @@
 				CODE_SIGN_ENTITLEMENTS = HealthRelay/HealthRelay.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 9;
 				DEVELOPMENT_TEAM = 4F2SRW2599;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				INFOPLIST_FILE = HealthRelay/Info.plist;
@@ -504,7 +508,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.18.1;
+				MARKETING_VERSION = 0.19.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.s0nderlabs.HealthRelay;
 				PRODUCT_NAME = HealthRelay;
 				SDKROOT = iphoneos;
@@ -517,7 +521,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 9;
 				DEVELOPMENT_TEAM = 4F2SRW2599;
 				INFOPLIST_FILE = HealthRelayWidgets/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -525,7 +529,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.18.1;
+				MARKETING_VERSION = 0.19.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.s0nderlabs.HealthRelay.widgets;
 				PRODUCT_NAME = HealthRelayWidgets;
 				SDKROOT = iphoneos;
@@ -542,7 +546,7 @@
 				CODE_SIGN_ENTITLEMENTS = HealthRelay/HealthRelay.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 9;
 				DEVELOPMENT_TEAM = 4F2SRW2599;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				INFOPLIST_FILE = HealthRelay/Info.plist;
@@ -551,7 +555,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.18.1;
+				MARKETING_VERSION = 0.19.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.s0nderlabs.HealthRelay;
 				PRODUCT_NAME = HealthRelay;
 				SDKROOT = iphoneos;
@@ -564,7 +568,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 9;
 				DEVELOPMENT_TEAM = 4F2SRW2599;
 				INFOPLIST_FILE = HealthRelayWidgets/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -572,7 +576,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.18.1;
+				MARKETING_VERSION = 0.19.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.s0nderlabs.HealthRelay.widgets;
 				PRODUCT_NAME = HealthRelayWidgets;
 				SDKROOT = iphoneos;

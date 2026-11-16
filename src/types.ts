@@ -280,6 +280,9 @@ export interface HealthConfig {
   // local time, so a 00:30 dinner counts toward the previous day. The kcal
   // target only exists once the baseline (logged intake + weigh-in trend)
   // says what maintenance is; protein has a fixed target from day one.
+  /** Money notifications. own_names = HIS names as banks print them (local
+   *  only, never committed): a transfer from one of them is internal. */
+  money: { own_names: string[] }
   food: {
     protein_target_g: number
     rollover_hour: number
@@ -295,6 +298,32 @@ export interface HealthConfig {
   // phone's hardware UDID and stays local. The team id is never configured:
   // it comes from the build snapshot's project.yml.
   resign: ResignConfig
+  // Xiaomi S400 body-composition scale over passive BLE (src/scale.ts +
+  // relayer/scale-listen.swift). Absent = the leg is off. Not secret: the
+  // bindkey lives in the Keychain, never here.
+  scale?: ScaleConfig
+}
+
+/** The S400 leg's config block. mac is the scale's BLE address in readable
+ *  order (AA:BB:CC:DD:EE:FF): macOS hides addresses from CoreBluetooth, and the
+ *  MiBeacon v5 nonce needs it. profile feeds the body-fat formula. */
+export interface ScaleConfig {
+  mac?: string
+  did?: string
+  model?: string
+  /** MiBeacon product id override (decimal or 0x-hex); default = the known S400 ids. */
+  product_id?: number | string
+  /** CoreBluetooth peripheral UUID (per-Mac) the listener may also match on. */
+  peripheral_id?: string
+  /** Keychain account the bindkey was stored under (default: did, then mac). */
+  keychain_account?: string
+  /** Keychain service of the bindkey (default dev.s400-bindkey). */
+  keychain_service?: string
+  profile?: {
+    height_cm?: number
+    birth_date?: string // YYYY-MM-DD
+    sex?: 'male' | 'female'
+  }
 }
 
 export const DEFAULT_CONFIG: HealthConfig = {
@@ -379,6 +408,7 @@ export const DEFAULT_CONFIG: HealthConfig = {
     hot_bpm: null,
   },
   plan_path: '',
+  money: { own_names: [] },
   food: {
     protein_target_g: 165,
     rollover_hour: 4,

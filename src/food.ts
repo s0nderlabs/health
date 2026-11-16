@@ -21,11 +21,41 @@ import {
   parseConfidence,
   slugify,
   addDays,
+  daysBetween,
   totalsOf,
+  weightFit,
   BASELINE_DEFAULTS,
   type Baseline,
   type Meal,
 } from './meals.js'
+import {
+  CALIBRATION_MAX_AGE_MS,
+  balanceText,
+  burnByDay,
+  calibrate,
+  dayBounds,
+  dayEnergy,
+  exclusionStats,
+  type Calibration,
+  type CycleRec,
+  type DayBurn,
+  type DayEnergy,
+} from './energy.js'
+import {
+  ConfounderBook,
+  computeBracket,
+  earlySlope,
+  goalView,
+  parseGoal,
+  viewOf,
+  type Bracket,
+  withKindDefaults,
+  type ConfounderDetails,
+  type ConfounderSeed,
+  type ConfounderView,
+  type GoalRecord,
+  type GoalView,
+} from './confounders.js'
 import { ingestPhoto, PHOTO_MAX_PER_MEAL } from './photos.js'
 import { BadRequest, cleanText, jsonBody } from './http.js'
 export { BadRequest } from './http.js'
@@ -50,8 +80,9 @@ export interface FoodDeps {
   ) => boolean
   /** Push a message to every connected phone. */
   broadcast: (msg: Record<string, unknown>) => void
-  /** WHOOP cycle energy by food day, for the baseline cross-check. */
-  whoopKcalSince?: (sinceIso: string) => Array<{ start: string; kcal: number }>
+  /** WHOOP cycles overlapping [sinceIso, now] (end null = in progress),
+   *  kcal = kilojoule / 4.184: the burn side of the energy balance. */
+  whoopCyclesSince?: (sinceIso: string) => CycleRec[]
   now?: () => number
   log?: (msg: string) => void
 }
@@ -61,6 +92,15 @@ const EXCL_TEST = 'test: '
 const EXCL_NOT_MORNING = 'not a morning reading'
 const EXCL_REPEAT = 'repeat: a morning reading already counts today'
 const EXCL_OUTLIER = 'possible other person'
+const EXCL_AFTER_MEAL = 'after a meal'
+const EXCL_REPLAY = 'possible replay'
+/** The date rule's own prefix: a weighins_from change re-decides exactly these. */
+const EXCL_DATE_RULE = `${EXCL_TEST}before the first fasted weigh-in`
+/** Replay guard tolerance: identical to the scale's resolution. */
+const REPLAY_KG = 0.005
+const REPLAY_FAT = 0.00005
+const CAL_META = 'food_energy_calibration'
+const GOAL_META = 'food_goal'
 /** The outlier rule: active from 3 included readings; a reading further from
  *  the latest included one than 2.5 kg + 0.3 kg per day elapsed (capped at
  *  5 kg) is probably someone else on the scale (no Visitor mode). */
@@ -95,8 +135,23 @@ function isOutlier(book: MealBook, m: { ts: string; value?: number }): boolean {
 /** The morning window, local minutes: 03:30 to 09:00. */
 const MORNING_FROM_MIN = 3 * 60 + 30
 const MORNING_TO_MIN = 9 * 60
+/** Where the fasted check starts looking for a meal before a reading: the
+ *  later of the reading's food-day start and its own morning (local 03:30).
+ *  A 03:45 reading sits on the PREVIOUS food day (04:00 rollover), but last
+ *  night's dinner never makes it "after a meal". */
+export function fastedFromMs(ms: number, rolloverHour: number): number {
+  const d = new Date(ms)
+  const morning = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, MORNING_FROM_MIN).getTime()
+  const dayStart = dayBounds(foodDay(ms, rolloverHour), rolloverHour).start
+  return Math.max(dayStart, morning > ms ? morning - 86_400_000 : morning)
+}
 
 const MANUAL_INCLUDE_META = 'weighin_manual_include'
+
+/** "Creatine start" -> "creatine_start": the one spelling add and close share. */
+function normKind(k: unknown): string {
+  return typeof k === 'string' ? k.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) : ''
+}
 function dayStartIso(ms: number): string {
   const d = new Date(ms)
   return new Date(d.getFullYear(), d.getMonth(), d.getDate()).toISOString()
@@ -110,7 +165,7 @@ export function inMorningWindow(ms: number): boolean {
 const WEIGHIN_RECENT_MS = 36 * 3_600_000
 const WEIGHIN_MAX_PER_BATCH = 3
 
-/** "Weigh-in 05:02 WIB: 83.1 kg, 23.6% fat (Xiaomi Home). Previous: 83.6 kg
+/** "Weigh-in 05:02 WIB: 75.0 kg, 20.0% fat (Synthetic Scale). Previous: 75.5 kg
  *  on Sun 16 Nov 13:56 (-0.5 kg)." Minimal by design: the energy-balance
  *  release upgrades the same class with the 7-day trend and confounders. */
 export function weighinEvent(
@@ -118,6 +173,7 @@ export function weighinEvent(
   fat: { value: number } | null,
   prev: { ts: string; value: number } | null,
   excluded: string | null = null,
+  extras: { avg7?: { kg: number; n: number; delta_kg: number | null } | null; confounders?: string | null } = {},
 ): { content: string; meta: Record<string, string> } {
   const t = new Date(m.ts)
   // The zone label is only claimed when true (the Mac on WIB, UTC+7).
@@ -135,7 +191,11 @@ export function weighinEvent(
           ? ' Repeat reading this morning, excluded from the trend (the first one counts).'
           : excluded === EXCL_OUTLIER
             ? ` ${prev ? `${Math.abs(m.value - prev.value).toFixed(1)} kg off your last reading, likely` : 'Likely'} someone else; excluded. Reply if it was you.`
-            : ` Excluded from the trend (${excluded}).`
+            : excluded === EXCL_AFTER_MEAL
+              ? ' Taken after a meal logged this food day, excluded from the trend (not fasted).'
+              : excluded === EXCL_REPLAY
+                ? ' Identical to the previous reading in both weight and fat, possibly a re-synced copy; excluded. Reply if it was a real weigh-in.'
+                : ` Excluded from the trend (${excluded}).`
   } else if (prev) {
     const d = m.value - prev.value
     const when = new Date(prev.ts).toLocaleString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
@@ -143,9 +203,22 @@ export function weighinEvent(
   } else {
     content += ' First reading on record.'
   }
+  const a = excluded ? null : extras.avg7
+  if (a) {
+    const d = a.delta_kg
+    content += ` 7-day average ${a.kg.toFixed(1)} kg over ${a.n} readings${d != null ? ` (${d >= 0 ? '+' : '-'}${Math.abs(d).toFixed(1)} kg vs the 7 days before)` : ''}.`
+  }
+  const conf = excluded ? null : extras.confounders
+  if (conf) content += ` Confounders: ${conf}.`
   const meta: Record<string, string> = { kg, measured_at: m.ts, source: src }
   if (fatPct) meta.fat_pct = fatPct
   if (excluded) meta.excluded = excluded
+  if (a) {
+    meta.avg7_kg = a.kg.toFixed(1)
+    meta.avg7_n = String(a.n)
+    if (a.delta_kg != null) meta.avg7_delta_kg = a.delta_kg.toFixed(1)
+  }
+  if (conf) meta.confounders = conf
   return { content, meta }
 }
 
@@ -160,13 +233,57 @@ export function kcalText(k: number | null, lo: number | null, hi: number | null)
   return `${fmtK(k)} kcal (${fmtK(lo)}-${fmtK(hi)})`
 }
 
+export interface BaselineReport extends Baseline {
+  /** provisional = a confounder window is open; collecting = not ready; ready. */
+  status: 'provisional' | 'collecting' | 'ready'
+  status_reason: string | null
+  /** Bracket-central maintenance minus the deficit, while provisional
+   *  (accept:true takes it; never applied without that). */
+  provisional_suggested_target: number | null
+  /** After every window closed: the clean fit uses days from here on. */
+  clean_from: string | null
+  bracket: Bracket | null
+  early_slope: ReturnType<typeof earlySlope>
+  confounders: ConfounderView[]
+  energy: {
+    calibrated: boolean
+    factor: number | null
+    factor_lo: number | null
+    factor_hi: number | null
+    calibration: Calibration | null
+    /** Why there is no (new) factor, e.g. too few covered days or an
+     *  implausible value; null when the factor stands. */
+    calibration_issue: string | null
+    /** Mean WHOOP burn over the window's fully covered days. */
+    burn_kcal: number | null
+    burn_days: number
+    coverage: ReturnType<typeof exclusionStats>
+    days: Array<{
+      date: string
+      intake_kcal: number | null
+      complete: boolean
+      burn_kcal: number | null
+      coverage: DayEnergy['coverage']
+      reason: DayBurn['reason']
+      balance_kcal: number | null
+      balance_lo: number | null
+      balance_hi: number | null
+      so_far: boolean
+      note: string | null
+    }>
+  }
+  goal: GoalView | null
+}
+
 export class FoodService {
   readonly book: MealBook
+  readonly confounders: ConfounderBook
   private now: () => number
   private log: (msg: string) => void
 
   constructor(private deps: FoodDeps) {
     this.book = new MealBook(deps.db)
+    this.confounders = new ConfounderBook(deps.db)
     this.now = deps.now ?? Date.now
     this.log = deps.log ?? (() => {})
   }
@@ -285,6 +402,7 @@ export class FoodService {
       throw err
     }
     const meal = this.book.getMeal(id)!
+    this.afterMealWrite()
     this.deps.emit('meal.logged', `meal.logged:${id}`, this.loggedEvent(meal))
     this.changed(meal.date)
     this.log(`meal #${id} logged from the app (${photos.length} photo(s), note=${note ? 'yes' : 'no'})`)
@@ -351,8 +469,19 @@ export class FoodService {
       this.discard({ id, date: eaten.date })
       throw err
     }
+    this.afterMealWrite()
     this.changed(eaten.date)
     return this.book.getMeal(id)!
+  }
+
+  /** A meal was logged, voided or re-timed: the fasted verdicts follow the
+   *  meal log both ways (re-running the rules lifts and re-decides them). */
+  private afterMealWrite(): void {
+    try {
+      this.reclassifyWeighins()
+    } catch (err) {
+      this.log(`weigh-in re-classification after a meal write failed: ${err}`)
+    }
   }
 
   estimate(p: Record<string, unknown>): Meal {
@@ -374,6 +503,7 @@ export class FoodService {
       now: new Date(this.now()).toISOString(),
     })
     const after = this.book.getMeal(id)!
+    if (eatenAt) this.afterMealWrite()
     this.changed(before.date)
     if (after.date !== before.date) this.changed(after.date)
     return after
@@ -385,6 +515,8 @@ export class FoodService {
     const reason = cleanNote(p.reason) ?? 'removed'
     this.book.voidMeal(id, reason)
     const meal = this.book.getMeal(id)!
+    // A voided meal no longer makes a weigh-in "after a meal".
+    this.afterMealWrite()
     this.changed(meal.date)
     return meal
   }
@@ -418,46 +550,325 @@ export class FoodService {
 
   // ── reads ───────────────────────────────────────────────────────
 
-  baseline(): Baseline {
+  /**
+   * The baseline read: maintenance (intake vs weight trend), the confounder
+   * status + bracket, the WHOOP calibration, and the goal record.
+   * refreshCalibration: recompute + store the factor now (an explicit
+   * recalibrate); otherwise the stored factor is reused for up to a week
+   * (the weekly cadence), or until a provisional one outlives its window.
+   */
+  baseline(opts: { refreshCalibration?: boolean } = {}): BaselineReport {
     const cfg = this.deps.getConfig()
+    const R = cfg.rollover_hour
     const today = this.today()
+    const yesterday = addDays(today, -1)
+    const fullFrom = addDays(today, -BASELINE_DEFAULTS.windowDays)
     const from = addDays(today, -BASELINE_DEFAULTS.windowDays - 1)
     const sinceIso = new Date(Date.parse(`${from}T00:00:00Z`) - 86_400_000).toISOString()
     const weights = this.book
       .bodySamplesSince(sinceIso)
       .filter((s) => s.kind === 'mass')
-      .map((s) => ({ date: foodDay(Date.parse(s.ts), cfg.rollover_hour), kg: s.value }))
-    // A WHOOP cycle starts at sleep onset and covers the waking day after it;
-    // keyed by start + 12h it lands on that waking day's food date.
-    const whoop = (this.deps.whoopKcalSince?.(sinceIso) ?? []).map((c) => ({
-      date: foodDay(Date.parse(c.start) + 12 * 3_600_000, cfg.rollover_hour),
-      kcal: c.kcal,
-    }))
-    return computeBaseline(this.book.dailyIntake(from), weights, whoop, {
+      .map((s) => ({ date: foodDay(Date.parse(s.ts), R), kg: s.value }))
+    const intake = this.book.dailyIntake(from)
+
+    // Confounders: any open window = PROVISIONAL. Once all are closed, the
+    // clean estimate uses only days after the last one closed.
+    const confs = this.confounderViews(today)
+    const active = confs.filter((c) => c.status === 'active')
+    const provisional = active.length > 0
+    let windowDays = BASELINE_DEFAULTS.windowDays
+    let cleanFrom: string | null = null
+    const closedRecent = confs.filter((c) => c.status === 'closed' && c.window.to >= fullFrom)
+    if (!provisional && closedRecent.length) {
+      cleanFrom = addDays(closedRecent.map((c) => c.window.to).sort().at(-1)!, 1)
+      windowDays = Math.max(0, Math.min(windowDays, daysBetween(cleanFrom, today)))
+    }
+
+    const dayList: string[] = []
+    for (let d = fullFrom; d <= today; d = addDays(d, 1)) dayList.push(d)
+    const burns = this.burnFor(dayList)
+    const fullBurns = [...burns.values()]
+      .filter((x) => x.coverage === 'full' && x.burn_kcal != null)
+      .map((x) => ({ date: x.date, kcal: x.burn_kcal! }))
+    const base = computeBaseline(intake, weights, fullBurns, {
       ...BASELINE_DEFAULTS,
+      windowDays,
       today,
       deficitKcal: cfg.deficit_kcal,
     })
+
+    // The bracket runs on the full window (the raw data the confounders bend).
+    const bracketRecs = confs.filter((c) => c.bracket && c.date <= yesterday && c.date >= addDays(fullFrom, -56))
+    const bracket = computeBracket(intake, weights, bracketRecs, { from: fullFrom, to: yesterday }, BASELINE_DEFAULTS.kcalPerKg)
+    const activeBracketed = active.filter((c) => c.bracket).map((c) => c.date).sort()
+    const early = provisional && activeBracketed.length ? earlySlope(weights, activeBracketed[0]) : null
+
+    let status: BaselineReport['status']
+    let reason: string | null = null
+    if (provisional) {
+      status = 'provisional'
+      const binding = [...active].sort((x, y) => y.window.to.localeCompare(x.window.to))[0]
+      reason = binding.label
+    } else if (base.ready) {
+      status = 'ready'
+    } else {
+      status = 'collecting'
+      if (cleanFrom) reason = `clean fit on weigh-ins from ${cleanFrom} only (after the confounder windows): needs ${base.needs.join(', ')}`
+    }
+
+    // Calibration: the SAME complete, fully covered days as the maintenance.
+    const fit = weightFit(weights, base.window.from, base.window.to)
+    let slope: { central: number; lo: number; hi: number } | null = null
+    if (provisional && bracket) {
+      const c = bracket.central_slope_kg_per_day
+      const se = bracket.central_se_kg_per_day
+      slope = { central: c, lo: Math.min(c - se, bracket.slope_kg_per_day.lo), hi: Math.max(c + se, bracket.slope_kg_per_day.hi) }
+    } else if (fit) {
+      slope = { central: fit.slope, lo: fit.slope - fit.se, hi: fit.slope + fit.se }
+    }
+    const { cal, issue: calIssue } = this.calibration(
+      () =>
+        base.ready && slope
+          ? calibrate({
+              days: intake,
+              burns,
+              window: base.window,
+              slope,
+              kcalPerKg: BASELINE_DEFAULTS.kcalPerKg,
+              provisional,
+              nowIso: new Date(this.now()).toISOString(),
+            })
+          : { cal: null, issue: base.ready ? 'no weight trend to fit' : `baseline not ready: needs ${base.needs.join(', ')}` },
+      provisional,
+      opts.refreshCalibration === true,
+    )
+
+    const baselineDays = intake.filter((d) => d.date >= base.window.from && d.date <= base.window.to && d.complete && d.kcal > 0).map((d) => d.date)
+    const byDate = new Map(intake.map((d) => [d.date, d]))
+    const rows: BaselineReport['energy']['days'] = []
+    for (const d of dayList) {
+      const day = byDate.get(d)
+      const burn = burns.get(d) ?? null
+      if (!day && burn?.burn_kcal == null) continue
+      const e = dayEnergy({
+        date: d,
+        today,
+        intake: {
+          kcal: day?.kcal ?? 0,
+          kcal_lo: day?.kcal_lo ?? 0,
+          kcal_hi: day?.kcal_hi ?? 0,
+          estimated: day && day.kcal > 0 ? 1 : 0,
+          pending: day?.pending ?? 0,
+          complete: day?.complete ?? false,
+        },
+        burn,
+        cal,
+      })
+      rows.push({
+        date: d,
+        intake_kcal: day ? Math.round(day.kcal) : null,
+        complete: day?.complete ?? false,
+        burn_kcal: e.burn_kcal,
+        coverage: e.coverage,
+        reason: burn?.reason ?? null,
+        balance_kcal: e.balance_kcal,
+        balance_lo: e.balance_lo,
+        balance_hi: e.balance_hi,
+        so_far: e.so_far,
+        note: e.note,
+      })
+    }
+    const meanBurn = fullBurns.filter((x) => x.date >= base.window.from && x.date <= base.window.to)
+
+    return {
+      ...base,
+      suggested_target: provisional ? null : base.suggested_target,
+      status,
+      status_reason: reason,
+      provisional_suggested_target:
+        provisional && base.ready && bracket ? Math.round(bracket.central - cfg.deficit_kcal) : null,
+      clean_from: cleanFrom,
+      bracket,
+      early_slope: early,
+      confounders: confs,
+      energy: {
+        calibrated: cal != null,
+        factor: cal?.factor ?? null,
+        factor_lo: cal?.factor_lo ?? null,
+        factor_hi: cal?.factor_hi ?? null,
+        calibration: cal,
+        calibration_issue: calIssue,
+        burn_kcal: meanBurn.length ? Math.round(meanBurn.reduce((n, x) => n + x.kcal, 0) / meanBurn.length) : null,
+        burn_days: meanBurn.length,
+        coverage: exclusionStats(baselineDays, burns),
+        days: rows,
+      },
+      goal: this.goal(confs),
+    }
   }
 
-  /** Accept the suggested target (or an explicit one) as THE kcal budget. */
-  acceptTarget(p: Record<string, unknown>): { target_kcal: number; maintenance: number | null; baseline: Baseline } {
+  /** The stored factor while fresh (< 7 days, and not a provisional one
+   *  outliving its confounder window); otherwise recompute and store. A
+   *  failed recompute keeps the last good factor (a provisional one stays
+   *  flagged provisional on every day it feeds). */
+  private calibration(
+    compute: () => { cal: Calibration | null; issue: string | null },
+    provisional: boolean,
+    refresh: boolean,
+  ): { cal: Calibration | null; issue: string | null } {
+    let stored: Calibration | null = null
+    try {
+      const raw = this.deps.getMeta(CAL_META)
+      stored = raw ? (JSON.parse(raw) as Calibration) : null
+      if (stored && !(typeof stored.factor === 'number' && stored.factor > 0)) stored = null
+    } catch {
+      stored = null
+    }
+    const fresh =
+      stored != null && this.now() - Date.parse(stored.computed_at) < CALIBRATION_MAX_AGE_MS && !(stored.provisional && !provisional)
+    if (fresh && !refresh) return { cal: stored, issue: null }
+    const c = compute()
+    if (c.cal) {
+      this.deps.setMeta(CAL_META, JSON.stringify(c.cal))
+      return c
+    }
+    return { cal: stored, issue: c.issue }
+  }
+
+  /** WHOOP burn mapped onto these food days (see energy.ts for the rules). */
+  burnFor(days: string[]): Map<string, DayBurn> {
+    if (!days.length) return new Map()
+    const R = this.deps.getConfig().rollover_hour
+    const first = [...days].sort()[0]
+    const since = new Date(dayBounds(first, R).start - 3 * 86_400_000).toISOString()
+    let cycles: CycleRec[] = []
+    try {
+      cycles = this.deps.whoopCyclesSince?.(since) ?? []
+    } catch (err) {
+      this.log(`whoop cycles read failed: ${err}`)
+    }
+    return burnByDay(cycles, days, { nowMs: this.now(), rolloverHour: R, today: this.today() })
+  }
+
+  /** Accept the suggested target (or an explicit one) as THE kcal budget.
+   *  While the baseline is provisional, accept:true takes the bracket-central
+   *  suggestion and the target is marked provisional. */
+  acceptTarget(p: Record<string, unknown>): { target_kcal: number; maintenance: number | null; provisional: boolean; baseline: BaselineReport } {
+    // The maintenance stored next to the target is the one it came from:
+    // the bracket central while provisional, the measured one otherwise.
     const b = this.baseline()
     let target: number
+    let provisional = false
     if (p.target_kcal != null) {
       target = Number(p.target_kcal)
       if (!Number.isFinite(target) || target < 1200 || target > 5000) throw new Error('target_kcal out of range (1200-5000)')
     } else {
-      if (!b.ready || b.suggested_target == null) {
-        throw new Error(`baseline not ready: needs ${b.needs.join(', ')}`)
-      }
-      target = b.suggested_target
+      if (!b.ready) throw new Error(`baseline not ready: needs ${b.needs.join(', ')}`)
+      if (b.suggested_target != null) target = b.suggested_target
+      else if (p.accept === true && b.provisional_suggested_target != null) {
+        target = b.provisional_suggested_target
+        provisional = true
+      } else throw new Error(`baseline is ${b.status}${b.status_reason ? ` (${b.status_reason})` : ''}: no suggested target`)
     }
     this.deps.setMeta('food_target_kcal', String(Math.round(target)))
     this.deps.setMeta('food_target_set_at', new Date(this.now()).toISOString())
-    this.deps.setMeta('food_target_maintenance', b.maintenance == null ? '' : String(b.maintenance))
+    const maintenance = provisional ? (b.bracket?.central ?? null) : b.maintenance
+    this.deps.setMeta('food_target_maintenance', maintenance == null ? '' : String(maintenance))
+    this.deps.setMeta('food_target_provisional', provisional ? '1' : '')
     this.changed(this.today())
-    return { target_kcal: Math.round(target), maintenance: b.maintenance, baseline: b }
+    return { target_kcal: Math.round(target), maintenance, provisional, baseline: b }
+  }
+
+  // ── confounders + goal ──────────────────────────────────────────
+
+  confounderViews(today = this.today()): ConfounderView[] {
+    return this.confounders.list().map((c) => viewOf(c, today))
+  }
+
+  /** Seed records (kind defaults filled in); idempotent on (kind, date).
+   *  The personal records are added at runtime, never from source. */
+  seedConfounders(records: ConfounderSeed[]): number {
+    return this.confounders.seed(records, new Date(this.now()).toISOString())
+  }
+
+  addConfounder(p: Record<string, unknown>): { id: number; created: boolean; confounder: ConfounderView } {
+    const kind = normKind(p.kind)
+    if (kind.length < 2) throw new Error('kind is required (e.g. "creatine_start", "illness", "travel")')
+    const date = p.date == null ? this.today() : isDayKey(p.date) ? p.date : null
+    if (!date) throw new Error('date must be YYYY-MM-DD')
+    // Like a close, a start is a fact: a future start would make the baseline
+    // provisional before anything changed. Add it on the day it starts.
+    if (date > this.today()) throw new Error(`start date ${date} is in the future (today is ${this.today()}): add it on the day it starts`)
+    const windowArg = p.window_days == null ? null : Number(p.window_days)
+    if (windowArg != null && (!Number.isInteger(windowArg) || windowArg < 1 || windowArg > 120)) throw new Error('window_days must be an integer 1-120')
+    let details: ConfounderDetails
+    if (typeof p.details === 'string') details = { summary: p.details.trim().slice(0, 200) }
+    else if (p.details && typeof p.details === 'object' && !Array.isArray(p.details)) details = { ...(p.details as ConfounderDetails) }
+    else details = {}
+    if (JSON.stringify(details).length > 2000) throw new Error('details too large')
+    if (p.bracket != null) details.bracket = p.bracket as ConfounderDetails['bracket']
+    // A known kind (creatine_start, intake_step_down) brings its generic
+    // window, effect, label and bracket; the caller's own fields win.
+    const filled = withKindDefaults(kind, windowArg, details)
+    const r = this.confounders.add({ kind, date, window_days: filled.window_days, details: filled.details, now: new Date(this.now()).toISOString() })
+    this.changed(this.today())
+    return { ...r, confounder: viewOf(this.confounders.get(r.id)!, this.today()) }
+  }
+
+  closeConfounder(p: Record<string, unknown>): { confounder: ConfounderView } {
+    const today = this.today()
+    let row = p.id != null ? this.confounders.get(Number(p.id)) : null
+    if (!row && typeof p.kind === 'string') {
+      const kind = normKind(p.kind)
+      row = this.confounders.list().filter((c) => c.kind === kind && c.closed_at == null).at(-1) ?? null
+    }
+    if (!row) throw new Error('no such confounder (give id, or kind of an open one)')
+    const date = p.date == null ? today : isDayKey(p.date) ? p.date : null
+    if (!date) throw new Error('date must be YYYY-MM-DD')
+    if (date < row.date) throw new Error(`close date ${date} is before the record's start ${row.date}`)
+    // A close is a fact, not a plan: a date ahead would end the provisional
+    // status today (and empty the clean window). Close it on the day.
+    if (date > today) throw new Error(`close date ${date} is in the future (today is ${today}): close it on the day it ends`)
+    this.confounders.close(row.id, date)
+    this.changed(today)
+    return { confounder: viewOf(this.confounders.get(row.id)!, today) }
+  }
+
+  goalRecord(): GoalRecord | null {
+    try {
+      const raw = this.deps.getMeta(GOAL_META)
+      return raw ? (JSON.parse(raw) as GoalRecord) : null
+    } catch {
+      return null
+    }
+  }
+
+  goal(confs: ConfounderView[] = this.confounderViews()): GoalView | null {
+    const g = this.goalRecord()
+    if (!g) return null
+    // Creatine water stays while he keeps taking it: only a hand-closed record means he stopped.
+    const creatine = confs.find((c) => c.kind === 'creatine_start' && c.bracket && this.confounders.get(c.id)?.closed_at == null)
+    return goalView(g, this.latestWeight()?.kg ?? null, creatine ? creatine.bracket!.kg[1] : null)
+  }
+
+  setGoal(p: Record<string, unknown>): { goal: GoalView | null } {
+    const g = parseGoal(p, this.goalRecord(), new Date(this.now()).toISOString())
+    this.deps.setMeta(GOAL_META, JSON.stringify(g))
+    return { goal: this.goal() }
+  }
+
+  clearGoal(): { goal: null; cleared: boolean } {
+    const had = this.goalRecord() != null
+    this.deps.setMeta(GOAL_META, '')
+    return { goal: null, cleared: had }
+  }
+
+  /** Config changed (config_set): a new weighins_from re-decides the date rule. */
+  onConfigChanged(prev: FoodConfig, next: FoodConfig): void {
+    if ((prev.weighins_from ?? null) !== (next.weighins_from ?? null)) {
+      this.reclassifyWeighins({ dateRuleChanged: true })
+      this.changed(this.today())
+    }
   }
 
   targetKcal(): number | null {
@@ -483,6 +894,20 @@ export class FoodService {
     const t = totalsOf(estimated.flatMap((m) => m.items))
     const b = this.baseline()
     const flag = this.book.dayFlag(d)
+    const energy: DayEnergy = dayEnergy({
+      date: d,
+      today: this.today(),
+      intake: {
+        kcal: t.kcal,
+        kcal_lo: t.kcal_lo,
+        kcal_hi: t.kcal_hi,
+        estimated: estimated.length,
+        pending: meals.length - estimated.length,
+        complete: flag ?? meals.length - estimated.length === 0,
+      },
+      burn: this.burnFor([d]).get(d) ?? null,
+      cal: b.energy.calibration,
+    })
     return {
       date: d,
       today: this.today(),
@@ -501,6 +926,7 @@ export class FoodService {
         protein_g: cfg.protein_target_g,
         kcal: this.targetKcal(),
         kcal_set_at: this.deps.getMeta('food_target_set_at') || null,
+        kcal_provisional: this.targetKcal() != null && this.deps.getMeta('food_target_provisional') === '1',
       },
       baseline: {
         ready: b.ready,
@@ -508,7 +934,14 @@ export class FoodService {
         days_needed: BASELINE_DEFAULTS.minCompleteDays,
         weigh_ins: b.weigh_ins,
         weigh_ins_needed: BASELINE_DEFAULTS.minWeighIns,
+        status: b.status,
+        // The binding (latest) open confounder window's end, while provisional.
+        provisional_until:
+          b.status === 'provisional'
+            ? (b.confounders.filter((c) => c.status === 'active').map((c) => c.window.to).sort().at(-1) ?? null)
+            : null,
       },
+      energy,
       weight: this.latestWeight(),
     }
   }
@@ -561,8 +994,15 @@ export class FoodService {
     parts.push(
       `${day.date === day.today ? 'Today' : day.date}: ${kcalText(day.totals.kcal, day.totals.kcal_lo, day.totals.kcal_hi)}${target ? ` of ${fmtK(target)}` : ''}, ${fmtG(day.totals.protein_g)} of ${cfg.protein_target_g} g protein${day.totals.pending ? `, ${day.totals.pending} pending` : ''}.`,
     )
+    const e = day.energy
+    if (e.burn_kcal != null) {
+      if (!e.calibrated) parts.push(`Burned (WHOOP, uncalibrated): ${fmtK(e.burn_kcal)} kcal${e.so_far ? ' so far' : ''}.`)
+      else if (e.balance_kcal != null)
+        parts.push(`Balance${e.so_far ? ' so far' : ''}: ${balanceText(e)} (WHOOP ${fmtK(e.burn_kcal)} kcal x ${e.factor}).`)
+    }
     if (!day.baseline.ready)
       parts.push(`Baseline: ${day.baseline.complete_days}/${day.baseline.days_needed} complete days, ${day.baseline.weigh_ins}/${day.baseline.weigh_ins_needed} weigh-ins.`)
+    else if (day.baseline.status === 'provisional') parts.push('Baseline: provisional (confounder window open).')
     return parts.join(' ')
   }
 
@@ -650,7 +1090,9 @@ export class FoodService {
       throw new BadRequest('give uuid or measured_at (ISO time of the weigh-in)')
     }
     if (!pair.length) return { changed: 0, weighin: null }
-    const reason = p.include ? null : cleanText(p.reason, 120, false) || 'excluded by hand'
+    let reason = p.include ? null : cleanText(p.reason, 120, false) || 'excluded by hand'
+    // A hand verdict must never look like a derived one the next pass lifts.
+    if (reason === EXCL_AFTER_MEAL || reason === EXCL_REPLAY) reason = `${reason} (by hand)`
     const changed = this.book.setBodyExcluded(pair.map((r) => r.uuid), reason)
     // Remember manual INCLUDES, so the re-classification pass never excludes
     // them again (an exclusion carries its own reason and needs no memory).
@@ -668,22 +1110,38 @@ export class FoodService {
   /** Exclusion rules, applied to every reading that currently COUNTS, in
    *  time order (stored ones too: rows synced before the rules existed, or
    *  before weighins_from was set). Manual includes are never re-excluded;
-   *  an exclusion is never lifted automatically. In order:
+   *  an exclusion is never lifted automatically, except the derived ones
+   *  below (after a meal, possible replay) and the date rule on a
+   *  weighins_from change. In order:
    *  1. date rule: before food.weighins_from = a TEST reading;
    *  2. window: measured outside 03:30-09:00 local = not a morning reading;
    *  3. outlier: far from the last counted reading = possible other person
    *     (from 3 earlier counted readings; two agreeing days = a real shift);
    *  4. repeat: a morning reading already counts for that day (the FIRST one).
    *  A fat sample shares its mass sample's verdict (same source + instant).
-   *  The energy-balance release refines this with the meal-logged signal. */
-  reclassifyWeighins(): void {
+   *  Energy-balance release (in order, after the window rule):
+   *  replay: identical to the previous reading in BOTH mass and fat;
+   *  after a meal: a meal was eaten before it, on its food day and its own
+   *  morning (from the later of the food-day start and local 03:30).
+   *  These two are re-decided on every pass (they follow the data). */
+  reclassifyWeighins(opts: { dateRuleChanged?: boolean } = {}): void {
+    // A new weighins_from re-decides the date rule's own verdicts (and only
+    // those).
+    if (opts.dateRuleChanged) this.book.liftExclusions(EXCL_DATE_RULE)
+    const rollover = this.deps.getConfig().rollover_hour
+    const sinceIso = new Date(this.now() - 400 * 86_400_000).toISOString()
+    // "after a meal" and "possible replay" are derived from data that can
+    // change under them (a meal voided or re-timed, a reference reading
+    // deleted): lift them and let this pass re-decide (manual verdicts carry
+    // their own reasons and are never touched).
+    this.book.liftExactExclusions([EXCL_AFTER_MEAL, EXCL_REPLAY], sinceIso)
     const from = this.deps.getConfig().weighins_from ?? null
     const validFrom = isDayKey(from) ? from : null
     const manual = this.manualIncludes()
     // Every reading that currently COUNTS, oldest first (bounded to ~13
     // months), minus the ones he included by hand: stored rows from before the
     // rules existed, or before weighins_from was set, get classified too.
-    const counting = this.book.includedSamplesSince(new Date(this.now() - 400 * 86_400_000).toISOString())
+    const counting = this.book.includedSamplesSince(sinceIso)
     const masses = counting.filter((s) => s.kind === 'mass' && !manual.has(s.uuid))
     for (const m of masses) {
       const ms = Date.parse(m.ts)
@@ -691,9 +1149,14 @@ export class FoodService {
       let reason: string | null = null
       if (validFrom && day < validFrom) {
         const label = new Date(`${validFrom}T12:00:00`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })
-        reason = `${EXCL_TEST}before the first fasted weigh-in on ${label}`
+        reason = `${EXCL_DATE_RULE} on ${label}`
       } else if (!inMorningWindow(ms)) {
         reason = EXCL_NOT_MORNING
+      } else if (this.isReplay(m)) {
+        // A re-synced copy of the previous reading must never count twice.
+        reason = EXCL_REPLAY
+      } else if (this.book.mealBetween(new Date(fastedFromMs(ms, rollover)).toISOString(), m.ts)) {
+        reason = EXCL_AFTER_MEAL
       } else if (isOutlier(this.book, m)) {
         // BEFORE the repeat rule: a friend stepping on first must never
         // count and push his real reading out as the "repeat".
@@ -705,6 +1168,34 @@ export class FoodService {
       const pair = counting.filter((s) => s.ts === m.ts && s.source === m.source).map((s) => s.uuid)
       this.book.setBodyExcluded(pair, reason)
     }
+  }
+
+  /** Identical to the previous reading (any verdict) in BOTH mass and fat. */
+  private isReplay(m: { ts: string; value: number; source: string | null }): boolean {
+    const prev = this.book.previousMassAny(m.ts)
+    if (!prev || prev.fat == null) return false
+    const fat = this.book.fatAt(m.ts, m.source)
+    if (fat == null) return false
+    return Math.abs(prev.value - m.value) < REPLAY_KG && Math.abs(prev.fat - fat) < REPLAY_FAT
+  }
+
+  /** 7-day average of INCLUDED readings up to this one (n >= 3), and its
+   *  change vs the 7 days before (when that week also has n >= 3). */
+  avg7(tsIso: string): { kg: number; n: number; delta_kg: number | null } | null {
+    const t = Date.parse(tsIso)
+    const iso = (ms: number) => new Date(ms).toISOString()
+    const cur = this.book.includedMassBetween(iso(t - 7 * 86_400_000), tsIso)
+    if (cur.length < 3) return null
+    const prev = this.book.includedMassBetween(iso(t - 14 * 86_400_000), iso(t - 7 * 86_400_000))
+    const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length
+    const kg = Math.round(mean(cur) * 10) / 10
+    return { kg, n: cur.length, delta_kg: prev.length >= 3 ? Math.round((mean(cur) - mean(prev)) * 10) / 10 : null }
+  }
+
+  /** "creatine saturation through ~Dec 13, weight trend inflated; ..." */
+  activeConfoundersLine(day: string): string | null {
+    const active = this.confounderViews(day).filter((c) => c.status === 'active')
+    return active.length ? active.map((c) => c.label).join('; ') : null
   }
 
   /** One body.weighin event per NEW weigh-in: a mass sample, merged with the
@@ -724,7 +1215,10 @@ export class FoodService {
       const excluded = this.book.bodyExcluded(m.uuid)
       // An outlier still names how far off it is (vs the last included reading).
       const prev = !excluded || excluded === EXCL_OUTLIER ? this.book.previousMass(m.ts) : null
-      this.deps.emit('body.weighin', `body.weighin:${m.source ?? '?'}:${m.ts}`, weighinEvent(m, fat, prev, excluded))
+      const extras = excluded
+        ? {}
+        : { avg7: this.avg7(m.ts), confounders: this.activeConfoundersLine(foodDay(Date.parse(m.ts), this.deps.getConfig().rollover_hour)) }
+      this.deps.emit('body.weighin', `body.weighin:${m.source ?? '?'}:${m.ts}`, weighinEvent(m, fat, prev, excluded, extras))
     }
   }
 

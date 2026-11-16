@@ -174,7 +174,7 @@ export const RESIGN_FIX: Record<string, string> = {
   new_certificate:
     'the signing certificate changed: install when you can tap Trust (bun run resign kick --force, then on the phone Settings > General > VPN & Device Management, trust the developer)',
   untrusted_developer:
-    'on the phone: Settings > General > VPN & Device Management, trust the developer, then open HealthRelay once',
+    'on the phone: Settings > General > VPN & Device Management, trust the developer, then open elpabl0s once',
   profile_not_fresh:
     'Xcode reused a cached profile twice in a row: check ~/Library/Developer/Xcode/UserData/Provisioning Profiles, then bun run resign kick --force --build-only',
   device_not_in_profile:
@@ -360,7 +360,7 @@ export const PUSH_BODY_MAX = 180
 export const RESIGN_FIX_SHORT: Record<string, string> = {
   account_broken: 'At the Mac: Xcode > Settings > Accounts, sign in, then resign kick --force.',
   new_certificate: 'At the Mac: resign kick --force, then trust the developer in VPN & Device Management.',
-  untrusted_developer: 'On the phone: trust the developer in VPN & Device Management, open HealthRelay.',
+  untrusted_developer: 'On the phone: trust the developer in VPN & Device Management, open elpabl0s.',
   profile_not_fresh: 'At the Mac: Xcode reused a cached profile, run resign kick --force --build-only.',
   device_not_in_profile: 'At the Mac: build once from Xcode with the phone attached, then resign kick --force.',
   keychain_prompt: 'At the Mac: run resign kick --force and answer Always Allow.',
@@ -369,7 +369,7 @@ export const RESIGN_FIX_SHORT: Record<string, string> = {
   device_setup: 'Check Developer Mode and pairing, then resign kick --force.',
   free_tier_limit: 'Free-team limit hit: remove another sideloaded app, then resign kick --force.',
   snapshot_mismatch: 'At the Mac: the build snapshot does not match, run resign seed.',
-  install_did_not_take: 'Open HealthRelay once so it reports the new signature.',
+  install_did_not_take: 'Open elpabl0s once so it reports the new signature.',
   devicectl_unreachable: 'At the Mac: restart Xcode, then resign kick --force.',
   lockstate_unparsed: 'At the Mac: run resign plan --probe-lock and read the log.',
   install_failed: 'At the Mac: scripts/build-phone.sh install.',
@@ -379,7 +379,7 @@ export const RESIGN_FIX_SHORT: Record<string, string> = {
 }
 
 const UNLOCK_ACTION = 'Unlock your phone at home on Wi-Fi for a minute so it re-signs.'
-const PENDING_ACTION = 'Open HealthRelay once so it reports the new signature.'
+const PENDING_ACTION = 'Open elpabl0s once so it reports the new signature.'
 const REINSTALL_ACTION = 'At the Mac: scripts/build-phone.sh install, phone unlocked on Wi-Fi.'
 
 /** The expiry as local HH:MM, labelled WIB when the clock runs on WIB. */
@@ -442,13 +442,13 @@ export function loudSigningPush(
           ? `Signature expired ${Math.abs(left)}h ago${clock ? ` (${clock})` : ''}, the phone leg is dead.`
           : `Signature expires in ${left}h${clock ? ` (${clock})` : ''}.`
       const id = clockPushId(left, signedUntil as string)
-      out.set(id, { id, title: 'Health app signature', body: pushBody(`${lead} ${action}`), level })
+      out.set(id, { id, title: 'elpabl0s signature', body: pushBody(`${lead} ${action}`), level })
     } else if (a.key.startsWith('resign-fail:')) {
       const cls = a.key.split(':')[1] ?? 'other'
       const fix = RESIGN_FIX_SHORT[cls] ?? RESIGN_FIX_SHORT.other
       out.set(a.key, {
         id: a.key,
-        title: 'Health app: re-sign failed',
+        title: 'elpabl0s: re-sign failed',
         body: pushBody(`Re-sign failed (${cls}), ${leftPhrase(left, clock)}. ${fix}`),
         level,
       })

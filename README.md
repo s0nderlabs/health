@@ -66,6 +66,22 @@ WHOOP band ──(BLE Broadcast HR)──> health-relay ──(WS, raw frames)�
   There is no calorie
   target until your own logs and weigh-in trend have measured maintenance
   (14 complete days + 8 weigh-ins); protein has a target from day one.
+  WHOOP's daily burn sits next to intake, labelled uncalibrated until that
+  baseline exists; then a calibration factor (measured maintenance over
+  WHOOP's own number) turns it into a daily balance with an error band,
+  "so far" for today and never projected. Record anything that moves the
+  scale without moving fat (a creatine start, a diet change, travel) as a
+  confounder and the baseline stays provisional, reported as a range,
+  until its window closes. An optional goal record (body-fat %, milestone,
+  lean-mass reference) shows the weight that goal implies.
+- **Zero-tap scale** (optional, Xiaomi S400): a tiny passive Bluetooth
+  listener on the Mac picks up the scale's encrypted broadcasts and files
+  each weigh-in with its exact time, no phone tap. A one-time
+  `bun scripts/scale-bindkey.ts` fetches the scale's key through a QR-code
+  login to your Xiaomi account (no password; only the key is kept, in the
+  macOS Keychain). Build the listener with `scripts/build-scale.sh`, copy it
+  to `~/.local/bin`, and load `relayer/com.s0nderlabs.health.scale.plist.template`
+  as a LaunchAgent (it asks for Bluetooth permission once).
   Photos are converted to plain JPEGs with GPS and all other metadata
   stripped; your originals are never touched.
 - **Money notifications** (optional): an iOS Shortcuts automation forwards
@@ -75,7 +91,11 @@ WHOOP band ──(BLE Broadcast HR)──> health-relay ──(WS, raw frames)�
   `money.notif` event lets your session run its budget flow. One-time codes
   are dropped before anything is stored; marketplace and super-app
   marketing is dropped too (only real payments, refunds, top-ups, transfers,
-  declines and bills survive); a zero or dust-sized crypto deposit is
+  declines and bills survive), and so are loan, contest and amountless ad
+  pushes from banks, never a text saying money actually moved. Moves
+  between your own pockets or accounts (`money.own_names` in the config)
+  are internal, and card authorization requests are pending, neither
+  counted as spending; a zero or dust-sized crypto deposit is
   flagged as possible address poisoning, never counted as income. Setup: [guides/money-notifications.md](guides/money-notifications.md).
 - **`/health`**: today's read on demand. `/health trend` for the long view.
 - **A permanent local archive** of your WHOOP data in one SQLite file.

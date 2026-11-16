@@ -53,6 +53,8 @@
 //   are the food log's routes, served by FoodService (src/food.ts).
 //   POST /money-notif {app, title?, body, ts?, client_id?, via?} forwards a
 //   bank / wallet notification, served by MoneyService (src/money.ts).
+//   POST /scale-adv {frame_hex, rssi?, ts?} carries one raw MiBeacon frame
+//   from relayer/scale-listen.swift, served by ScaleService (src/scale.ts).
 //
 // DUAL-UP (deterministic-through-retries dual connection): at home, at rest,
 // phone on wifi + power-eligible, the daemon periodically forces the band
@@ -113,6 +115,8 @@ export interface LiveListenerOpts {
   foodHttp?: (req: Request, url: URL) => Promise<Response | null>
   /** Money notification route (POST /money-notif). Null = not handled. */
   moneyHttp?: (req: Request, url: URL) => Promise<Response | null>
+  /** S400 scale advertisements (POST /scale-adv). Null = not handled. */
+  scaleHttp?: (req: Request, url: URL) => Promise<Response | null>
   /** HealthKit weigh-ins (body mass / body fat). Null = malformed batch. */
   onBodyMass?: (samples: unknown, deleted: unknown) => { received: number; added: number; deleted: number } | null
   /** Validated HealthKit steps: new/updated samples + UUIDs deleted upstream. */
@@ -333,6 +337,16 @@ export class LiveListener {
             .then((res) => res ?? new Response('not found', { status: 404 }))
             .catch((err) => {
               log(`money route failed: ${err}`)
+              return new Response('internal error', { status: 500 })
+            })
+        }
+        if (self.opts.scaleHttp && url.pathname === '/scale-adv') {
+          if (!self.authorized(req, url)) return new Response('unauthorized', { status: 401 })
+          return self.opts
+            .scaleHttp(req, url)
+            .then((res) => res ?? new Response('not found', { status: 404 }))
+            .catch((err) => {
+              log(`scale route failed: ${err}`)
               return new Response('internal error', { status: 500 })
             })
         }

@@ -27,6 +27,28 @@ struct FoodDay: Codable, Equatable {
     let targets: FoodTargets
     let baseline: FoodBaseline
     let weight: FoodWeight?
+    /// WHOOP burn and, once calibrated, the energy balance. Optional on the
+    /// wire: older daemons send none and the tab simply shows no energy row.
+    /// Decoded LOSSY (see init(from:) below): a malformed energy object drops
+    /// only the energy row, never the whole day.
+    var energy: FoodEnergy? = nil
+}
+
+extension FoodDay {
+    /// Every field as synthesized, except energy: a present-but-malformed
+    /// object (a missing key, a type drift in a future daemon) becomes nil.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        date = try c.decode(String.self, forKey: .date)
+        today = try c.decode(String.self, forKey: .today)
+        meals = try c.decode([FoodMeal].self, forKey: .meals)
+        totals = try c.decode(FoodTotals.self, forKey: .totals)
+        complete = try c.decodeIfPresent(Bool.self, forKey: .complete)
+        targets = try c.decode(FoodTargets.self, forKey: .targets)
+        baseline = try c.decode(FoodBaseline.self, forKey: .baseline)
+        weight = try c.decodeIfPresent(FoodWeight.self, forKey: .weight)
+        energy = (try? c.decodeIfPresent(FoodEnergy.self, forKey: .energy)) ?? nil
+    }
 }
 
 struct FoodMeal: Codable, Equatable, Identifiable {
@@ -78,6 +100,9 @@ struct FoodTotals: Codable, Equatable {
 struct FoodTargets: Codable, Equatable {
     let protein_g: Double
     let kcal: Double?
+    /// The budget was accepted while the baseline was provisional (a
+    /// confounder window open). Optional: older daemons omit it.
+    var kcal_provisional: Bool? = nil
 }
 
 struct FoodBaseline: Codable, Equatable {
@@ -86,12 +111,35 @@ struct FoodBaseline: Codable, Equatable {
     let days_needed: Int
     let weigh_ins: Int
     let weigh_ins_needed: Int
+    /// provisional (a confounder window is open: no budget suggested) |
+    /// collecting | ready. Optional: older daemons omit it.
+    var status: String? = nil
+    /// While provisional: the binding window's last day (YYYY-MM-DD).
+    var provisional_until: String? = nil
 }
 
 struct FoodWeight: Codable, Equatable {
     let kg: Double
     let at: String
     let fat_pct: Double?
+}
+
+/// day.energy (daemon contract). balance = intake - burn * factor, so a
+/// negative balance is a deficit. balance_* are null while uncalibrated or
+/// with no burn; so_far marks today's in-progress cycle (never projected).
+struct FoodEnergy: Codable, Equatable {
+    let burn_kcal: Double?
+    let calibrated: Bool
+    let factor: Double?
+    let balance_kcal: Double?
+    let balance_lo: Double?
+    let balance_hi: Double?
+    let so_far: Bool
+    let coverage: String // full | partial | none (kept as a string: unknown values never break decoding)
+    let note: String?
+    /// The factor was fitted while a confounder window was open. Additive to
+    /// the contract: older daemons omit it.
+    var provisional: Bool? = nil
 }
 
 // ── outbox ────────────────────────────────────────────────────────
@@ -455,6 +503,29 @@ enum FoodFormat {
     }
 
     static func grams(_ v: Double?) -> String { "\(int(v)) g" }
+
+    /// "2026-12-13" -> "Dec 13" (nil for anything else).
+    static func monthDay(_ day: String) -> String? {
+        let p = day.split(separator: "-").compactMap { Int($0) }
+        guard p.count == 3, (1...12).contains(p[1]), (1...31).contains(p[2]) else { return nil }
+        let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        return "\(months[p[1] - 1]) \(p[2])"
+    }
+
+    /// "−450" / "+200" / "0": a signed kcal balance with a true minus (U+2212).
+    static func signed(_ v: Double) -> String {
+        let r = v.rounded()
+        if r == 0 { return "0" }
+        return (r < 0 ? "\u{2212}" : "+") + int(abs(r))
+    }
+
+    /// The balance band: "±180" when lo/hi sit symmetric around the balance
+    /// (within 10 kcal), else the honest span "−630 to −270".
+    static func band(_ v: Double, _ lo: Double?, _ hi: Double?) -> String? {
+        guard let lo = lo, let hi = hi, hi.rounded() != lo.rounded() else { return nil }
+        if abs((hi - v) - (v - lo)) <= 10 { return "\u{00B1}" + int((hi - lo) / 2) }
+        return "\(signed(lo)) to \(signed(hi))"
+    }
 
     static func kcalLine(_ k: Double?, _ lo: Double?, _ hi: Double?) -> String {
         guard let k = k else { return "? kcal" }

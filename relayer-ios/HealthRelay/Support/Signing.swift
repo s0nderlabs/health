@@ -125,8 +125,8 @@ enum Signing {
     private static func arm(center: UNUserNotificationCenter, expires: Date, now: Date) {
         center.removePendingNotificationRequests(withIdentifiers: noteIds)
         let leads: [(id: String, lead: TimeInterval, body: String)] = [
-            (noteIds[0], 24 * 3600, "The health app's signature expires tomorrow at %@ unless auto re-sign renews it first. Open health on the Mac side for the fix."),
-            (noteIds[1], 3 * 3600, "Three hours left on the health app's signature (%@) unless auto re-sign renews it first. Open health on the Mac side for the fix."),
+            (noteIds[0], 24 * 3600, "elpabl0s's signature expires tomorrow at %@ unless auto re-sign renews it first. Ask Claude on the Mac for the fix."),
+            (noteIds[1], 3 * 3600, "Three hours left on elpabl0s's signature (%@) unless auto re-sign renews it first. Ask Claude on the Mac for the fix."),
         ]
         let clock = DateFormatter()
         clock.dateFormat = "EEE HH:mm"

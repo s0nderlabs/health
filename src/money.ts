@@ -58,7 +58,10 @@ CREATE TABLE IF NOT EXISTS money_noise (
 // declined = an attempt that failed: no money moved, but it matters (dead card, low balance).
 // bill     = a paylater / statement reminder: a liability coming due, not spending today.
 export type MoneyKind =
-  | 'payment' | 'incoming' | 'transfer_out' | 'trade' | 'refund' | 'topup' | 'declined' | 'bill' | 'unknown'
+  | 'payment' | 'incoming' | 'transfer_out' | 'trade' | 'refund' | 'topup' | 'declined' | 'bill'
+  | 'internal' | 'auth_request' | 'unknown'
+// internal     = a move between his OWN pockets or accounts: never spending, never income.
+// auth_request = a card authorization waiting for his confirm/reject: pending, not spending.
 
 /** How strict the noise rule is for an app. Marketplaces and super-apps send
  *  far more marketing than money, so they are allowlisted: only a money event
@@ -184,6 +187,17 @@ export function moneyEvent(text: string): MoneyKind | null {
  *  event: its kind came only from a loose word like "bayar" in marketing copy.
  *  A real transfer / refund / bill with an amount the generic rule could not
  *  read is NOT this (moneyEvent names it), and neither is a decline. */
+// Something HAPPENED (a completed or posted verb): the guard every marketing
+// rule respects, so an auto-debited instalment, a disbursed loan or a credited
+// reward is never dropped as an ad ("Pinjaman Rp5.000.000 sudah cair ke
+// rekening kamu" happened; "Rp7.000.000 lgsg cair" is a pitch).
+const HAPPENED =
+  /\b(?:berhasil|sukses|successful|paid|dibayar|lunas|diterima|received|masuk|refund(?:ed)?|dikembalikan|ditolak|declined|gagal|failed|completed|selesai|confirmed|didebit|dipotong|dikirim|terkirim|ditambahkan|dicairkan)\b|\b(?:telah|sudah)\s+(?:di\w+|cair|masuk|terkirim)\b/i
+
+// Pure ads with NO amount that still name a transaction word ("GRATIS tarik
+// tunai di ATM terdekat!: Pakai Kartu Jago, bebas tarik tunai di ATM mana aja").
+const AD_CUES = /\bgratis\b|\bpakai kartu\b|\bbebas\s+\w+(?:\s+\w+)?\s+di\b|\bterdekat\b|\bmana aja\b/i
+
 export function amountlessGuess(p: MoneyParse, text: string): boolean {
   return p.parser.startsWith('generic') && p.amount == null && p.kind !== 'declined' && moneyEvent(text) == null
 }
@@ -194,6 +208,15 @@ export function amountlessGuess(p: MoneyParse, text: string): boolean {
  * with no amount). Other apps: the lenient rule (only obvious balance
  * warnings and promos are noise).
  */
+// Marketing cues: loans / credit, and contests / giveaways. Only ever applied
+// together with "no money event at all" (see isNoise).
+const LOAN_PROMO = new RegExp(
+  String.raw`\b(?:cicilan|(?:lgsg|langsung) cair|pinjaman|dana cepat|kredit tanpa|limit (?:kredit|pinjaman)|ajukan sekarang|cek\b.{0,40}\bsekarang` +
+    String.raw`|win (?:your|a|up to)\b|prize pool|giveaway|lucky draw|contest|competition|\bgame\b|t&c apply|see how|join (?:the|now)` +
+    String.raw`|menangkan|hadiah|undian|promo)`,
+  'i',
+)
+
 export function isNoise(title: string | null, body: string, cls: AppClass = 'bank'): boolean {
   const t = `${title ?? ''}\n${body}`
   if (cls === 'marketplace') {
@@ -202,6 +225,13 @@ export function isNoise(title: string | null, body: string, cls: AppClass = 'ban
     // cashback Rp5.000!") is still marketing unless something HAPPENED.
     return PROMO.test(t) && !COMPLETED.test(t.replace(CONDITIONAL, ' '))
   }
+  // Loan / credit / contest marketing ("Rp7.000.000 lgsg cair, cicilan cuma
+  // 1 jt-an/bln! Cek Jago Dana Cepat-mu sekarang", "Win Your Share of 500 USDT
+  // in BTC Game! ... T&C apply"): cues AND no money event at all. A real
+  // bill reminder ("tagihan cicilan ... jatuh tempo") names a bill event and
+  // survives; this only drops texts that describe nothing that happened.
+  if (LOAN_PROMO.test(t) && moneyEvent(t) == null && !HAPPENED.test(t)) return true
+  if (!hasAmount(t) && AD_CUES.test(t) && !HAPPENED.test(t)) return true
   return /running low|saldo (kamu |anda )?(menipis|rendah)|promo|cashback (hingga|up to)|diskon|voucher|undian|selamat! kamu|menangkan|kesempatan|hadiah|makin rajin/i.test(t) &&
     !hasTransaction(t) &&
     // "Hadiah referral 10.000 sudah masuk": something HAPPENED, keep it.
@@ -270,6 +300,14 @@ function seabank(title: string | null, body: string): MoneyParse | null {
     return {
       ...blank('seabank.bayar_instan'), kind: 'payment', amount: parseIdr(m[2]), currency: 'IDR',
       merchant: tidy(m[1]), occurred_at: m[3] ? parseIndoDateTime(m[3]) : null,
+    }
+  }
+  // "Realtime Transfer: Kamu baru melakukan transfer real-time senilai Rp100.000 pada 16 Nov 2026 15:16."
+  m = /transfer\s+real-?time\s+senilai\s+(?:rp\.?\s*)?(\d(?:[\d.,]*\d)?)(?:\s+pada\s+(\d{1,2}\s+\w+\s+\d{4}\s+\d{1,2}[:.]\d{2}))?/i.exec(body)
+  if (m) {
+    return {
+      ...blank('seabank.realtime_transfer'), kind: 'transfer_out', amount: parseIdr(m[1]), currency: 'IDR',
+      occurred_at: m[2] ? parseIndoDateTime(m[2]) : null,
     }
   }
   // Outgoing / incoming transfers (format seen in the wild, not yet from his phone).
@@ -439,11 +477,49 @@ export function crypto(app: string, title: string | null, body: string): MoneyPa
   return p
 }
 
-export function parseMoney(app: string, title: string | null, body: string): MoneyParse {
+/** Names that are HIM: a transfer from one of them is an internal move. Local
+ *  config only (money.own_names), never committed. Case and spacing folded. */
+function isOwnName(name: string | null, ownNames: readonly string[]): boolean {
+  if (!name) return false
+  const fold = (s: string) => s.toUpperCase().replace(/\s+/g, ' ').trim()
+  const n = fold(name)
+  return ownNames.some((o) => fold(o).length >= 3 && fold(o) === n)
+}
+
+const pocket = (s: string) => tidy(s.replace(/(?:\s+pocket)+\s*$/i, '').trim())
+
+function jago(title: string | null, body: string, ownNames: readonly string[]): MoneyParse | null {
+  const t = `${body}`.replace(/^\s*jago:\s*/i, '')
+  // "Rp50.000 has been moved from your Main Pocket Pocket to your X Pocket."
+  let m = /(?:rp\.?|idr)\s*(\d(?:[\d.,]*\d)?)\s+has been moved from your\s+(.+?)\s+to your\s+(.+?)\s*\.?\s*$/im.exec(t)
+  if (m) {
+    return {
+      ...blank('jago.pocket_move'), kind: 'internal', amount: parseIdr(m[1]), currency: 'IDR',
+      counterparty: `${pocket(m[2]) ?? 'pocket'} Pocket -> ${pocket(m[3]) ?? 'pocket'} Pocket`,
+    }
+  }
+  // "NAME has sent Rp100.000 to you."
+  m = /^\s*(.+?)\s+has sent\s+(?:rp\.?|idr)\s*(\d(?:[\d.,]*\d)?)\s+to you/im.exec(t)
+  if (m) {
+    const from = tidy(m[1])
+    return {
+      ...blank('jago.incoming'), kind: isOwnName(from, ownNames) ? 'internal' : 'incoming',
+      amount: parseIdr(m[2]), currency: 'IDR', counterparty: from,
+    }
+  }
+  // "SHOPEE.CO.ID is requesting IDR 1,000. Please confirm or reject ..."
+  m = /^\s*(.+?)\s+is requesting\s+(?:rp\.?|idr)\s*(\d(?:[\d.,]*\d)?)/im.exec(t)
+  if (m) return { ...blank('jago.auth_request'), kind: 'auth_request', amount: parseIdr(m[2]), currency: 'IDR', merchant: tidy(m[1]) }
+  return null
+}
+
+export function parseMoney(app: string, title: string | null, body: string, opts: { ownNames?: readonly string[] } = {}): MoneyParse {
   const a = app.toLowerCase()
   const specific = a.includes('seabank') || a.includes('sea bank')
     ? seabank(title, body)
-    : a.includes('plasma')
+    : a.includes('jago')
+      ? jago(title, body, opts.ownNames ?? [])
+      : a.includes('plasma')
       ? plasma(title, body)
       : appClass(app) === 'crypto'
         ? crypto(app, title, body)
@@ -550,6 +626,8 @@ export interface MoneyDeps {
   emit: (key: string, payload: { content: string; meta: Record<string, string> }) => boolean
   now?: () => number
   log?: (msg: string) => void
+  /** money.own_names from the local config: transfers from these are internal. */
+  ownNames?: () => readonly string[]
 }
 
 export type IngestResult =
@@ -610,7 +688,7 @@ export class MoneyService {
     const postedMs = parseTs(body.ts, now) ?? now
     const clientId = typeof body.client_id === 'string' && /^[A-Za-z0-9-]{8,64}$/.test(body.client_id) ? body.client_id : null
     const dedupe = clientId ? `cid:${clientId}` : dedupeKey(app, title, text, postedMs)
-    const parsed = parseMoney(app, title, text)
+    const parsed = parseMoney(app, title, text, { ownNames: this.deps.ownNames?.() ?? [] })
     if (amountlessGuess(parsed, `${title ?? ''}\n${text}`)) {
       // A real payment always carries an amount. A guess by the generic rule
       // with none is marketing ("makin rajin bayar pakai Jenius..."): noise,
@@ -648,6 +726,10 @@ export class MoneyService {
                     ? `DECLINED ${fmtAmount(r.amount, r.currency)}${r.merchant ? ` at ${r.merchant}` : ''} (no money moved)`
                     : r.kind === 'bill'
                       ? `bill / paylater due: ${fmtAmount(r.amount, r.currency)} (a liability coming due, not spending today)`
+                      : r.kind === 'internal'
+                        ? `moved ${fmtAmount(r.amount, r.currency)} between his own accounts${r.counterparty ? ` (${r.counterparty})` : ''} (internal, not spending, not income)`
+                        : r.kind === 'auth_request'
+                          ? `card authorization request: ${r.merchant ?? 'a merchant'} is requesting ${fmtAmount(r.amount, r.currency)}, waiting for his confirm or reject (pending, not spending yet)`
                       : `a money notification${r.amount != null ? ` mentioning ${fmtAmount(r.amount, r.currency)}` : ''}`
     const balance = r.balance_after != null ? ` Balance after: ${fmtAmount(r.balance_after, r.balance_currency)}.` : ''
     const trust = r.parser.startsWith('generic') ? ' Parsed by the generic rule (format not seen before): check the raw text.' : ''

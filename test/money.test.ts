@@ -447,3 +447,66 @@ describe('review regressions (v0.17.3)', () => {
     expect(count()).toBe(keep.length)
   })
 })
+
+describe('loan / credit marketing (v0.18.2, Jago Dana Cepat)', () => {
+  test('a loan push with an amount is noise; a real bill reminder that says cicilan survives', () => {
+    expect(isNoise('Rp7.000.000 lgsg cair, cicilan cuma 1 jt-an/bln! 😍', 'Cek Jago Dana Cepat-mu sekarang ✨', 'bank')).toBe(true)
+    expect(isNoise('Pinjaman hingga Rp50 juta', 'Ajukan sekarang, langsung cair!', 'bank')).toBe(true)
+    expect(isNoise('Tagihan', 'Tagihan cicilan Rp 1.000.000 jatuh tempo 3 hari lagi', 'bank')).toBe(false)
+    expect(isNoise('Pembayaran berhasil', 'Pembayaran cicilan Rp 1.000.000 berhasil', 'bank')).toBe(false)
+  })
+})
+
+describe('contest / giveaway marketing (v0.18.2, Pintu BTC Game)', () => {
+  test('a contest push with a token amount is noise; a real trade or deposit is not', () => {
+    expect(isNoise('Win Your Share of 500 USDT in BTC Game! 🎮', 'Join the BTC Game on Pintu and grab your share of the 500 USDT prize pool 🏆 See how 👉 T&C apply.', 'bank')).toBe(true)
+    expect(isNoise('Giveaway', 'Ikuti giveaway dan menangkan hadiah 1 BTC', 'bank')).toBe(true)
+    expect(isNoise('Order filled', 'Your buy order for 0.001 BTC has been filled', 'bank')).toBe(false)
+    expect(isNoise('Deposit berhasil', 'Deposit Rp 500.000 berhasil masuk ke akun Pintu kamu', 'bank')).toBe(false)
+  })
+})
+
+describe('review regressions + new formats (energy release)', () => {
+  test('marketing rules never drop something that HAPPENED (review finding)', () => {
+    for (const [t, b] of [
+      ['Tagihan', 'Pembayaran cicilan Rp1.500.000 telah didebit dari rekening kamu'],
+      ['Pinjaman', 'Pinjaman Rp5.000.000 sudah cair ke rekening kamu'],
+      ['Cashback', 'Cashback promo Rp10.000 berhasil ditambahkan ke saldo kamu'],
+      ['Hadiah', 'Hadiah Rp25.000 dari undian bulan ini berhasil dikirim ke rekeningmu'],
+    ]) expect(isNoise(t, b, 'bank')).toBe(false)
+    // ...while the pitches still go.
+    expect(isNoise('Rp7.000.000 lgsg cair, cicilan cuma 1 jt-an/bln! 😍', 'Cek Jago Dana Cepat-mu sekarang ✨', 'bank')).toBe(true)
+  })
+
+  test('amountless ad naming a transaction word is noise; a real withdrawal is not', () => {
+    expect(isNoise('GRATIS tarik tunai di 🏧 terdekat!', 'Pakai Kartu Jago, bebas tarik tunai di ATM mana aja.', 'bank')).toBe(true)
+    expect(isNoise('Tarik tunai', 'Tarik tunai Rp500.000 berhasil di ATM terdekat', 'bank')).toBe(false)
+  })
+
+  test('Jago pocket move = internal, never spending', () => {
+    const p = parseMoney('Jago', 'Jago', 'Jago: Rp50.000 has been moved from your Main Pocket Pocket to your Test Card Pocket.')
+    expect(p).toMatchObject({ parser: 'jago.pocket_move', kind: 'internal', amount: 50000, currency: 'IDR', counterparty: 'Main Pocket -> Test Card Pocket' })
+  })
+
+  test('Jago incoming: own name = internal, anyone else = incoming', () => {
+    const body = 'Jago: BUDI SANTOSO TESTER has sent Rp100.000 to you. Need help? Contact Tanya Jago at 1500 746.'
+    expect(parseMoney('Jago', 'Jago', body, { ownNames: ['Budi Santoso Tester'] })).toMatchObject({
+      parser: 'jago.incoming', kind: 'internal', amount: 100000, counterparty: 'BUDI SANTOSO TESTER',
+    })
+    expect(parseMoney('Jago', 'Jago', body, { ownNames: ['Someone Else'] })).toMatchObject({ kind: 'incoming', amount: 100000 })
+  })
+
+  test('Jago card authorization request = auth_request, survives the OTP gate', () => {
+    const h = harness()
+    const body = 'Jago: SHOPEE.CO.ID is requesting IDR 1,000. Please confirm or reject if you didn’t do this transaction. Need help? Contact Tanya Jago at 1500 746.'
+    const r = h.money.ingest({ app: 'Jago', title: 'Jago', body }, 'shortcut')
+    expect(r).toMatchObject({ status: 'stored', kind: 'auth_request', amount: 1000 })
+    expect(h.events.at(-1)!.content).toContain('pending, not spending')
+  })
+
+  test('SeaBank realtime transfer = transfer_out with its own timestamp', () => {
+    const p = parseMoney('SeaBank', 'Realtime Transfer', 'Realtime Transfer: Kamu baru melakukan transfer real-time senilai Rp100.000 pada 16 Nov 2026 15:16. Jika kamu tidak melakukan ini, segera hubungi 1500130.')
+    expect(p).toMatchObject({ parser: 'seabank.realtime_transfer', kind: 'transfer_out', amount: 100000 })
+    expect(p.occurred_at).toBe(parseIndoDateTime('16 Nov 2026 15:16'))
+  })
+})

@@ -84,6 +84,16 @@ CREATE TABLE IF NOT EXISTS body_samples (
   excluded TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_body_samples_ts ON body_samples (ts);
+CREATE TABLE IF NOT EXISTS confounders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,
+  date TEXT NOT NULL,
+  details TEXT NOT NULL,
+  window_end TEXT NOT NULL,
+  closed_at TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE (kind, date)
+);
 `
 
 // ── types ─────────────────────────────────────────────────────────
@@ -292,6 +302,8 @@ export interface BaselineDay {
   kcal_lo: number
   kcal_hi: number
   complete: boolean
+  /** Meals logged but not yet estimated (their kcal is missing from the sums). */
+  pending?: number
 }
 
 export interface BaselineOpts {
@@ -354,6 +366,41 @@ export function olsSlope(xs: number[], ys: number[]): { slope: number; se: numbe
   return { slope, se }
 }
 
+/** Mean logged intake over complete days in [from, to]. */
+export function completeIntake(
+  days: BaselineDay[],
+  from: string,
+  to: string,
+): { n: number; logged: number; mean: number | null; lo: number | null; hi: number | null } {
+  const logged = days.filter((d) => d.date >= from && d.date <= to && d.kcal > 0)
+  const complete = logged.filter((d) => d.complete)
+  const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null)
+  return {
+    n: complete.length,
+    logged: logged.length,
+    mean: mean(complete.map((d) => d.kcal)),
+    lo: mean(complete.map((d) => d.kcal_lo)),
+    hi: mean(complete.map((d) => d.kcal_hi)),
+  }
+}
+
+/** OLS over DAILY MEAN weights in [from, to] (kg per day, x = days since from). */
+export function weightFit(
+  weights: Array<{ date: string; kg: number }>,
+  from: string,
+  to: string,
+): { slope: number; se: number } | null {
+  const byDay = new Map<string, number[]>()
+  for (const x of weights) {
+    if (x.date < from || x.date > to || !(x.kg > 20 && x.kg < 400)) continue
+    byDay.set(x.date, [...(byDay.get(x.date) ?? []), x.kg])
+  }
+  const dailyDates = [...byDay.keys()].sort()
+  const xs = dailyDates.map((d) => daysBetween(from, d))
+  const ys = dailyDates.map((d) => byDay.get(d)!.reduce((a, b) => a + b, 0) / byDay.get(d)!.length)
+  return olsSlope(xs, ys)
+}
+
 /**
  * maintenance = mean intake on complete days - weight slope (kg/day) x 7,700.
  * The slope is OLS over DAILY MEAN weights across the window: every weigh-in
@@ -371,30 +418,22 @@ export function computeBaseline(
   const from = addDays(opts.today, -opts.windowDays)
   const inWindow = (d: string) => d >= from && d <= to
 
-  const logged = days.filter((d) => inWindow(d.date) && d.kcal > 0)
-  const complete = logged.filter((d) => d.complete)
+  const intake = completeIntake(days, from, to)
   const w = weights.filter((x) => inWindow(x.date) && x.kg > 20 && x.kg < 400)
   const wDates = [...new Set(w.map((x) => x.date))].sort()
   const span = wDates.length ? daysBetween(wDates[0], wDates[wDates.length - 1]) : 0
 
   const needs: string[] = []
-  if (complete.length < opts.minCompleteDays)
-    needs.push(`${opts.minCompleteDays - complete.length} more complete logged day(s)`)
+  if (intake.n < opts.minCompleteDays)
+    needs.push(`${opts.minCompleteDays - intake.n} more complete logged day(s)`)
   if (w.length < opts.minWeighIns) needs.push(`${opts.minWeighIns - w.length} more weigh-in(s)`)
   if (span < opts.minWeighSpanDays) needs.push(`weigh-ins spanning ${opts.minWeighSpanDays}+ days (now ${span})`)
 
   const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null)
-  const meanIntake = mean(complete.map((d) => d.kcal))
-  const meanLo = mean(complete.map((d) => d.kcal_lo))
-  const meanHi = mean(complete.map((d) => d.kcal_hi))
-
-  // Daily mean weights -> OLS.
-  const byDay = new Map<string, number[]>()
-  for (const x of w) byDay.set(x.date, [...(byDay.get(x.date) ?? []), x.kg])
-  const dailyDates = [...byDay.keys()].sort()
-  const xs = dailyDates.map((d) => daysBetween(from, d))
-  const ys = dailyDates.map((d) => mean(byDay.get(d)!)!)
-  const fit = olsSlope(xs, ys)
+  const meanIntake = intake.mean
+  const meanLo = intake.lo
+  const meanHi = intake.hi
+  const fit = weightFit(w, from, to)
 
   const weekly: Baseline['weekly_weights'] = []
   for (let start = from; start <= to; start = addDays(start, 7)) {
@@ -421,8 +460,8 @@ export function computeBaseline(
   return {
     ready,
     window: { from, to },
-    complete_days: complete.length,
-    logged_days: logged.length,
+    complete_days: intake.n,
+    logged_days: intake.logged,
     weigh_ins: w.length,
     weigh_span_days: span,
     needs,
@@ -631,6 +670,7 @@ export class MealBook {
       kcal: r.kcal ?? 0,
       kcal_lo: r.kcal_lo ?? 0,
       kcal_hi: r.kcal_hi ?? 0,
+      pending: r.pending ?? 0,
       // A day with an unestimated meal is not a complete record yet; an
       // explicit flag (day_complete) overrides in both directions.
       complete: r.flag == null ? r.pending === 0 : r.flag === 1,
@@ -807,6 +847,56 @@ export class MealBook {
     return this.db
       .query('SELECT uuid, ts, kind, value, source, excluded FROM body_samples WHERE ts = ? AND source IS ?')
       .all(best.ts, best.source) as Array<{ uuid: string; ts: string; kind: string; value: number; source: string | null; excluded: string | null }>
+  }
+
+  /** The latest mass reading strictly before `beforeIso`, ANY verdict, with
+   *  its fat pair (same source + instant): the replay guard's reference. */
+  previousMassAny(beforeIso: string): { ts: string; value: number; source: string | null; fat: number | null } | null {
+    const m = this.db
+      .query("SELECT ts, value, source FROM body_samples WHERE kind = 'mass' AND ts < ? ORDER BY ts DESC LIMIT 1")
+      .get(beforeIso) as { ts: string; value: number; source: string | null } | null
+    if (!m) return null
+    return { ...m, fat: this.fatAt(m.ts, m.source) }
+  }
+
+  /** The fat fraction stored at this instant + source, or null. */
+  fatAt(ts: string, source: string | null): number | null {
+    const r = this.db
+      .query("SELECT value FROM body_samples WHERE kind = 'fat' AND ts = ? AND source IS ? LIMIT 1")
+      .get(ts, source) as { value: number } | null
+    return r?.value ?? null
+  }
+
+  /** INCLUDED mass readings in (afterIso, toIso]. */
+  includedMassBetween(afterIso: string, toIso: string): number[] {
+    return (
+      this.db
+        .query("SELECT value FROM body_samples WHERE kind = 'mass' AND excluded IS NULL AND ts > ? AND ts <= ?")
+        .all(afterIso, toIso) as Array<{ value: number }>
+    ).map((r) => r.value)
+  }
+
+  /** Was a (non-void) meal eaten in [fromIso, beforeIso)? */
+  mealBetween(fromIso: string, beforeIso: string): boolean {
+    return !!this.db
+      .query("SELECT 1 FROM meals WHERE status != 'void' AND eaten_at >= ? AND eaten_at < ? LIMIT 1")
+      .get(fromIso, beforeIso)
+  }
+
+  /** Clear every exclusion whose reason starts with `prefix` (a rule whose
+   *  input changed re-decides those rows). Returns the rows lifted. */
+  liftExclusions(prefix: string): number {
+    return this.db.run("UPDATE body_samples SET excluded = NULL WHERE substr(excluded, 1, ?) = ?", [prefix.length, prefix]).changes
+  }
+
+  /** Clear exclusions whose reason is EXACTLY one of `reasons`, on samples at
+   *  or after `sinceIso` (derived verdicts the next pass re-decides). */
+  liftExactExclusions(reasons: string[], sinceIso: string): number {
+    if (!reasons.length) return 0
+    return this.db.run(
+      `UPDATE body_samples SET excluded = NULL WHERE ts >= ? AND excluded IN (${reasons.map(() => '?').join(', ')})`,
+      [sinceIso, ...reasons],
+    ).changes
   }
 
   /** A sample's exclusion reason, or null when it counts. */

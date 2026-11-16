@@ -480,7 +480,7 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
                 return
             }
             let content = UNMutableNotificationContent()
-            let base = title.isEmpty ? "health" : title
+            let base = title.isEmpty ? "elpabl0s" : title
             // No Time Sensitive entitlement on a free personal team, so the
             // level shows in the words: critical = the phone leg dies within
             // 8h or already has.
