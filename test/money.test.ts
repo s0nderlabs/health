@@ -355,3 +355,56 @@ describe('review regressions (v0.17.0)', () => {
     expect(parseCryptoAmount('1,250.5')).toBe(1250.5)
   })
 })
+
+// Transcribed from his iPhone Notification Center, Nov 16 2026 (Plasma One stack).
+describe('real Plasma One samples', () => {
+  test('card payments, comma thousands, 7 digits', () => {
+    expect(parseMoney('Plasma One', 'Tokopedia', 'Paid 7,176,600 IDR ($401.97) at Tokopedia\nBalance: $12.34')).toMatchObject({
+      parser: 'plasma.paid', kind: 'payment', amount: 7176600, currency: 'IDR', amount_alt: 401.97, merchant: 'Tokopedia', balance_after: 12.34,
+    })
+    expect(parseMoney('Plasma One', 'Gojek', 'Paid 20,000 IDR ($1.11) at Gojek\nBalance: $11.23')).toMatchObject({
+      amount: 20000, amount_alt: 1.11, merchant: 'Gojek', balance_after: 11.23,
+    })
+  })
+
+  test('the low-balance warning is never a second payment', () => {
+    const { money, events, count } = harness()
+    const r = money.ingest({ app: 'Plasma One', title: '⚠️ Your balance is running low', body: 'You have $9.83 available. Add funds if you plan to keep spending.' }, 'app')
+    expect(r.status).toBe('ignored')
+    expect(count()).toBe(0)
+    expect(events).toHaveLength(0)
+  })
+
+  test('a deposit with the title hidden: the balance is NOT the amount', () => {
+    for (const title of [null, 'Received', 'Deposit']) {
+      expect(parseMoney('Plasma One', title, 'From: 0x5e0...aCd1. Balance: $414.31.')).toMatchObject({
+        parser: 'plasma.deposit', kind: 'incoming', amount: null, currency: null, counterparty: '0x5e0...aCd1', balance_after: 414.31,
+      })
+    }
+    expect(parseMoney('Plasma One', 'Received $120.00', 'From: 0x5e0...aCd1. Balance: $414.31.').amount).toBe(120)
+  })
+
+  test('any app: a "Balance:" / "Saldo:" figure is never taken as the amount', () => {
+    expect(parseMoney('Jago', 'Info', 'Pembayaran berhasil. Saldo: Rp 1.250.000').amount).toBeNull()
+    expect(parseMoney('Jago', 'Info', 'Pembayaran Rp 50.000 berhasil. Saldo: Rp 1.250.000').amount).toBe(50000)
+  })
+})
+
+describe('review regressions (v0.17.2)', () => {
+  test('insufficient-funds lines stay declined, with the payment amount, not the balance', () => {
+    expect(parseMoney('GoPay', null, 'Insufficient balance $3.20 for your $15.99 Netflix payment')).toMatchObject({ kind: 'declined', amount: 15.99 })
+    expect(parseMoney('Jago', null, 'Saldo Rp 3.000 tidak cukup untuk pembayaran Rp 15.000')).toMatchObject({ amount: 15000 })
+  })
+
+  test('a bare "saldo Rp X" that is being MOVED keeps its amount and kind', () => {
+    expect(parseMoney('DANA', null, 'Kamu menerima saldo Rp50.000 dari Budi')).toMatchObject({ kind: 'incoming', amount: 50000 })
+    expect(parseMoney('GoPay', 'Top up berhasil', 'Isi saldo Rp 100.000 berhasil')).toMatchObject({ kind: 'topup', amount: 100000 })
+    expect(parseMoney('GoPay', 'Top up', 'Top up saldo Rp 50.000 berhasil. Saldo: Rp 150.000')).toMatchObject({ kind: 'topup', amount: 50000 })
+  })
+
+  test('Plasma "From: X. Balance:" reads a token amount and the title direction', () => {
+    expect(parseMoney('Plasma One', 'Received 25 USDT', 'From: 0xabc...def. Balance: $414.31.')).toMatchObject({ kind: 'incoming', amount: 25, currency: 'USDT' })
+    expect(parseMoney('Plasma One', 'Sent $50.00', 'From: Card. Balance: $10.00.')).toMatchObject({ kind: 'transfer_out', amount: 50 })
+    expect(parseMoney('Plasma One', null, 'From: 0x5e0...aCd1. Balance: $414.31.')).toMatchObject({ amount: null, currency: null, balance_after: 414.31 })
+  })
+})

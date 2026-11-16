@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.17.2 - 2026-11-16
+
+### Fixed
+
+- **A Plasma One deposit no longer reports the balance as the amount.**
+  When the deposit's title is hidden, the body only says "From: 0x5e0...
+  Balance: $414.31."; that figure is the balance AFTER, so the parser now
+  records an incoming transfer with the amount taken from the title (a
+  "$120.00" or a "25 USDT"), or honestly unknown, and the balance as
+  balance-after. A title that says the money went out ("Sent $50.00") is
+  read as outgoing. The sender address is shown truncated, so it is
+  information only.
+- For every app, a labelled running balance ("Saldo: Rp X", "Balance: $X",
+  "sisa saldo", "available balance", "You have $X available", the balance
+  quoted in an insufficient-funds line) is never taken as the transaction
+  amount. A bare "saldo Rp X" that is the money being moved ("menerima
+  saldo", "isi saldo") keeps its amount, and the kind is always read from
+  the full text, so an insufficient-funds line stays declined.
+- His real Plasma One notification formats are pinned as tests.
+
 ## 0.17.1 - 2026-11-16
 
 ### Fixed

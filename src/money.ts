@@ -297,12 +297,54 @@ function plasma(title: string | null, body: string): MoneyParse | null {
   // "Received $120.00 From: 0x5e0...aCd1. Balance: $414.31"
   m = /received\s+\$\s*(\d(?:[\d.,]*\d)?)\s*(?:from:?\s*(\S+?))?\.?(?:\s|$)/i.exec(body)
   if (m) return { ...blank('plasma.received'), ...bal, kind: 'incoming', amount: parseUsd(m[1]), currency: 'USD', counterparty: tidy(m[2]) }
+  // A deposit whose amount lives in the TITLE (body: "From: 0x5e0...aCd1. Balance: $414.31.").
+  // The body's dollar figure is the balance AFTER, never the amount. With no
+  // amount in the title it stays unknown: honest null beats a wrong number.
+  // The sender address is truncated, so it is information only (no
+  // address-poisoning comparison is possible on it).
+  m = /^\s*from:?\s*(\S+?)\.?\s+balance:/i.exec(body)
+  if (m) {
+    // Direction comes from the title when it says so ("Sent $50.00"); a
+    // "From:" body with no outward word is a deposit.
+    const outward = !!title && /\b(sent|paid|withdraw(n|al)?|outgoing|transfer(red)? out)\b/i.test(title)
+    // The amount: "$120.00" or "25 USDT" in the title; otherwise unknown.
+    const usd = title ? /\$\s*(\d(?:[\d.,]*\d)?)/.exec(title) : null
+    const tok = !usd && title ? /(\d(?:[\d.,]*\d)?)\s*([A-Z]{2,6})\b/.exec(title) : null
+    const amount = usd ? parseUsd(usd[1]) : tok ? parseCryptoAmount(tok[1]) : null
+    return {
+      ...blank('plasma.deposit'), ...bal, kind: outward ? 'transfer_out' : 'incoming',
+      amount, currency: usd ? 'USD' : tok ? tok[2] : null, counterparty: tidy(m[1]),
+    }
+  }
   return null
+}
+
+const AMT = String.raw`(?:rp\.?|idr|usd[ct]?|\$)?\s*\d(?:[\d.,]*\d)?`
+// Only a LABELLED running balance is stripped: "Saldo: Rp X", "Balance $X"
+// right after a label word, "saldo akhir / sisa saldo / available balance X",
+// "you have $X available", and the balance quoted inside an insufficient-
+// funds line. A bare "saldo Rp X" is often the thing being MOVED ("menerima
+// saldo Rp50.000", "isi saldo Rp 100.000") and must survive.
+const LABELLED_BALANCE = new RegExp(
+  String.raw`\b(?:balance|saldo)\s*(?:akhir|after|now|kamu|anda)?\s*[:=]\s*${AMT}` +
+    String.raw`|\b(?:sisa saldo|saldo akhir|saldo tersisa|remaining balance|available balance|current balance)\s*[:=]?\s*${AMT}` +
+    String.raw`|\byou have\s+${AMT}\s*(?:usd[ct]?)?\s*available\b` +
+    String.raw`|\binsufficient (?:balance|funds)\s*[:(]?\s*${AMT}` +
+    String.raw`|\bsaldo\s+${AMT}\s+(?:tidak|nggak|gak) cukup`,
+  'gi',
+)
+
+/** A running balance is never the transaction amount: strip labelled
+ *  balances before looking for an amount (kind is classified on the
+ *  UNSTRIPPED text, so "insufficient" / "tidak cukup" still read as declined). */
+function withoutBalances(t: string): string {
+  return t.replace(LABELLED_BALANCE, ' ')
 }
 
 /** Best effort for apps whose formats we have not seen yet (GoPay, ShopeePay, Pintu). */
 function generic(app: string, title: string | null, body: string): MoneyParse {
-  const t = `${title ?? ''}\n${body}`
+  const full = `${title ?? ''}\n${body}`
+  const t = withoutBalances(full) // amounts only; kind reads `full`
   const p = blank(`generic.${app.toLowerCase().replace(/[^a-z0-9]+/g, '') || 'app'}`)
   const idr = /(?:rp\.?|idr)\s*(\d(?:[\d.,]*\d)?)|(\d[\d.,]{2,}\d)\s*(?:idr|rupiah)/i.exec(t)
   const usd = /\$\s*(\d(?:[\d.,]*\d)?)|(\d(?:[\d.,]*\d)?)\s*usd[ct]?\b/i.exec(t)
@@ -313,8 +355,8 @@ function generic(app: string, title: string | null, body: string): MoneyParse {
     p.amount = parseUsd(usd[1] ?? usd[2])
     p.currency = /usdt/i.test(t) ? 'USDT' : /usdc/i.test(t) ? 'USDC' : 'USD'
   }
-  if (/\b(buy|sell|beli|jual)\b.*\b(order|filled|terisi|berhasil)\b|\border\b.*\b(filled|terisi)\b/i.test(t)) p.kind = 'trade'
-  else p.kind = moneyEvent(t) ?? (/\b(bayar|pembayaran|payment|beli|buy)\b/i.test(t) ? 'payment' : 'unknown')
+  if (/\b(buy|sell|beli|jual)\b.*\b(order|filled|terisi|berhasil)\b|\border\b.*\b(filled|terisi)\b/i.test(full)) p.kind = 'trade'
+  else p.kind = moneyEvent(full) ?? (/\b(bayar|pembayaran|payment|beli|buy)\b/i.test(full) ? 'payment' : 'unknown')
   const merchant = /\b(?:di|ke|at|to|untuk|for)\s+([A-Z0-9][\w&'.\- ]{1,60}?)(?:\s+(?:sebesar|senilai|berhasil|was|has|is)\b|[.,\n]|$)/.exec(body)
   // An amount is never a merchant ("for Rp 1.500.000" is the price).
   if (merchant && !/^(rp|idr|usd[ct]?|\$|\d)/i.test(merchant[1].trim())) p.merchant = tidy(merchant[1])
