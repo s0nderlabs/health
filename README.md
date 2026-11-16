@@ -221,6 +221,43 @@ sideload with a free Apple ID (7-day re-sign; one-time Xcode signing setup):
 scripts/build-phone.sh install   # phone paired + on the same Wi-Fi
 ```
 
+#### Auto re-sign (optional)
+
+A free team signature lasts 7 days. Auto re-sign keeps it alive without a
+cable: a separate LaunchAgent (`com.s0nderlabs.health.resign`, every 15
+min) mints a fresh profile with Xcode inside the last 72h, stages the
+signed build, and installs it over Wi-Fi when the phone is unlocked at home
+and nothing live is running (no open session, no fresh workout intent, no
+yield, the phone not the band writer). It never alerts on its own: it
+writes facts to `~/.claude/channels/health/resign/` and the daemon turns
+them into `system.health` events (one per failure episode, clock tiers at
+48/24/8h). The legacy 48h nag stays on as the backstop whenever the
+automation is off, dry, or has gone quiet.
+
+The build input is a snapshot of the code that is actually on the phone,
+kept outside protected folders (`~/Library/Application Support/health-resign`);
+`scripts/build-phone.sh install` refreshes it after every verified install.
+It also refuses a build whose app or widget profile was not freshly minted
+(a reused cached profile installs a build that dies on the old date);
+`HEALTH_ALLOW_STALE_PROFILE=1 scripts/build-phone.sh install` installs anyway
+when no fresh mint is possible.
+
+```bash
+bun run resign seed --ref <commit of the installed build>   # first time only
+bun run resign install-agent        # harmless while disabled
+bun run resign plan                 # read-only: every gate and probe
+bun run resign kick --dry-run       # the same, in the launchd context
+bun run resign kick --force         # a supervised real run
+# then health__config {resign: {device_udid: "<UDID>", enabled: true}}
+bun run resign status
+```
+
+Enabling needs `system.health` events on. `device_udid` is the phone's
+hardware UDID (`xcrun devicectl list devices`) and stays in your local
+config. A changed signing certificate is never installed unattended (the
+phone needs a Trust tap), and an Apple ID that needs a password or 2FA can
+only be reported, never fixed headless.
+
 The app never depends on DNS to find the daemon. iCloud Private Relay (and
 any encrypted-DNS app) resolves names outside Tailscale's MagicDNS, and a
 `ts.net` name with Funnel enabled also has public records, so a plain lookup

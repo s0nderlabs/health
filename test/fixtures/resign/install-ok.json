@@ -1,0 +1,9 @@
+{
+  "info": { "commandType": "devicectl.device.install.app", "outcome": "success" },
+  "result": {
+    "deviceIdentifier": "AAAAAAAA-0000-0000-0000-000000000001",
+    "installedApplications": [
+      { "bundleID": "com.s0nderlabs.HealthRelay", "databaseSequenceNumber": 1, "installationURL": "file:///private/var/containers/Bundle/Application/PLACEHOLDER/HealthRelay.app/" }
+    ]
+  }
+}

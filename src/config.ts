@@ -3,6 +3,7 @@ import { join, dirname } from 'path'
 import { homedir } from 'os'
 import type { HealthConfig } from './types.js'
 import { DEFAULT_CONFIG } from './types.js'
+import { resolveResignConfig } from './resign/policy.js'
 
 // HEALTH_CONFIG_PATH override exists for tests only; real installs use the default.
 const CONFIG_PATH =
@@ -47,6 +48,8 @@ export function loadConfig(): HealthConfig {
       live: { ...DEFAULT_CONFIG.live, ...parsed.live },
       plan_path: parsed.plan_path ?? DEFAULT_CONFIG.plan_path,
       food: { ...DEFAULT_CONFIG.food, ...parsed.food },
+      // Field-by-field tolerant: a malformed value falls back to the default.
+      resign: resolveResignConfig(parsed.resign, DEFAULT_CONFIG.resign),
     }
   } catch {
     return structuredClone(DEFAULT_CONFIG)

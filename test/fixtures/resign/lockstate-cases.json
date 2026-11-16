@@ -1,0 +1,13 @@
+{
+  "_comment": "SYNTHETIC lockState candidates. The real devicectl lockState JSON has never been observed; replace with the captured shape after dry-run rung 2.",
+  "observed_real": { "info": { "outcome": "success" }, "result": { "deviceIdentifier": "AAAAAAAA-0000-0000-0000-000000000009", "passcodeRequired": true, "unlockedSinceBoot": true } },
+  "before_first_unlock": { "info": { "outcome": "success" }, "result": { "passcodeRequired": true, "unlockedSinceBoot": false } },
+  "passcode_required_false": { "info": { "outcome": "success" }, "result": { "passcodeRequired": false, "unlockedSinceBoot": true } },
+  "is_locked_true": { "info": { "outcome": "success" }, "result": { "isLocked": true } },
+  "nested_string_unlocked": { "info": { "outcome": "success" }, "result": { "lockState": { "state": "Unlocked" } } },
+  "unlocked_since_boot_only": { "info": { "outcome": "success" }, "result": { "unlockedSinceBoot": true } },
+  "conflict": { "info": { "outcome": "success" }, "result": { "isLocked": false, "lockState": "locked" } },
+  "failed_outcome": { "info": { "outcome": "failed" }, "error": { "code": 1, "domain": "com.apple.dt.CoreDeviceError" } },
+  "unrelated_fields": { "info": { "outcome": "success" }, "result": { "deviceIdentifier": "AAAAAAAA-0000-0000-0000-000000000001", "foo": 1 } },
+  "string_state_weird": { "info": { "outcome": "success" }, "result": { "state": "maybe" } }
+}

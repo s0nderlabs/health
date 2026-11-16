@@ -1,0 +1,83 @@
+{
+  "info": {
+    "arguments": ["devicectl", "list", "devices", "--timeout", "20", "--json-output", "<path>"],
+    "commandType": "devicectl.list.devices",
+    "jsonVersion": 5,
+    "outcome": "success",
+    "version": "651.32"
+  },
+  "result": {
+    "devices": [
+      {
+        "_deprecationNotice": {
+          "deprecatedFields": ["hardwareProperties", "deviceProperties", "connectionProperties"],
+          "message": "The 'hardwareProperties', 'deviceProperties', 'connectionProperties' fields are deprecated and will be removed in a future release. Use the 'properties' dictionary instead.",
+          "replacement": "properties"
+        },
+        "capabilities": [],
+        "connectionProperties": {
+          "authenticationType": "manualPairing",
+          "pairingState": "paired",
+          "potentialHostnames": [],
+          "transportType": "localNetwork",
+          "tunnelState": "disconnected",
+          "tunnelTransportProtocol": "tcp"
+        },
+        "deviceProperties": { "bootState": "booted", "developerModeStatus": "enabled", "name": "Test Phone" },
+        "hardwareProperties": {
+          "deviceType": "iPhone",
+          "marketingName": "iPhone 12",
+          "platform": "iOS",
+          "reality": "physical",
+          "udid": "00000000-000A000000000001"
+        },
+        "identifier": "AAAAAAAA-0000-0000-0000-000000000001",
+        "properties": {
+          "connection": {
+            "authenticationType": "manualPairing",
+            "pairingState": "paired",
+            "state": "disconnected",
+            "transportType": "localNetwork",
+            "tunnelTransportProtocol": "tcp"
+          },
+          "hardware": {
+            "deviceType": "iPhone",
+            "marketingName": "iPhone 12",
+            "platform": "iOS",
+            "reality": "physical",
+            "udid": "00000000-000A000000000001"
+          },
+          "state": { "bootState": "booted", "name": "Test Phone" }
+        },
+        "visibilityClass": "default"
+      },
+      {
+        "connectionProperties": {
+          "authenticationType": "implicit",
+          "pairingState": "paired",
+          "transportType": "sameMachine",
+          "tunnelState": "disconnected"
+        },
+        "hardwareProperties": {
+          "deviceType": "iPhone",
+          "marketingName": "iPhone 12",
+          "platform": "iOS",
+          "reality": "simulated",
+          "udid": "00000000-000A000000000002"
+        },
+        "identifier": "AAAAAAAA-0000-0000-0000-000000000002",
+        "properties": {
+          "connection": { "authenticationType": "implicit", "pairingState": "paired", "state": "disconnected", "transportType": "sameMachine" },
+          "hardware": { "deviceType": "iPhone", "platform": "iOS", "reality": "simulated", "udid": "00000000-000A000000000002" }
+        },
+        "visibilityClass": "simulators"
+      },
+      {
+        "connectionProperties": { "pairingState": "unpaired", "transportType": "wired", "tunnelState": "unavailable" },
+        "hardwareProperties": { "deviceType": "iPad", "platform": "iOS", "reality": "physical", "udid": "00000000-000A000000000003" },
+        "identifier": "AAAAAAAA-0000-0000-0000-000000000003",
+        "visibilityClass": "default"
+      }
+    ]
+  }
+}

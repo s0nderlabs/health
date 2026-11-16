@@ -7,7 +7,19 @@ import { readFileSync, writeFileSync, unlinkSync, existsSync } from 'fs'
 import { join } from 'path'
 import { randomBytes } from 'node:crypto'
 import { AuthBrokenError } from './auth.js'
-import { signedHoursLeft, signingNag } from './signing.js'
+import { signedHoursLeft, signingNag, resignAlerts } from './signing.js'
+import { readState, paths as resignPaths, writeJsonAtomic } from './resign/state.js'
+import { resolveResignConfig } from './resign/policy.js'
+import {
+  HelloKicker,
+  RESIGN_LABEL,
+  blockerInputFrom,
+  buildPreflight,
+  helloKickDecision,
+  resignStatus,
+  type KickDecision,
+  type ResignPreflight,
+} from './resign/hooks.js'
 import { ensureRuntimeDir, loadConfig, saveConfig, configFileWritable, inQuietHours, resolvePlanPath, PID_PATH, SOCKET_PATH, RUNTIME_DIR, ROUTES_DIR, MEALS_DIR } from './config.js'
 import { FoodService } from './food.js'
 import { MoneyService } from './money.js'
@@ -243,6 +255,13 @@ const liveListener = new LiveListener(liveState, () => config().live.token, {
   onPhoneApp: ({ version, signedUntil }) => {
     if (version) store.setMeta('phone_app_version', version)
     if (signedUntil) store.setMeta('phone_app_signed_until', signedUntil)
+    // The HELLO instant (phone_relayer_last_seen also moves on frames): the
+    // re-sign runner tells "installed but the app still reports the old
+    // date" from "no hello yet" with it.
+    store.setMeta('phone_app_hello_at', new Date().toISOString())
+    // Armed only while the feature is on: with resign disabled a hello costs
+    // nothing (no 90 s timer, no preflight queries, no "skipped" log line).
+    if (config().resign?.enabled) helloKicker.onHello()
   },
   // Yield survives daemon restarts: the window is persisted and re-applied at
   // boot (below), so a kickstart mid-ride cannot silently re-arm the legs and
@@ -278,6 +297,86 @@ const liveListener = new LiveListener(liveState, () => config().live.token, {
       { bypassCooldown: true },
     )
   },
+})
+
+// ── Auto re-sign (daemon side: preflight, status, hello kick, alerts) ──
+// The runner (scripts/resign.ts under its own LaunchAgent) never alerts and
+// never sees live state; the daemon answers resign_preflight with the clock
+// and the install blocker, and turns state.json into alerts on its tick.
+
+const RESIGN_PATHS = resignPaths()
+
+function resignPreflight(now = Date.now()): ResignPreflight {
+  const signedUntil = store.getMeta('phone_app_signed_until') || null
+  const hoursLeft = signedHoursLeft(signedUntil, now)
+  const cfg = config()
+  const resign = cfg.resign // loadConfig already resolved it
+  const snap = liveState.snapshot(now) as { session?: unknown }
+  const lastScored =
+    (store.db.query("SELECT MAX(end) AS t FROM workouts WHERE score_state = 'SCORED'").get() as { t: string | null } | null)
+      ?.t ?? null
+  const lastRest =
+    (store.db.query('SELECT MAX(ended_at) AS t FROM live_sessions').get() as { t: string | null } | null)?.t ?? null
+  return buildPreflight({
+    signedUntil,
+    hoursLeft,
+    phoneVersion: store.getMeta('phone_app_version') || null,
+    phoneLastSeen: store.getMeta('phone_relayer_last_seen') || null,
+    phoneHelloAt: store.getMeta('phone_app_hello_at') || null,
+    blockerInput: blockerInputFrom({
+      now,
+      hoursLeft,
+      liveSessionOpen: snap.session != null,
+      intentLogRaw: store.getMeta('intent_log'),
+      lastScoredWorkoutAt: lastScored,
+      lastRestAt: lastRest,
+      live: liveListener.status(),
+    }),
+    cfg: resign,
+    systemHealthEnabled: cfg.events['system.health'] !== false,
+  })
+}
+
+/** launchctl kickstart (never -k: a running re-sign is never killed), with a
+ *  one-shot flags file so the run logs trigger=hello. Bounded: the child is
+ *  killed after 10s. */
+function kickResign(): void {
+  try {
+    const { flagsFile } = RESIGN_PATHS
+    if (!existsSync(flagsFile)) writeJsonAtomic(flagsFile, { trigger: 'hello', at: new Date().toISOString() })
+  } catch (err) {
+    log(`resign hello kick: flags write failed: ${err}`)
+  }
+  const uid = typeof process.getuid === 'function' ? process.getuid() : 501
+  const child = Bun.spawn(['/bin/launchctl', 'kickstart', `gui/${uid}/${RESIGN_LABEL}`], {
+    stdin: 'ignore',
+    stdout: 'ignore',
+    stderr: 'ignore',
+  })
+  const t = setTimeout(() => {
+    try {
+      child.kill()
+    } catch {
+      // gone
+    }
+  }, 10_000)
+  void child.exited.finally(() => clearTimeout(t))
+}
+
+const helloKicker: HelloKicker = new HelloKicker({
+  evaluate: (): KickDecision => {
+    const pf = resignPreflight()
+    return helloKickDecision({
+      cfg: config().resign,
+      state: readState(RESIGN_PATHS.stateFile),
+      hoursLeft: pf.hours_left,
+      blocker: pf.blocker,
+      lastKickAt: helloKicker.lastKickAt,
+      now: Date.now(),
+    })
+  },
+  kick: kickResign,
+  log,
 })
 
 // ── Strava ride watcher ───────────────────────────────────────────
@@ -466,8 +565,18 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
           webhook_armed: !!(config().strava.webhook_path && config().strava.verify_token),
           webhook_last_rx: store.getMeta('strava_webhook_last_rx') || null,
         },
+        // Auto re-sign: the runner's last facts (state.json), never secrets.
+        resign: (() => {
+          try {
+            return resignStatus(readState(RESIGN_PATHS.stateFile), config().resign, Date.now())
+          } catch (err) {
+            return { error: String(err) }
+          }
+        })(),
       }
     }
+    case 'resign_preflight':
+      return resignPreflight()
     case 'read': {
       return {
         recovery: store.latestRecovery(),
@@ -606,6 +715,9 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
         if (s.webhook_path === REDACTED) delete s.webhook_path
         if (s.verify_token === REDACTED) delete s.verify_token
       }
+      if (patch.resign && (patch.resign as unknown as Record<string, unknown>).device_udid === REDACTED) {
+        delete (patch.resign as unknown as Record<string, unknown>).device_udid
+      }
       const merged = {
         ...current,
         ...patch,
@@ -619,6 +731,9 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
         // the generated live.token and lock every relayer out.
         live: { ...current.live, ...patch.live },
         food: { ...current.food, ...patch.food },
+        // Partial resign patches merge field by field ({resign:{enabled:true}}
+        // keeps device_udid and the bands).
+        resign: patch.resign === undefined ? current.resign : resolveResignConfig(patch.resign, current.resign),
         // Same for quiet_hours: a partial patch ({quiet_hours:{start:'22:30'}})
         // must not drop end or the wake_release flag. null still disables.
         quiet_hours:
@@ -635,6 +750,12 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
       if (!(f.deficit_kcal >= 0 && f.deficit_kcal <= 1500)) throw new Error('food.deficit_kcal must be 0-1500')
       if (merged.quiet_hours && (!merged.quiet_hours.start || !merged.quiet_hours.end)) {
         throw new Error('quiet_hours needs both start and end (or null to disable)')
+      }
+      // The daemon is the ONLY re-sign alerter, through system.health: with
+      // those events off, an enabled re-sign could fail silently until the
+      // app dies. Checked only when the patch touches either side.
+      if ((patch.resign !== undefined || patch.events !== undefined) && merged.resign.enabled && merged.events['system.health'] === false) {
+        throw new Error('resign.enabled needs system.health events on (the daemon is the only re-sign alerter): enable events.system.health first')
       }
       const { saveConfig } = await import('./config.js')
       saveConfig(merged)
@@ -721,6 +842,8 @@ function redactConfig(cfg: ReturnType<typeof loadConfig>): ReturnType<typeof loa
       webhook_path: cfg.strava.webhook_path ? REDACTED : '',
       verify_token: cfg.strava.verify_token ? REDACTED : '',
     },
+    // The phone's hardware UDID stays on this machine.
+    resign: { ...cfg.resign, device_udid: cfg.resign.device_udid ? REDACTED : null },
   }
 }
 
@@ -885,11 +1008,42 @@ const WATCHDOG_UPTIME_GRACE_MS = 15 * 60_000
  *  (tested); this is the glue to the store and the engine. bypassCooldown:
  *  self-throttled by the day-scoped key and bounded by the nag window. */
 function phoneSigningWatchdog(now = Date.now()): void {
-  const nag = signingNag(store.getMeta('phone_app_signed_until'), now)
-  if (nag) engine.systemProblem(nag.problem, nag.key, { bypassCooldown: true })
+  const signedUntil = store.getMeta('phone_app_signed_until')
+  const resign = config().resign
+  const state = readState(RESIGN_PATHS.stateFile)
+  const awakeMs = now - awakeSince
+  // Legacy nag: defers ONLY while the automation is healthy (signing.ts).
+  const nag = signingNag(signedUntil, now, { enabled: resign.enabled, state, daemonAwakeMs: awakeMs })
+  if (nag) engine.systemProblem(nag.problem, nag.key, { bypassCooldown: true, ...(nag.priority ? { priority: nag.priority } : {}) })
+  for (const a of resignAlerts(state, signedUntil, now, awakeMs, {
+    enabled: resign.enabled,
+    windowHours: resign.window_hours,
+    alertedBetween: (fromIso, toIso) =>
+      !!store.db
+        .query(
+          `SELECT 1 FROM events WHERE class = 'system.health'
+             AND (dedupe_key LIKE 'system.health:resign-%' OR dedupe_key LIKE 'system.health:phone-sign-%')
+             AND dedupe_key NOT LIKE 'system.health:resign-resolved%'
+             AND created_at >= ? AND created_at <= ? LIMIT 1`,
+        )
+        .get(fromIso, toIso),
+  })) {
+    engine.systemProblem(a.problem, a.key, { bypassCooldown: true, priority: a.priority })
+  }
 }
 
+// "Awake" for the re-sign backstop: since the last wake, not since process
+// start. A 5-min tick that arrives more than 10 min after the previous one
+// means the Mac slept in between.
+let awakeSince = Date.now()
+let lastTickAt = Date.now()
+
 setInterval(() => {
+  {
+    const t = Date.now()
+    if (t - lastTickAt > 10 * 60_000) awakeSince = t
+    lastTickAt = t
+  }
   try {
     engine.tick()
   } catch (err) {

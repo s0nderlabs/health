@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.18.0 - 2026-11-16
+
+### Added
+
+- **Automatic weekly re-sign of the phone app.** A free-team sideload dies
+  seven days after its profile was minted; it is now renewed unattended. A
+  LaunchAgent (`com.s0nderlabs.health.resign`, every 15 min) runs a bun
+  orchestrator (`bun run resign`) that, inside the last 72 h of the
+  signature, mints fresh profiles and builds the EXACT code that is on the
+  phone (a source snapshot kept outside protected folders, seeded by
+  `scripts/build-phone.sh install` or `bun run resign seed --ref <commit>`),
+  verifies both embedded profiles and the bundle, installs over Wi-Fi with
+  devicectl, relaunches the app and confirms the new date from the phone's
+  own hello. Builds land 02:00-05:00, installs 07:00-23:00 or within ~90 s
+  of the phone saying hello at home; under 12 h left both windows open.
+- Guards: never installs over an open live session, a recent workout
+  intent or a fresh session end; a dual hold where the Mac writes does not
+  block. Every external command has a wall timeout and a PID-tree kill; a
+  run lock with stale takeover; quarantined profiles are backed up with a
+  manifest and restored on any failure; a confirmed-but-unacknowledged
+  install is never reinstalled in a loop.
+- The daemon is the only alerter: `system.health` events per hard failure
+  (once per episode, with the exact fix) and clock tiers at 48 / 24 / 8 h
+  (critical pierces quiet hours). The legacy 48 h nag stays as the
+  backstop whenever the automation is off, dry, or its heartbeat is stale.
+- `resign_preflight` RPC, a `resign` block in status, and a `resign`
+  section in `health__config` (`enabled`, `device_udid`, windows).
+  Disabled by default.
+
+### Fixed
+
+- Before shipping, the first live re-sign installed a bundle without its
+  App Intents metadata (an incremental Debug build relinks only the stub
+  executable, so the extractor skipped), which made the "Log Money
+  Notification" Shortcuts action vanish. Every re-sign build is now clean,
+  a bundle missing `Metadata.appintents` while the source uses AppIntents
+  is refused (`build_incomplete`), staged builds are re-checked and tied to
+  their source snapshot, and `build-phone.sh` refuses the same gap.
+- devicectl's `passcodeRequired` is not treated as a lock signal (it read
+  true for ten minutes straight on a real phone); the runner attempts the
+  install and a locked phone's error (CoreDevice 4016) is a quiet skip.
+
 ## 0.17.4 - 2026-11-16
 
 ### Fixed

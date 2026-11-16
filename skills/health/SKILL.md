@@ -1,6 +1,6 @@
 ---
 name: health
-description: WHOOP health read — today's recovery, HRV, RHR, sleep, strain, plus trends, config, daemon status, and the "starting a workout" trigger. Use when the user asks for their recovery, sleep, strain, readiness, health trend, or says they are starting a workout.
+description: WHOOP health read: today's recovery, HRV, RHR, sleep, strain, plus trends, config, daemon status, and the "starting a workout" trigger. Use when the user asks for their recovery, sleep, strain, readiness, health trend, or says they are starting a workout.
 user-invocable: true
 allowed-tools:
   # Installed-plugin tool IDs (plugin-scoped) + dev-channel IDs; both listed
@@ -38,7 +38,7 @@ voice. Parse `$ARGUMENTS` to pick the mode.
 
 ## Modes
 
-### No arguments — today's read
+### No arguments: today's read
 
 1. Call `health__read`.
 2. Present, in this order:
@@ -123,8 +123,20 @@ Sideload clock: `phone_app_signed_until` + `phone_app_signed_hours_left` are
 the phone build's self-reported signature expiry (read off its embedded
 provisioning profile at hello). Report the countdown as "signed for Nd Nh
 more"; if under 48h, or negative (expired), tell the user to re-sign and
-reinstall from Xcode (`scripts/build-phone.sh install`, cable in, cached
-profiles deleted first). The daemon also nags once per day inside 48h.
+reinstall (`scripts/build-phone.sh install` with the phone unlocked on the
+same Wi-Fi; it clears the cached HealthRelay profiles itself), or to turn
+on auto re-sign. The daemon also nags once per day inside 48h.
+
+Auto re-sign: `status.resign` carries `enabled`, `last_run_at` /
+`last_run_ago_min` (the timer heartbeat), `last_outcome` + `last_reason`,
+`staged` (a signed build waiting to install), `pending_confirm` (installed,
+waiting for the app's hello with the new date), `last_success`, `episode`
+(an open hard failure) and `counters` (attempts and skips this window:
+locked, unreachable, blocked by reason). Report it in one line: "auto
+re-sign on, last run Nm ago (outcome)". With `pending_confirm` set, the fix
+is "open the app once", never a reinstall. With an `episode`, quote its
+class and point at `bun run resign status` and the re-sign log
+(`~/.claude/channels/health/resign/resign.log`).
 Fallback for builds that predate the field (`phone_app_signed_until` null):
 if `phone_relayer_last_seen` is older than 5 days, warn that the phone
 relayer may be near its 7-day expiry.

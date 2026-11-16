@@ -1,0 +1,14 @@
+{
+  "info": { "commandType": "devicectl.list.devices", "jsonVersion": 6, "outcome": "success" },
+  "result": {
+    "devices": [
+      {
+        "identifier": "AAAAAAAA-0000-0000-0000-000000000001",
+        "properties": {
+          "connection": { "pairingState": "paired", "state": "connected", "transportType": "wired" },
+          "hardware": { "platform": "iOS", "reality": "physical", "udid": "00000000-000A000000000001" }
+        }
+      }
+    ]
+  }
+}

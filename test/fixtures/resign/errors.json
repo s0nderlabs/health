@@ -1,0 +1,31 @@
+{
+  "_comment": "SYNTHETIC xcodebuild and devicectl failure tails (placeholder ids). Each case names the classifier, the expected class and severity.",
+  "build": [
+    { "name": "no accounts", "text": "error: No Accounts: Add a new account in Accounts settings. (in target 'HealthRelay' from project 'HealthRelay')\n** BUILD FAILED **", "class": "account_broken", "hard": true },
+    { "name": "no account for team", "text": "error: No Account for Team \"TEAM000000\". Add a new account in Accounts settings or verify that your accounts have valid credentials. (in target 'HealthRelay')", "class": "account_broken", "hard": true },
+    { "name": "session expired", "text": "error: Your session has expired. Please log in.", "class": "account_broken", "hard": true },
+    { "name": "app id limit", "text": "error: Communication with Apple failed. Your maximum App ID limit has been reached. You may create up to 10 App IDs every 7 days.", "class": "free_tier_limit", "hard": true },
+    { "name": "apple offline", "text": "error: Communication with Apple failed. The Internet connection appears to be offline.", "class": "apple_unreachable", "hard": false },
+    { "name": "no devices", "text": "error: Communication with Apple failed. Your team has no devices from which to generate a provisioning profile. Connect a device to use or manually add device IDs in Certificates, Identifiers & Profiles.", "class": "device_not_in_profile", "hard": true },
+    { "name": "keychain", "text": "/usr/bin/codesign --force --sign PLACEHOLDER HealthRelay.app\nHealthRelay.app: errSecInternalComponent\nCommand CodeSign failed with a nonzero exit code", "class": "keychain_prompt", "hard": true },
+    { "name": "license", "text": "You have not agreed to the Xcode license agreements. Please run 'sudo xcodebuild -license' from within a Terminal window to review and agree to the Xcode and Apple SDKs license.", "class": "xcode_setup", "hard": true },
+    { "name": "platform missing", "text": "error: iOS 27.2 is not installed. Please download and install the platform from Xcode > Settings > Components.", "class": "xcode_setup", "hard": true },
+    { "name": "swift compile error", "text": "/path/Relay.swift:12:5: error: cannot find 'foo' in scope\n** BUILD FAILED **", "class": "other", "hard": true }
+  ],
+  "install": [
+    { "name": "locked", "text": "ERROR: The device is locked. (com.apple.dt.CoreDeviceError error 3)\n    Unlock the device and try again.", "class": "locked", "hard": false },
+    { "name": "passcode protected", "text": "ERROR: Could not install: the device is passcode protected (0xE800800E)", "class": "locked", "hard": false },
+    { "name": "verification failed", "text": "ERROR: Failed to install the app on the device. (com.apple.dt.CoreDeviceError error 3002)\n  ApplicationVerificationFailed: Failed to verify code signature of HealthRelay.app : 0xe8008015 (A valid provisioning profile for this executable was not found.)", "class": "device_not_in_profile", "hard": true },
+    { "name": "free app slots", "text": "ERROR: Failed to install: The maximum number of apps for free development profiles has been reached. (0xe800801c)", "class": "free_tier_limit", "hard": true },
+    { "name": "developer mode", "text": "ERROR: Developer Mode is disabled on the device. Enable Developer Mode in Settings > Privacy & Security.", "class": "device_setup", "hard": true },
+    { "name": "coredevice service", "text": "ERROR: Could not establish a connection to CoreDeviceService. (com.apple.dt.CoreDeviceError error 1)", "class": "devicectl_unreachable", "hard": true },
+    { "name": "not found", "text": "ERROR: Unable to locate a device matching the provided identifier. (com.apple.dt.CoreDeviceError error 1000)", "class": "unreachable", "hard": false },
+    { "name": "tunnel timeout", "text": "ERROR: The tunnel connection timed out. (com.apple.dt.RemotePairingError error 1)", "class": "unreachable", "hard": false },
+    { "name": "unknown", "text": "ERROR: Something odd happened (com.apple.dt.CoreDeviceError error 99999)", "class": "install_failed", "hard": false }
+  ],
+  "launch": [
+    { "name": "untrusted", "text": "ERROR: The application failed to launch. (com.apple.dt.CoreDeviceError error 10002)\n  Unable to launch com.s0nderlabs.HealthRelay because it has an invalid code signature, inadequate entitlements or its profile has not been explicitly trusted by the user.", "class": "untrusted_developer", "hard": true },
+    { "name": "locked", "text": "ERROR: Unable to launch com.s0nderlabs.HealthRelay because the device was not, or could not be, unlocked. The device is locked.", "class": "locked", "hard": false },
+    { "name": "other", "text": "ERROR: The request to open \"com.s0nderlabs.HealthRelay\" failed. (FBSOpenApplicationErrorDomain error 1)", "class": "launch_failed", "hard": false }
+  ]
+}

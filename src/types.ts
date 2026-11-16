@@ -1,6 +1,8 @@
 // WHOOP v2 API record shapes (fields per the official OpenAPI spec) plus
 // the plugin's own config and event types.
 
+import { DEFAULT_RESIGN, type ResignConfig } from './resign/policy.js'
+
 // ── WHOOP records ─────────────────────────────────────────────────
 
 export type ScoreState = 'SCORED' | 'PENDING_SCORE' | 'UNSCORABLE'
@@ -282,6 +284,12 @@ export interface HealthConfig {
     rollover_hour: number
     deficit_kcal: number // target = maintenance - this, once the baseline is ready
   }
+  // Auto re-sign of the sideloaded phone app (src/resign/, scripts/resign.ts).
+  // Off by default; config_set refuses to enable it while system.health
+  // events are off (the daemon is the only alerter). device_udid is the
+  // phone's hardware UDID and stays local. The team id is never configured:
+  // it comes from the build snapshot's project.yml.
+  resign: ResignConfig
 }
 
 export const DEFAULT_CONFIG: HealthConfig = {
@@ -368,6 +376,7 @@ export const DEFAULT_CONFIG: HealthConfig = {
     rollover_hour: 4,
     deficit_kcal: 400,
   },
+  resign: { ...DEFAULT_RESIGN },
 }
 
 // ── MCP tool helpers (inb0x convention) ───────────────────────────

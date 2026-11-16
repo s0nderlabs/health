@@ -11,7 +11,7 @@ import { DB_PATH } from './config.js'
 import { existsSync } from 'fs'
 import { readPhotoFiles } from './photos.js'
 
-const VERSION = '0.17.4'
+const VERSION = '0.18.0'
 
 const INSTRUCTIONS = `
 health: WHOOP recovery, sleep, and strain as a live channel. The daemon on this
@@ -439,6 +439,11 @@ export function createServer(ipc: IpcClient) {
             food: {
               type: 'object',
               description: 'Food log settings, e.g. {"protein_target_g": 165, "rollover_hour": 4, "deficit_kcal": 400}',
+            },
+            resign: {
+              type: 'object',
+              description:
+                'Automatic weekly phone app re-sign, partial patch merged, e.g. {"enabled": true} or {"device_udid": "<hardware UDID>"}. Fields: enabled, device_udid, window_hours (72), build_hours ([2,5]), install_hours ([7,23]), install_on_hello, critical_hours (12). Enabling is refused while system.health events are off.',
             },
           },
           required: ['action'],
