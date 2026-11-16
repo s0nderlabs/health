@@ -862,6 +862,14 @@ export class MealBook {
       .all(ts, source) as Array<{ uuid: string; ts: string; kind: string; value: number; source: string | null; excluded: string | null }>
   }
 
+  /** Every sample at exactly this instant, any source: one weigh-in as each
+   *  source delivered it (S400 BLE + Xiaomi Home on the scale's own clock). */
+  samplesAt(ts: string): Array<{ uuid: string; ts: string; kind: string; value: number; source: string | null; excluded: string | null }> {
+    return this.db
+      .query('SELECT uuid, ts, kind, value, source, excluded FROM body_samples WHERE ts = ?')
+      .all(ts) as Array<{ uuid: string; ts: string; kind: string; value: number; source: string | null; excluded: string | null }>
+  }
+
   /** INCLUDED mass readings at exactly this instant, other than `uuid` (the
    *  same weigh-in delivered twice, e.g. S400 BLE + Xiaomi Home on the scale's
    *  own clock). */
@@ -884,6 +892,14 @@ export class MealBook {
       .get(source, beforeIso) as { uuid: string; ts: string; value: number; source: string | null } | null
     if (!m) return null
     return { ...m, fat: this.fatAt(m.ts, m.source) }
+  }
+
+  /** Mass readings of `source` in [loIso, hiIso], ANY verdict, oldest first
+   *  (uuid breaks a tie): the S400 re-measure rule's neighbours. */
+  massesOfSourceBetween(source: string | null, loIso: string, hiIso: string): Array<{ uuid: string; ts: string; value: number; excluded: string | null }> {
+    return this.db
+      .query("SELECT uuid, ts, value, excluded FROM body_samples WHERE kind = 'mass' AND source IS ? AND ts >= ? AND ts <= ? ORDER BY ts ASC, uuid ASC")
+      .all(source, loIso, hiIso) as Array<{ uuid: string; ts: string; value: number; excluded: string | null }>
   }
 
   /** The fat fraction stored at this instant + source, or null. */
@@ -911,19 +927,32 @@ export class MealBook {
   }
 
   /** Clear every exclusion whose reason starts with `prefix` (a rule whose
-   *  input changed re-decides those rows). Returns the rows lifted. */
+   *  input changed re-decides those rows), never a hand one worded like it
+   *  (it ends "(by hand)"). Returns the rows lifted. */
   liftExclusions(prefix: string): number {
-    return this.db.run("UPDATE body_samples SET excluded = NULL WHERE substr(excluded, 1, ?) = ?", [prefix.length, prefix]).changes
+    return this.db.run(
+      "UPDATE body_samples SET excluded = NULL WHERE substr(excluded, 1, ?) = ? AND excluded NOT LIKE '%(by hand)'",
+      [prefix.length, prefix],
+    ).changes
   }
 
   /** Clear exclusions whose reason is EXACTLY one of `reasons`, on samples at
-   *  or after `sinceIso` (derived verdicts the next pass re-decides). */
-  liftExactExclusions(reasons: string[], sinceIso: string): number {
+   *  or after `sinceIso` (and before `beforeIso` when given): derived
+   *  verdicts the next pass re-decides. */
+  liftExactExclusions(reasons: string[], sinceIso: string, beforeIso?: string): number {
     if (!reasons.length) return 0
+    const upper = beforeIso == null ? '' : ' AND ts < ?'
     return this.db.run(
-      `UPDATE body_samples SET excluded = NULL WHERE ts >= ? AND excluded IN (${reasons.map(() => '?').join(', ')})`,
-      [sinceIso, ...reasons],
+      `UPDATE body_samples SET excluded = NULL WHERE ts >= ?${upper} AND excluded IN (${reasons.map(() => '?').join(', ')})`,
+      [sinceIso, ...(beforeIso == null ? [] : [beforeIso]), ...reasons],
     ).changes
+  }
+
+  /** Every excluded mass sample (any age), with its verdict. */
+  excludedMasses(): Array<{ uuid: string; excluded: string }> {
+    return this.db
+      .query("SELECT uuid, excluded FROM body_samples WHERE kind = 'mass' AND excluded IS NOT NULL")
+      .all() as Array<{ uuid: string; excluded: string }>
   }
 
   /** A sample's exclusion reason, or null when it counts. */

@@ -23,6 +23,7 @@ import {
   readBindkeyFromKeychain,
   readingUuid,
   receiveTime,
+  firstFrameOutcome,
   plausibleScaleTs,
   ScaleService,
   WeighinAssembler,
@@ -768,5 +769,43 @@ describe('bindkey lifecycle', () => {
       h.scale.stop()
       h.cleanup()
     }
+  })
+})
+
+describe('frame outcome log', () => {
+  const post = (scale: ScaleService, frameHex: string) =>
+    scale.handleHttp(
+      new Request('http://127.0.0.1/scale-adv', { method: 'POST', body: JSON.stringify({ frame_hex: frameHex }) }),
+      new URL('http://127.0.0.1/scale-adv'),
+    )
+
+  test('a refused (no_key) post and its accepted re-post are both logged; a repeat outcome is not', async () => {
+    let release: (k: Buffer | null) => void = () => {}
+    const h = harness({ mac: MAC }, true, { readBindkey: () => new Promise<Buffer | null>((r) => (release = r)) })
+    try {
+      const f = hex(frame(obj({ massRaw: 804 }), 0x2a))
+      await post(h.scale, f) // boot: the Keychain read is still in flight
+      await post(h.scale, f) // the listener re-posts: same outcome, no new line
+      release(KEY)
+      await h.scale.keySettled()
+      h.advance(2_000) // well inside SETTLE_MS
+      const res = await (await post(h.scale, f))!.json()
+      expect(res).toMatchObject({ accepted: true })
+      const lines = h.logs.filter((l) => l.startsWith('scale: frame #42 '))
+      expect(lines).toEqual(['scale: frame #42 with object -> refused (no_key), readings 0', 'scale: frame #42 with object -> accepted, readings 0'])
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  test('firstFrameOutcome: one per (counter, verdict) within SETTLE_MS', () => {
+    const seen = new Map<string, number>()
+    expect(firstFrameOutcome(seen, 7, 'refused (no_key)', 0)).toBe(true)
+    expect(firstFrameOutcome(seen, 7, 'refused (no_key)', 1_000)).toBe(false)
+    expect(firstFrameOutcome(seen, 7, 'accepted', 1_000)).toBe(true)
+    expect(firstFrameOutcome(seen, 8, 'refused (no_key)', 1_000)).toBe(true)
+    expect(firstFrameOutcome(seen, 7, 'accepted', 2_000)).toBe(false)
+    // Past SETTLE_MS the counter (one byte, it wraps) may log again.
+    expect(firstFrameOutcome(seen, 7, 'refused (no_key)', SETTLE_MS + 1)).toBe(true)
   })
 })

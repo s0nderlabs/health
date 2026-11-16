@@ -85,6 +85,10 @@ WHOOP band ──(BLE Broadcast HR)──> health-relay ──(WS, raw frames)�
   value is calibrated against the scale's own app whenever both record the
   same weigh-in, and it adds formula estimates of visceral fat, muscle,
   water, protein, bone and BMR, each labelled with how far to trust it.
+  The phone app's Body tab shows it all: the latest weigh-in and trend, a
+  body-composition figure, goal progress and the weigh-in history. Readings
+  far from your recent weight (a housemate on the same scale) are filed as
+  someone else's and can be reclaimed.
   Photos are converted to plain JPEGs with GPS and all other metadata
   stripped; your originals are never touched.
 - **Money notifications** (optional): an iOS Shortcuts automation forwards

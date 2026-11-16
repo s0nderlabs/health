@@ -12,12 +12,13 @@ struct HealthRelayApp: App {
     @StateObject private var steps = StepsCourier()
     @StateObject private var plan = PlanStore()
     @StateObject private var food = FoodStore()
+    @StateObject private var bodyStore = BodyStore()
     @StateObject private var weight = WeightCourier()
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
-            RootView(relay: relay, steps: steps, plan: plan, food: food)
+            RootView(relay: relay, steps: steps, plan: plan, food: food, bodyStore: bodyStore)
                 .preferredColorScheme(.dark)
                 .tint(Theme.accent)
                 .onAppear { boot() }
@@ -26,6 +27,7 @@ struct HealthRelayApp: App {
                         SessionProgress.shared.noteSceneActive()
                         plan.refresh()
                         food.refresh()
+                        bodyStore.refresh()
                         resyncOutbound()
                         relay.kick() // trade a long-stale pending connect for a scan
                         // Heals a missed boot lookup or a stale tailnet IP
@@ -56,7 +58,12 @@ struct HealthRelayApp: App {
     private func boot() {
         RestNotificationDelegate.shared.install()
         relay.onPlanUpdated = { plan.refresh() }
-        relay.onMealsUpdated = { food.refresh() }
+        // A weigh-in also pushes meals_updated (the day's weight changed), so
+        // the Body tab follows the same signal.
+        relay.onMealsUpdated = {
+            food.refresh()
+            bodyStore.refresh()
+        }
         // A reconnect also re-arms the sideload pings: the relaunch after an
         // auto re-sign install may never reach the foreground, and the old
         // pending pings would then announce a death that is no longer coming.
@@ -83,6 +90,12 @@ struct HealthRelayApp: App {
                     food.outbox = [OutboxEntry(id: "demo-q", kind: .meal, createdAt: Date(), note: "es teh manis", attempts: 2)]
                 }
             }
+            // HR_DEMO_BODY=full|formula|stale|empty|malformed|error: the Body
+            // tab's states (error = no cached page and a 404 from the daemon).
+            if let mode = ProcessInfo.processInfo.environment["HR_DEMO_BODY"] {
+                bodyStore.page = DemoBody.page(mode)
+                if mode == "error" { bodyStore.error = DemoBody.errorText }
+            }
             return
         }
         #endif
@@ -95,6 +108,7 @@ struct HealthRelayApp: App {
         plan.refresh()
         food.refresh()
         food.flush()
+        bodyStore.refresh()
         relay.learnTailnetIP(force: true)
     }
 }
@@ -104,12 +118,14 @@ struct RootView: View {
     @ObservedObject var steps: StepsCourier
     @ObservedObject var plan: PlanStore
     @ObservedObject var food: FoodStore
+    @ObservedObject var bodyStore: BodyStore
     @ObservedObject private var progress = SessionProgress.shared
     @State private var showSettings = false
     @State private var tab: Int = {
         switch ProcessInfo.processInfo.environment["HR_DEMO_TAB"] {
         case "plan": return 1
         case "food": return 2
+        case "body": return 3
         default: return 0
         }
     }()
@@ -125,6 +141,9 @@ struct RootView: View {
             FoodView(store: food)
                 .tabItem { Label("Food", systemImage: "fork.knife") }
                 .tag(2)
+            BodyView(store: bodyStore)
+                .tabItem { Label("Body", systemImage: "scalemass") }
+                .tag(3)
         }
         .background(Theme.ground.ignoresSafeArea())
         .overlay(alignment: .bottom) {

@@ -1262,6 +1262,26 @@ describe('food log over the listener', () => {
     expect(seen).toEqual(['GET /meals', 'GET /meal-nope'])
   })
 
+  test('GET /body rides the food handler behind the same token', async () => {
+    const seen: string[] = []
+    const { listener, port } = makeArbListener({
+      foodHttp: async (req, url) => {
+        seen.push(`${req.method} ${url.pathname}`)
+        return url.pathname === '/body' ? Response.json({ latest: null }) : null
+      },
+    })
+    cleanup.push(() => listener.stop())
+    expect((await fetch(`http://127.0.0.1:${port}/body`)).status).toBe(401)
+    expect((await fetch(`http://127.0.0.1:${port}/body?token=wrong`)).status).toBe(401)
+    expect(seen).toHaveLength(0)
+    const ok = await fetch(`http://127.0.0.1:${port}/body?token=${TOKEN}`)
+    expect(ok.status).toBe(200)
+    expect(await ok.json()).toEqual({ latest: null })
+    // Only the exact path: /bodyx and /body/x are not food routes.
+    expect((await fetch(`http://127.0.0.1:${port}/bodyx?token=${TOKEN}`)).status).toBe(404)
+    expect(seen).toEqual(['GET /body'])
+  })
+
   test('body_mass is acked (anchor gate) and malformed batches are not', async () => {
     const got: unknown[] = []
     const { listener, port } = makeArbListener({

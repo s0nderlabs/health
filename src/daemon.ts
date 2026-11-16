@@ -243,16 +243,13 @@ const food = new FoodService({
 // ingest). Confounder records are personal: they are added at runtime with
 // health__meal confounder_add, never seeded from source.
 try {
-  // S400 fat calibration first (pre-v0.19.1 S400 rows were backfilled at
-  // store open): the replay rule reads the calibrated fat values.
-  food.recalibrateScale()
+  // The friend rule FIRST (a housemate's weigh-in must never pair), then the
+  // S400 fat calibration (pre-v0.19.1 S400 rows were backfilled at store
+  // open), then the timing rules (the replay rule reads the calibrated fat
+  // values), then the calibration again if those filed one as maybe not his.
+  food.settleWeighins()
 } catch (err) {
-  log(`food: boot scale calibration failed: ${err}`)
-}
-try {
-  food.reclassifyWeighins()
-} catch (err) {
-  log(`food: boot weigh-in re-classification failed: ${err}`)
+  log(`food: boot weigh-in rules failed: ${err}`)
 }
 
 // S400 scale weigh-ins over passive BLE (relayer/scale-listen.swift posts

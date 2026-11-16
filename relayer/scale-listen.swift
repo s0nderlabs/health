@@ -224,7 +224,13 @@ final class Scanner: NSObject, CBCentralManagerDelegate {
         let now = Date()
         if let at = seen[hex], now.timeIntervalSince(at) < DEDUPE_SECONDS { return }
         seen[hex] = now // suppresses copies while the post is in flight
+        // Diagnostics: a frame carrying an object (frame control bit 0x40) is
+        // a weigh-in frame; log its counter and the daemon's answer (never a
+        // value). Idle beacons stay silent.
+        let hasObject = (bytes[0] & 0x40) != 0
+        let counter = bytes[4]
         poster.send(frameHex: hex, rssi: rssi.intValue, at: now) { [weak self] outcome in
+            if hasObject { log("frame #\(counter) with object -> \(outcome)") }
             // Only a frame the daemon could not decode YET (no_key at boot)
             // is posted again on its next advertisement. Any other reject is
             // permanent for this frame; a failed post sits in the retry

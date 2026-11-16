@@ -100,6 +100,7 @@ import {
   type MetricView,
 } from './bodycomp.js'
 import { BadRequest, cleanText, jsonBody } from './http.js'
+import { bodyPage } from './bodyview.js'
 export { BadRequest } from './http.js'
 import type { HealthConfig, ScaleConfig } from './types.js'
 
@@ -140,7 +141,8 @@ export interface FoodDeps {
 const EXCL_TEST = 'test: '
 const EXCL_NOT_MORNING = 'not a morning reading'
 const EXCL_REPEAT = 'repeat: a morning reading already counts today'
-const EXCL_OUTLIER = 'possible other person'
+/** Exported for GET /body: such a row is masked (not his body to show). */
+export const EXCL_OUTLIER = 'possible other person'
 const EXCL_AFTER_MEAL = 'after a meal'
 const EXCL_REPLAY = 'possible replay'
 /** The same weigh-in from a second source at the identical instant (S400 BLE
@@ -148,12 +150,188 @@ const EXCL_REPLAY = 'possible replay'
  *  every pass, so the other copy counts again once the preferred one is
  *  excluded (a replay, by hand, an outlier). */
 const EXCL_SAME_INSTANT = 'same weigh-in, other source'
+/** The S400 measuring ONE step-on twice: a second S400 BLE reading within
+ *  REMEASURE_MS and REMEASURE_KG of another (its own scale timestamp, so not
+ *  the same instant). One counts: the more complete one (fat or impedance),
+ *  else the first. Re-decided on every pass, like the same-instant rule. */
+const EXCL_REMEASURED = 'same weigh-in, re-measured'
+const REMEASURE_MS = 60_000
+const REMEASURE_KG = 0.2
 /** The date rule's own prefix: a weighins_from change re-decides exactly these. */
 const EXCL_DATE_RULE = `${EXCL_TEST}before the first fasted weigh-in`
+/** The friend rule (housemates use his S400, which has no Visitor mode): a
+ *  reading more than NOT_HIS_KG from his ANCHOR (walkNotHis: his most recent
+ *  trusted weigh-in before it) is filed as someone else's. Re-decided on
+ *  every pass; a manual include always wins and anchors the readings after
+ *  it (the escape for a genuine shift past 4 kg). That escape is manual on
+ *  purpose (the body.weighin line invites the reply): an automatic one, such
+ *  as two agreeing days, would also let in a housemate who weighs twice a
+ *  week. */
+export const EXCL_NOT_HIS = 'not his (weight outlier)'
+const NOT_HIS_KG = 4.0
+/** An anchor older than this decides nothing (a long trip). */
+const NOT_HIS_ANCHOR_MS = 30 * 86_400_000
+/** With no anchor yet: his readings this far AFTER it may decide. */
+const NOT_HIS_LOOKAHEAD_MS = 7 * 86_400_000
+/** The weigh-in rules re-decide this far back (~13 months). */
+const RULES_WINDOW_MS = 400 * 86_400_000
+/** A hand reason that SAYS the reading is someone else's: the phrase opens
+ *  the reason and ends there (or at punctuation, or "... weighed / reading /
+ *  stepped on"). A loose word inside a reason ("after dinner at a friend's",
+ *  "guest bathroom scale", "not me being honest, ate late", "not his usual
+ *  wake time") never files it. */
+const NOT_HIS_TEXT =
+  /^\s*(not (his|him|mine|me)|someone else('s)?|(an)?other person('s)?|(a |my |his )?(friend|housemate|roommate|guest|visitor)('s)?)(\s+(weigh\w*|reading|stepped\b.*|on (the|my|his) scale)|\s*[,.;:!()-]|\s*$)/i
+/** Filed as someone else's: the friend rule's exact verdict, or a hand
+ *  exclusion whose reason SAYS so (NOT_HIS_TEXT). The older outlier rule
+ *  ("possible other person") is a softer verdict, but pairing and
+ *  calibration skip both (mayNotBeHis). */
+export function filedAsNotHis(reason: string | null): boolean {
+  if (reason == null || reason.startsWith(EXCL_OUTLIER)) return false
+  return reason === EXCL_NOT_HIS || NOT_HIS_TEXT.test(reason)
+}
+/** Either not-his verdict: such a reading is never his anchor and its
+ *  values are masked on the Body tab. */
+export function mayNotBeHis(reason: string | null): boolean {
+  return reason != null && (reason.startsWith(EXCL_OUTLIER) || filedAsNotHis(reason))
+}
+/** The marker a hand reason worded like an automatic verdict carries
+ *  (setWeighin), so no rule ever mistakes it for its own and lifts or
+ *  replaces it. */
+const BY_HAND = '(by hand)'
+function byHand(reason: string | null): boolean {
+  return reason != null && reason.endsWith(BY_HAND)
+}
 /** day.body: exclusions that still mean HIS body (timing, not identity). */
-const BODY_OK_EXCLUSIONS = new Set([EXCL_NOT_MORNING, EXCL_REPEAT, EXCL_AFTER_MEAL, EXCL_REPLAY, EXCL_SAME_INSTANT])
+const BODY_OK_EXCLUSIONS = new Set([EXCL_NOT_MORNING, EXCL_REPEAT, EXCL_AFTER_MEAL, EXCL_REPLAY, EXCL_SAME_INSTANT, EXCL_REMEASURED])
+/** Verdicts that still mean HIS body (counted, or excluded only for timing
+ *  or a test: the date rule and BODY_OK_EXCLUSIONS): such a reading is
+ *  trusted as an anchor. */
+function timingVerdict(reason: string | null): boolean {
+  if (byHand(reason)) return false
+  return reason == null || reason.startsWith(EXCL_DATE_RULE) || BODY_OK_EXCLUSIONS.has(reason)
+}
+/** Verdicts the friend rule may replace (and gives back when lifted): its
+ *  own and the timing ones. Hand verdicts (any "(by hand)" reason included)
+ *  and the outlier rule's are kept. */
+function notHisCandidate(reason: string | null): boolean {
+  return reason === EXCL_NOT_HIS || timingVerdict(reason)
+}
+/** A HAND verdict that the reading is someone else's (a reason that says
+ *  so, or the rule's words with "(by hand)"), never the rule's own. */
+function handNotHis(reason: string | null): reason is string {
+  return reason != null && reason !== EXCL_NOT_HIS && filedAsNotHis(reason)
+}
+
+/** One stored mass reading for the friend rule's walk (t = Date.parse(ts),
+ *  parsed once; was = its stored verdict). */
+export type NotHisRow = { uuid: string; ts: string; t: number; value: number; source: string | null; was: string | null }
+
+/** Instants he counted by hand: a manual include on any source's copy
+ *  covers the whole weigh-in. */
+function reclaimedInstants(masses: ReadonlyArray<NotHisRow>, manual: ReadonlySet<string>): Set<string> {
+  const out = new Set<string>()
+  for (const m of masses) if (manual.has(m.uuid)) out.add(m.ts)
+  return out
+}
+/** Instants he disowned by hand (ts -> that hand reason, the first copy's):
+ *  the mirror of reclaimedInstants. A hand verdict that one source's copy is
+ *  someone else's covers every source's copy of that weigh-in, including
+ *  one that syncs later. A manual include at the same instant wins. */
+export function disownedInstants(
+  masses: ReadonlyArray<NotHisRow>,
+  manual: ReadonlySet<string>,
+  reclaimed: ReadonlySet<string> = reclaimedInstants(masses, manual),
+): Map<string, string> {
+  const out = new Map<string, string>()
+  for (const m of masses) if (handNotHis(m.was) && !reclaimed.has(m.ts) && !out.has(m.ts)) out.set(m.ts, m.was)
+  return out
+}
+
+/** The friend rule's walk: ONE pass over `masses` (sorted by
+ *  compareWeighins: ts, S400 BLE first, uuid), carrying his ANCHOR forward.
+ *  The anchor for a reading = his most recent TRUSTED weigh-in before its
+ *  instant, within NOT_HIS_ANCHOR_MS: a manual include (every source's copy
+ *  of that weigh-in), a reading this walk kept, or one older than `sinceMs`
+ *  whose stored verdict is a timing one. Never a not-his or hand-excluded
+ *  one. A reading more than NOT_HIS_KG from the anchor is filed; within it,
+ *  it becomes the new anchor (a slow trend follows him).
+ *  Bootstrapping: an anchor nothing ever corroborated (his first reading, or
+ *  the first after a gap past NOT_HIS_ANCHOR_MS) is WEAK: it never files
+ *  anything on its own. With no strong anchor, a reading is judged against
+ *  the readings in the NOT_HIS_LOOKAHEAD_MS after it, only when 2+ of them
+ *  exist and all agree within NOT_HIS_KG (a housemate's reading with nothing
+ *  before it is filed once his own follow); else agreeing with the weak
+ *  anchor makes it strong, disagreeing leaves both undecided.
+ *  Only rows at or after `sinceMs` with a candidate verdict are decided;
+ *  older rows are anchors by their stored verdict, never re-decided. A
+ *  weigh-in he disowned by hand (disownedInstants) is skipped in EVERY
+ *  source's copy: never judged, never an anchor.
+ *  Returns the filed uuids, each with how far it sits from its reference,
+ *  and the disowned instants it skipped (so the caller never recomputes
+ *  them). */
+export function walkNotHis(
+  masses: ReadonlyArray<NotHisRow>,
+  sinceMs: number,
+  manual: ReadonlySet<string>,
+): { filed: Map<string, number>; disowned: Map<string, string> } {
+  const reclaimed = reclaimedInstants(masses, manual)
+  const disowned = disownedInstants(masses, manual, reclaimed)
+  // mine = he counted this weigh-in by hand; fixed = older than the walk
+  // window; judge = this walk decides it; skip = a hand or outlier verdict,
+  // or another source's copy of a weigh-in he said was someone else's.
+  const roles = masses.map((m) =>
+    reclaimed.has(m.ts) ? 'mine' : disowned.has(m.ts) ? 'skip' : m.t < sinceMs ? 'fixed' : notHisCandidate(m.was) ? 'judge' : 'skip',
+  )
+  const lookAhead = (from: number, t: number): number | null => {
+    let first: number | null = null, lo = Infinity, hi = -Infinity, n = 0, lastTs = ''
+    for (let k = from; k < masses.length && masses[k].t <= t + NOT_HIS_LOOKAHEAD_MS; k++) {
+      if (roles[k] === 'skip' || masses[k].ts === lastTs) continue
+      lastTs = masses[k].ts
+      const v = masses[k].value
+      if (first == null) first = v
+      lo = Math.min(lo, v)
+      hi = Math.max(hi, v)
+      n++
+    }
+    return n >= 2 && hi - lo <= NOT_HIS_KG ? first : null
+  }
+  type Anchor = { t: number; v: number; strong: boolean }
+  const filed = new Map<string, number>()
+  let anchor = null as Anchor | null
+  for (let i = 0; i < masses.length; ) {
+    // One instant at a time: two sources' copies of one weigh-in are judged
+    // against the same anchor and never corroborate each other.
+    let j = i
+    while (j < masses.length && masses[j].ts === masses[i].ts) j++
+    const t = masses[i].t
+    const a: Anchor | null = anchor != null && anchor.t >= t - NOT_HIS_ANCHOR_MS ? anchor : null
+    let next = null as Anchor | null
+    for (let k = i; k < j; k++) {
+      const m = masses[k]
+      let strong: boolean | null = null // null = not trusted
+      if (roles[k] === 'mine') strong = true
+      else if (roles[k] === 'fixed') strong = timingVerdict(m.was) ? true : null
+      else if (roles[k] === 'judge') {
+        const ref = a?.strong ? a.v : lookAhead(j, t)
+        if (ref != null) {
+          const off = Math.abs(m.value - ref)
+          if (off > NOT_HIS_KG) filed.set(m.uuid, off)
+          else strong = true
+        } else strong = a != null && Math.abs(m.value - a.v) <= NOT_HIS_KG
+      }
+      if (strong != null && (next == null || (strong && !next.strong))) next = { t, v: m.value, strong }
+    }
+    if (next) anchor = next
+    i = j
+  }
+  return { filed, disowned }
+}
 /** Derived verdicts every re-classification pass lifts and re-decides. */
-const REDECIDED_EXCLUSIONS = [EXCL_AFTER_MEAL, EXCL_REPLAY, EXCL_SAME_INSTANT]
+const REDECIDED_EXCLUSIONS = [EXCL_AFTER_MEAL, EXCL_REPLAY, EXCL_SAME_INSTANT, EXCL_REMEASURED]
+/** Every automatic verdict (or its prefix: the test and date rules): a hand
+ *  reason that opens with one is stored with BY_HAND. */
+const AUTO_VERDICTS = [EXCL_TEST, EXCL_NOT_MORNING, EXCL_REPEAT, EXCL_OUTLIER, EXCL_NOT_HIS, ...REDECIDED_EXCLUSIONS]
 /** weighin_pair: a value further than this many fit units (METRICS fitUnit:
  *  1 fat point, 1 kg, 0.1 kg bone, 15 kcal) from the formula is refused
  *  without force:true. */
@@ -262,6 +440,8 @@ export function weighinEvent(
     fatCalibration?: FatProvenance | null
     /** S400 body composition (visceral + muscle), one compact line. */
     body?: { line: string; visceral?: number; muscle_kg?: number } | null
+    /** The friend rule: how far this reading sits from his anchor. */
+    notHisOffKg?: number | null
   } = {},
 ): { content: string; meta: Record<string, string> } {
   const t = new Date(m.ts)
@@ -282,6 +462,10 @@ export function weighinEvent(
           ? ' Repeat reading this morning, excluded from the trend (the first one counts).'
           : excluded === EXCL_SAME_INSTANT
             ? ' The same weigh-in as another source\'s copy at this instant, counted once (from the other copy).'
+          : excluded === EXCL_REMEASURED
+            ? ' The scale measured the same step-on twice, counted once (from the other reading).'
+          : excluded === EXCL_NOT_HIS
+            ? ` ${kg} kg is ${extras.notHisOffKg != null ? `${extras.notHisOffKg.toFixed(1)} kg` : 'far'} off your recent weigh-ins, so it is filed as someone else's; reply if it was you.`
           : excluded === EXCL_OUTLIER
             ? ` ${prev ? `${Math.abs(m.value - prev.value).toFixed(1)} kg off your last reading, likely` : 'Likely'} someone else; excluded. Reply if it was you.`
             : excluded === EXCL_AFTER_MEAL
@@ -404,6 +588,8 @@ export class FoodService {
   readonly scaleCal: ScaleCalBook
   private now: () => number
   private log: (msg: string) => void
+  /** The last friend-rule walk's filed readings: uuid -> kg off its reference. */
+  private notHisOff = new Map<string, number>()
 
   constructor(private deps: FoodDeps) {
     this.book = new MealBook(deps.db)
@@ -600,10 +786,12 @@ export class FoodService {
   }
 
   /** A meal was logged, voided or re-timed: the fasted verdicts follow the
-   *  meal log both ways (re-running the rules lifts and re-decides them). */
+   *  meal log both ways (re-running the rules lifts and re-decides them).
+   *  Never the friend walk: a meal cannot move it (it reads masses and
+   *  identity verdicts; "after a meal" is a timing verdict like counting). */
   private afterMealWrite(): void {
     try {
-      this.reclassifyWeighins()
+      if (this.reclassifyWeighins({ friendRule: false })) this.recalibrateQuietly()
     } catch (err) {
       this.log(`weigh-in re-classification after a meal write failed: ${err}`)
     }
@@ -988,10 +1176,12 @@ export class FoodService {
     return { goal: null, cleared: had }
   }
 
-  /** Config changed (config_set): a new weighins_from re-decides the date rule. */
+  /** Config changed (config_set): a new weighins_from re-decides the date
+   *  rule (every rule runs, friend rule first; the calibration follows
+   *  whenever a not-his verdict moved). */
   onConfigChanged(prev: FoodConfig, next: FoodConfig): void {
     if ((prev.weighins_from ?? null) !== (next.weighins_from ?? null)) {
-      this.reclassifyWeighins({ dateRuleChanged: true })
+      this.settleWeighins({ dateRuleChanged: true, recalibrate: false })
       this.changed(this.today())
     }
   }
@@ -1205,17 +1395,23 @@ export class FoodService {
     const removed = this.book.deleteBodySamples(deleted)
     // Pairs and the S400 fat calibration follow EVERY body ingest, from
     // either source: the Xiaomi copy of a weigh-in usually arrives minutes
-    // after the S400 one (when the app is opened). Before the verdicts: the
-    // replay rule reads the (calibrated) fat values.
+    // after the S400 one (when the app is opened). settleWeighins runs the
+    // friend rule once, FIRST (a housemate's weigh-in never pairs), then the
+    // calibration, then the timing rules (the replay rule reads the
+    // calibrated fat), then the calibration again if those filed one.
+    this.settleWeighins()
+    if (added > 0 || removed > 0) this.changed(this.today())
+    this.announceWeighins(freshRows, now)
+    return { received: clean.length, added, deleted: removed }
+  }
+
+  /** recalibrateScale, logged instead of thrown (an ingest never fails on it). */
+  private recalibrateQuietly(): void {
     try {
       this.recalibrateScale()
     } catch (err) {
       this.log(`scale calibration failed: ${err instanceof Error ? err.message : 'error'}`)
     }
-    this.reclassifyWeighins()
-    if (added > 0 || removed > 0) this.changed(this.today())
-    this.announceWeighins(freshRows, now)
-    return { received: clean.length, added, deleted: removed }
   }
 
   private manualIncludes(): Set<string> {
@@ -1289,7 +1485,7 @@ export class FoodService {
     weighin: { measured_at: string; kg: number | null; excluded: string | null } | null
   } {
     if (typeof p.include !== 'boolean') throw new BadRequest('include must be true or false')
-    let pair: Array<{ uuid: string; ts: string; kind: string; value: number; source: string | null }> = []
+    let pair: Array<{ uuid: string; ts: string; kind: string; value: number; source: string | null; excluded: string | null }> = []
     if (typeof p.uuid === 'string' && p.uuid.length >= 8) {
       const row = this.book.bodySampleByUuid(p.uuid)
       // Only this row's own weigh-in: another source's copy at the same
@@ -1301,24 +1497,58 @@ export class FoodService {
       throw new BadRequest('give uuid or measured_at (ISO time of the weigh-in)')
     }
     if (!pair.length) return { changed: 0, weighin: null }
-    let reason = p.include ? null : cleanText(p.reason, 120, false) || 'excluded by hand'
-    // A hand verdict must never look like a derived one the next pass lifts.
-    if (reason != null && REDECIDED_EXCLUSIONS.includes(reason)) reason = `${reason} (by hand)`
-    const changed = this.book.setBodyExcluded(pair.map((r) => r.uuid), reason)
+    // An exclusion with no reason on a weigh-in already filed as not his
+    // KEEPS that verdict (now by hand): "exclude it" there means "yes, not
+    // mine", never a reason that would show its values and let it pair.
+    const notHisNow = pair.map((r) => r.excluded).find((x) => mayNotBeHis(x)) ?? null
+    const keepNotHis = notHisNow == null ? null : filedAsNotHis(notHisNow) ? `${EXCL_NOT_HIS} (by hand)` : `${EXCL_OUTLIER} (by hand)`
+    let reason = p.include ? null : cleanText(p.reason, 120, false) || keepNotHis || 'excluded by hand'
+    // A hand verdict must never look like an automatic one: a rule would
+    // lift it (the derived ones, the date rule) or replace it (the friend
+    // rule judges the timing ones). Any reason worded like one is marked.
+    if (reason != null && !byHand(reason) && AUTO_VERDICTS.some((v) => reason!.startsWith(v))) reason = `${reason} ${BY_HAND}`
+    const wasNotHis = notHisNow != null
+    // "Someone else's" is about the weigh-in, not one source's record: like
+    // a manual include (which spreads through `reclaimed`), it covers every
+    // source's copy at that instant (a copy that syncs later gets it from
+    // classifyNotHis). An include lifts that hand verdict from the other
+    // copies too; the pass then counts the weigh-in once.
+    const others = this.book.samplesAt(pair[0].ts).filter((r) => !pair.some((q) => q.uuid === r.uuid))
+    const targets = !p.include && filedAsNotHis(reason) ? [...pair, ...others] : pair
+    const lifted = p.include ? others.filter((r) => handNotHis(r.excluded)) : []
+    const changed = this.book.setBodyExcluded(targets.map((r) => r.uuid), reason) + (lifted.length ? this.book.setBodyExcluded(lifted.map((r) => r.uuid), null) : 0)
     // Remember manual INCLUDES, so the re-classification pass never excludes
     // them again (an exclusion carries its own reason and needs no memory).
     const manual = this.manualIncludes()
-    for (const r of pair) {
+    for (const r of targets) {
       if (p.include) manual.add(r.uuid)
       else manual.delete(r.uuid)
     }
     this.deps.setMeta(MANUAL_INCLUDE_META, JSON.stringify([...manual].slice(-500)))
     // Re-decide the derived verdicts this one feeds (the other source's copy
     // at the same instant counts again once this copy is excluded).
-    this.reclassifyWeighins()
+    const notHisMoved = this.reclassifyWeighins()
+    // A reading that may not be his never pairs: when that set moved (this
+    // one, or the rules re-deciding around it), the calibration follows.
+    if (wasNotHis || lifted.length > 0 || mayNotBeHis(reason) || notHisMoved) this.recalibrateQuietly()
     this.changed(this.today())
     const mass = pair.find((r) => r.kind === 'mass') ?? null
     return { changed, weighin: { measured_at: pair[0].ts, kg: mass?.value ?? null, excluded: reason } }
+  }
+
+  /** Every weigh-in rule, in the one order that keeps a housemate out of
+   *  the calibration: the friend rule FIRST (masses only), then the S400 fat
+   *  calibration (recalibrate:false = only when the friend rule moved
+   *  something), then the timing rules (the replay rule reads the
+   *  calibrated fat), then the calibration AGAIN when those filed a reading
+   *  that may not be his. Used by every body ingest, the daemon boot and a
+   *  weighins_from change. Returns whether any not-his verdict moved. */
+  settleWeighins(opts: { dateRuleChanged?: boolean; recalibrate?: boolean } = {}): boolean {
+    const notHisMoved = this.classifyNotHis()
+    if (opts.recalibrate !== false || notHisMoved) this.recalibrateQuietly()
+    const ruleMoved = this.reclassifyWeighins({ dateRuleChanged: opts.dateRuleChanged, friendRule: false })
+    if (ruleMoved) this.recalibrateQuietly()
+    return notHisMoved || ruleMoved
   }
 
   /** Exclusion rules, applied to every reading that currently COUNTS, in
@@ -1331,6 +1561,9 @@ export class FoodService {
    *  2. window: measured outside 03:30-09:00 local = not a morning reading;
    *  3. outlier: far from the last counted reading = possible other person
    *     (from 3 earlier counted readings; two agreeing days = a real shift);
+   *  3b. re-measured: the S400's second take of one step-on (another S400
+   *     BLE reading within 60 s and 0.2 kg counts: the more complete one,
+   *     else the first); re-decided on every pass;
    *  4. repeat: a morning reading already counts for that day (the FIRST one);
    *  5. same instant: another source's copy of this weigh-in counts (walk
    *     order = ts, then S400 BLE first, then uuid: the first one wins).
@@ -1340,13 +1573,23 @@ export class FoodService {
    *  after a meal: a meal was eaten before it, on its food day and its own
    *  morning (from the later of the food-day start and local 03:30).
    *  These two and the same-instant rule are re-decided on every pass (they
-   *  follow the data). */
-  reclassifyWeighins(opts: { dateRuleChanged?: boolean } = {}): void {
+   *  follow the data).
+   *  Before all of them (unless friendRule:false), the friend rule
+   *  (classifyNotHis): more than 4 kg from his anchor = not his (weight
+   *  outlier). A copy of a weigh-in he reclaimed by hand (another source's
+   *  copy at the same instant is a manual include) is that weigh-in
+   *  delivered twice: "same weigh-in, other source", never judged as
+   *  someone else. friendRule:false is for callers that cannot move it (a
+   *  meal write: the walk reads only masses and identity verdicts) or that
+   *  ran it already (settleWeighins). Returns whether the set of readings
+   *  that may not be his moved (the calibration skips them). */
+  reclassifyWeighins(opts: { dateRuleChanged?: boolean; friendRule?: boolean } = {}): boolean {
     // A new weighins_from re-decides the date rule's own verdicts (and only
     // those).
     if (opts.dateRuleChanged) this.book.liftExclusions(EXCL_DATE_RULE)
+    const notHisMoved = opts.friendRule === false ? false : this.classifyNotHis()
     const rollover = this.deps.getConfig().rollover_hour
-    const sinceIso = new Date(this.now() - 400 * 86_400_000).toISOString()
+    const sinceIso = new Date(this.now() - RULES_WINDOW_MS).toISOString()
     // "after a meal", "possible replay" and "same weigh-in, other source" are
     // derived from data that can change under them (a meal voided or
     // re-timed, a reference reading deleted, the preferred copy excluded):
@@ -1356,40 +1599,130 @@ export class FoodService {
     const from = this.deps.getConfig().weighins_from ?? null
     const validFrom = isDayKey(from) ? from : null
     const manual = this.manualIncludes()
-    // Every reading that currently COUNTS, oldest first (bounded to ~13
-    // months), minus the ones he included by hand: stored rows from before the
-    // rules existed, or before weighins_from was set, get classified too.
-    const counting = this.book.includedSamplesSince(sinceIso)
-    // Same-instant copies in a FIXED order (S400 BLE first, then uuid), the
-    // order sameInstantLoses ranks them in.
-    const masses = counting.filter((s) => s.kind === 'mass' && !manual.has(s.uuid)).sort(compareWeighins)
-    for (const m of masses) {
-      const ms = Date.parse(m.ts)
-      const day = foodDay(ms, 0)
-      let reason: string | null = null
-      if (validFrom && day < validFrom) {
-        const label = new Date(`${validFrom}T12:00:00`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })
-        reason = `${EXCL_DATE_RULE} on ${label}`
-      } else if (!inMorningWindow(ms)) {
-        reason = EXCL_NOT_MORNING
-      } else if (this.isReplay(m)) {
-        // A re-synced copy of the previous reading must never count twice.
-        reason = EXCL_REPLAY
-      } else if (this.book.mealBetween(new Date(fastedFromMs(ms, rollover)).toISOString(), m.ts)) {
-        reason = EXCL_AFTER_MEAL
-      } else if (isOutlier(this.book, m)) {
-        // BEFORE the repeat rule: a friend stepping on first must never
-        // count and push his real reading out as the "repeat".
-        reason = EXCL_OUTLIER
-      } else if (this.book.includedMassOnDayBefore(dayStartIso(ms), m.ts)) {
-        reason = EXCL_REPEAT
-      } else if (this.sameInstantLoses(m)) {
-        reason = EXCL_SAME_INSTANT
+    let outlierFiled = false
+    // Normally one walk. A take filed re-measured against a rival that this
+    // same walk then excludes (the window, the date, a meal, an outlier: the
+    // rival is judged after it) would leave no take of the step-on counting:
+    // such a take is lifted and the walk runs again (bounded; each round only
+    // lifts takes whose every outranking rival no longer counts).
+    for (let round = 0; round < 3; round++) {
+      // Every reading that currently COUNTS, oldest first (bounded to ~13
+      // months), minus the ones he included by hand: stored rows from before the
+      // rules existed, or before weighins_from was set, get classified too.
+      const counting = this.book.includedSamplesSince(sinceIso)
+      // Same-instant copies in a FIXED order (S400 BLE first, then uuid), the
+      // order sameInstantLoses ranks them in.
+      const masses = counting.filter((s) => s.kind === 'mass' && !manual.has(s.uuid)).sort(compareWeighins)
+      const reclaimed = new Set(counting.filter((s) => s.kind === 'mass' && manual.has(s.uuid)).map((s) => s.ts))
+      const remeasured: Array<{ m: (typeof masses)[number]; pair: string[] }> = []
+      for (const m of masses) {
+        const ms = Date.parse(m.ts)
+        const day = foodDay(ms, 0)
+        let reason: string | null = null
+        if (validFrom && day < validFrom) {
+          const label = new Date(`${validFrom}T12:00:00`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })
+          reason = `${EXCL_DATE_RULE} on ${label}`
+        } else if (!inMorningWindow(ms)) {
+          reason = EXCL_NOT_MORNING
+        } else if (this.isReplay(m)) {
+          // A re-synced copy of the previous reading must never count twice.
+          reason = EXCL_REPLAY
+        } else if (this.book.mealBetween(new Date(fastedFromMs(ms, rollover)).toISOString(), m.ts)) {
+          reason = EXCL_AFTER_MEAL
+        } else if (reclaimed.has(m.ts)) {
+          // He counted another source's copy of this very weigh-in by hand.
+          reason = EXCL_SAME_INSTANT
+        } else if (isOutlier(this.book, m)) {
+          // BEFORE the repeat rule: a friend stepping on first must never
+          // count and push his real reading out as the "repeat".
+          reason = EXCL_OUTLIER
+          outlierFiled = true
+        } else if (this.remeasureLoses(m)) {
+          // BEFORE the repeat rule: the scale's second take of one step-on is
+          // the same weigh-in (the more complete one counts), never a repeat.
+          reason = EXCL_REMEASURED
+        } else if (this.book.includedMassOnDayBefore(dayStartIso(ms), m.ts)) {
+          reason = EXCL_REPEAT
+        } else if (this.sameInstantLoses(m)) {
+          reason = EXCL_SAME_INSTANT
+        }
+        if (!reason) continue
+        const pair = counting.filter((s) => s.ts === m.ts && s.source === m.source).map((s) => s.uuid)
+        this.book.setBodyExcluded(pair, reason)
+        if (reason === EXCL_REMEASURED) remeasured.push({ m, pair })
       }
-      if (!reason) continue
-      const pair = counting.filter((s) => s.ts === m.ts && s.source === m.source).map((s) => s.uuid)
-      this.book.setBodyExcluded(pair, reason)
+      const orphaned = remeasured.filter((r) => !this.remeasureLoses(r.m))
+      if (!orphaned.length) break
+      for (const r of orphaned) this.book.setBodyExcluded(r.pair, null)
     }
+    return notHisMoved || outlierFiled
+  }
+
+  /** The friend rule (housemates step on his S400): walkNotHis over every
+   *  mass reading of the last ~13 months (plus NOT_HIS_ANCHOR_MS before, as
+   *  anchors only), once, oldest first. A reading whose verdict is null, a
+   *  timing one or the rule's own is filed as "not his (weight outlier)" when
+   *  more than 4 kg from his anchor, and lifted back to counting otherwise
+   *  (the timing rules after this re-apply). Manual includes, hand verdicts,
+   *  the outlier rule's and every row older than the walk window keep their
+   *  stored verdict. Another source's copy of a weigh-in he disowned by hand
+   *  (one that synced after his verdict) takes that same hand verdict when
+   *  its own is a candidate one. Returns whether the set of readings filed
+   *  as not his changed. */
+  private classifyNotHis(): boolean {
+    const sinceMs = this.now() - RULES_WINDOW_MS
+    const rows = this.book.bodySamplesAll(new Date(sinceMs - NOT_HIS_ANCHOR_MS).toISOString())
+    const masses: NotHisRow[] = rows
+      .filter((r) => r.kind === 'mass')
+      .map((r) => ({ uuid: r.uuid, ts: r.ts, t: Date.parse(r.ts), value: r.value, source: r.source, was: r.excluded }))
+      .sort(compareWeighins)
+    const manual = this.manualIncludes()
+    const { filed, disowned } = walkNotHis(masses, sinceMs, manual)
+    this.notHisOff = filed
+    // A weigh-in = its mass + fat samples (same source + instant).
+    const weighins = new Map<string, string[]>()
+    for (const r of rows) {
+      const key = `${r.ts}\n${r.source ?? ''}`
+      const list = weighins.get(key)
+      if (list) list.push(r.uuid)
+      else weighins.set(key, [r.uuid])
+    }
+    // Local days on which a reading was filed or lifted: their repeat
+    // verdicts were decided against the old set and are re-decided below.
+    const days = new Set<number>()
+    for (const m of masses) {
+      if (m.t < sinceMs) continue // outside the walk: its verdict stands
+      const samples = weighins.get(`${m.ts}\n${m.source ?? ''}`) ?? [m.uuid]
+      const hand = disowned.get(m.ts)
+      if (hand != null) {
+        if (!notHisCandidate(m.was)) continue
+        this.book.setBodyExcluded(samples, hand)
+        days.add(Date.parse(dayStartIso(m.t)))
+        continue
+      }
+      const isFiled = filed.has(m.uuid)
+      if (isFiled === (m.was === EXCL_NOT_HIS)) continue
+      // Lifted: back to counting; the timing rules after this re-apply (the
+      // date rule, the window, repeat, ...).
+      this.book.setBodyExcluded(samples, isFiled ? EXCL_NOT_HIS : null)
+      days.add(Date.parse(dayStartIso(m.t)))
+    }
+    // A housemate's reading filed after the fact must not keep his own
+    // reading of that morning a "repeat" of it: lift the rule's repeat
+    // verdicts on each moved day (a hand one carries BY_HAND and stays), and
+    // the timing pass that always follows this one re-decides them.
+    for (const start of days) {
+      const d = new Date(start)
+      const end = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime()
+      this.book.liftExactExclusions([EXCL_REPEAT], new Date(Math.max(start, sinceMs)).toISOString(), new Date(end).toISOString())
+    }
+    return days.size > 0
+  }
+
+  /** How far a filed reading sat from its reference on the last friend-rule
+   *  walk, for the body.weighin line (null = not filed by that walk). */
+  private notHisOffKg(m: { uuid: string }): number | null {
+    return this.notHisOff.get(m.uuid) ?? null
   }
 
   /** Identical to the previous reading OF THE SAME SOURCE (any verdict) in
@@ -1420,6 +1753,33 @@ export class FoodService {
     return this.book.includedMassesAt(m.ts, m.uuid).some((o) => compareWeighins({ ...o, ts: m.ts }, m) < 0)
   }
 
+  /** The S400 readings (other than this one) that are the same step-on:
+   *  S400 BLE, a different instant within REMEASURE_MS, within REMEASURE_KG,
+   *  any verdict. */
+  private remeasureSiblings(m: { uuid: string; ts: string; value: number; source: string | null }): Array<{ uuid: string; ts: string; value: number; excluded: string | null }> {
+    if (m.source !== SCALE_SOURCE) return []
+    const t = Date.parse(m.ts)
+    return this.book
+      .massesOfSourceBetween(SCALE_SOURCE, new Date(t - REMEASURE_MS).toISOString(), new Date(t + REMEASURE_MS).toISOString())
+      .filter((o) => o.uuid !== m.uuid && o.ts !== m.ts && Math.abs(o.value - m.value) <= REMEASURE_KG + 1e-9)
+  }
+
+  /** Does a counted re-measure of this S400 step-on outrank it? Rank: the
+   *  more complete reading (a fat sample, or impedance in its raw row)
+   *  first, then the earlier one, then the lower uuid. */
+  private remeasureLoses(m: { uuid: string; ts: string; value: number; source: string | null }): boolean {
+    const rivals = this.remeasureSiblings(m).filter((o) => o.excluded == null)
+    if (!rivals.length) return false
+    const complete = (r: { uuid: string; ts: string }) =>
+      this.book.fatAt(r.ts, SCALE_SOURCE) != null || this.scaleCal.reading(readingStemOf(r.uuid))?.impedance_low != null ? 0 : 1
+    const mine = complete(m)
+    return rivals.some((o) => {
+      const c = complete(o)
+      if (c !== mine) return c < mine
+      return compareWeighins({ ...o, source: SCALE_SOURCE }, m) < 0
+    })
+  }
+
   // ── S400 fat calibration (against Xiaomi Home) ─────────────────
 
   /** The stored calibration model, or null before the first fit. */
@@ -1441,18 +1801,24 @@ export class FoodService {
       this.log(`scale: body metrics failed: ${err instanceof Error ? err.message : 'error'}`)
     }
     const nowIso = new Date(this.now()).toISOString()
-    const sinceIso = new Date(this.now() - 400 * 86_400_000).toISOString()
+    const sinceIso = new Date(this.now() - RULES_WINDOW_MS).toISOString()
     const readings = this.scaleCal.readingsWithRaw(sinceIso)
+    // One query for every check below (pairs, manual fat, each metric).
+    const notHis = this.notHisMassUuids()
     let pairs: ReturnType<typeof pairReadings> = []
     if (readings.length) {
       const first = Date.parse(readings[0].measured_at) - PAIR_WINDOW_MS
       const last = Date.parse(readings[readings.length - 1].measured_at) + PAIR_WINDOW_MS
       const refs = this.scaleCal.referenceWeighins(new Date(first).toISOString(), new Date(last).toISOString(), this.deps.getScaleReferenceSources?.())
-      pairs = pairReadings(readings, refs)
+      // A reading that may not be his never pairs (either side).
+      pairs = pairReadings(
+        readings.filter((r) => !notHis.has(`${r.uuid}-m`)),
+        refs.filter((r) => !notHis.has(r.uuid)),
+      )
     }
     // Manual fat values (weighin_pair metric fat_pct) join the automatic
     // HealthKit pairs; for the same reading the manual one wins.
-    const manualFat = this.scaleCal.refValues('fat_pct').filter((r) => r.fat_raw_pct != null)
+    const manualFat = this.scaleCal.refValues('fat_pct').filter((r) => r.fat_raw_pct != null && !notHis.has(`${r.reading_uuid}-m`))
     if (manualFat.length) {
       const byReading = new Map(pairs.map((p) => [p.reading_uuid, p]))
       for (const r of manualFat)
@@ -1486,7 +1852,7 @@ export class FoodService {
       this.log(`scale: fat calibration rewrote ${changedTs.length} S400 fat sample(s) on ${days.length} day(s)`) // counts only
     }
     try {
-      for (const k of CALIBRATED_METRICS) this.refitMetric(k)
+      for (const k of CALIBRATED_METRICS) this.refitMetric(k, notHis)
     } catch (err) {
       this.log(`scale: body metric calibration failed: ${err instanceof Error ? err.message : 'error'}`)
     }
@@ -1515,6 +1881,14 @@ export class FoodService {
     return n
   }
 
+  /** Mass sample uuids that may not be his (any age: a manual pair can sit
+   *  on an old reading): filed as someone else's, or the outlier rule's
+   *  "possible other person" (the phone hides those values too, so they
+   *  never move his calibration). An S400 reading's mass is `${stem}-m`. */
+  private notHisMassUuids(): Set<string> {
+    return new Set(this.book.excludedMasses().filter((r) => mayNotBeHis(r.excluded)).map((r) => r.uuid))
+  }
+
   /** The stored per-metric models (fat excluded: scaleModel()). */
   metricModels(): Partial<Record<MetricKey, CalModel>> {
     try {
@@ -1532,9 +1906,11 @@ export class FoodService {
   }
 
   /** The manual pairs of one metric: formula value (raw) vs his value. */
-  private metricPairs(metric: MetricKey): Array<CalPair & { impedance_inferred: boolean }> {
+  private metricPairs(metric: MetricKey, notHis: ReadonlySet<string> = this.notHisMassUuids()): Array<CalPair & { impedance_inferred: boolean }> {
     const out: Array<CalPair & { impedance_inferred: boolean }> = []
     for (const r of this.scaleCal.refValues(metric)) {
+      // Maybe someone else's: never calibrates, even a forced pair.
+      if (notHis.has(`${r.reading_uuid}-m`)) continue
       const raw = parseMetrics(r.metrics)?.values[metric]
       if (raw == null) continue
       out.push({
@@ -1552,10 +1928,10 @@ export class FoodService {
   }
 
   /** Refit one metric from its manual pairs; stored when it changed. */
-  refitMetric(metric: MetricKey): CalModel {
+  refitMetric(metric: MetricKey, notHis?: ReadonlySet<string>): CalModel {
     const models = this.metricModels()
     const prev = models[metric] ?? null
-    const model = fitMetric(metric, this.metricPairs(metric), new Date(this.now()).toISOString())
+    const model = fitMetric(metric, this.metricPairs(metric, notHis), new Date(this.now()).toISOString())
     if (sameModel(prev, model)) return prev!
     if (model.kind === 'none' && !prev) return model
     const all: Record<string, CalModel> = { ...models }
@@ -1599,7 +1975,9 @@ export class FoodService {
    *  in the iOS order. Null when there is none. */
   dayBody(): { measured_at: string; kg: number; metrics: MetricView[] } | null {
     const rows = this.scaleCal.recentReadingsWithVerdict(new Date(this.now() - DAY_BODY_WINDOW_MS).toISOString())
-    const row = rows.find((r) => r.mass_excluded == null || BODY_OK_EXCLUSIONS.has(r.mass_excluded))
+    // Never the losing take of a re-measured step-on: its counted sibling
+    // (the more complete one) sits within a minute of it.
+    const row = rows.find((r) => r.mass_excluded == null || (r.mass_excluded !== EXCL_REMEASURED && BODY_OK_EXCLUSIONS.has(r.mass_excluded)))
     if (!row) return null
     const views = this.readingViews(row, this.metricModels(), this.scaleModel(), this.book.fatAt(row.measured_at, SCALE_SOURCE))
     return {
@@ -1637,7 +2015,7 @@ export class FoodService {
     const excluded = row.mass_excluded
     if (excluded != null && !BODY_OK_EXCLUSIONS.has(excluded) && !force)
       throw new BadRequest(
-        `the S400 weigh-in at ${row.measured_at} is excluded ("${excluded}"), so it may not be his; check weighins, and re-send with force:true only if it is`,
+        `the S400 weigh-in at ${row.measured_at} is excluded ("${excluded}"), so it may not be his; check weighins, and re-send with force:true only if it is${mayNotBeHis(excluded) ? ' (filed as maybe someone else\'s, it never calibrates until weighin_set include:true counts it)' : ''}`,
       )
     const formula = metric === 'fat_pct' ? (row.fat_raw_pct ?? parseMetrics(row.metrics)?.values.fat_pct ?? null) : (parseMetrics(row.metrics)?.values[metric] ?? null)
     const maxDiff = IMPLAUSIBLE_FIT_UNITS * METRICS[metric].fitUnit
@@ -1809,9 +2187,10 @@ export class FoodService {
   private metricCalibrationReport(): ReturnType<FoodService['scaleCalibration']>['metrics'] {
     const models = this.metricModels()
     const out: ReturnType<FoodService['scaleCalibration']>['metrics'] = {}
+    const notHis = this.notHisMassUuids()
     for (const k of CALIBRATED_METRICS) {
       const model = models[k] ?? null
-      const pairs = this.metricPairs(k)
+      const pairs = this.metricPairs(k, notHis)
       const dp = (v: number) => Math.round(v * 1000) / 1000
       out[k] = {
         label: METRICS[k].label,
@@ -1840,7 +2219,7 @@ export class FoodService {
 
   /** 7-day average of INCLUDED readings up to this one (n >= 3), and its
    *  change vs the 7 days before (when that week also has n >= 3). */
-  avg7(tsIso: string): { kg: number; n: number; delta_kg: number | null } | null {
+  avg7(tsIso: string): { kg: number; n: number; delta_kg: number | null; prev_kg: number | null } | null {
     const t = Date.parse(tsIso)
     const iso = (ms: number) => new Date(ms).toISOString()
     const cur = this.book.includedMassBetween(iso(t - 7 * 86_400_000), tsIso)
@@ -1848,7 +2227,13 @@ export class FoodService {
     const prev = this.book.includedMassBetween(iso(t - 14 * 86_400_000), iso(t - 7 * 86_400_000))
     const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length
     const kg = Math.round(mean(cur) * 10) / 10
-    return { kg, n: cur.length, delta_kg: prev.length >= 3 ? Math.round((mean(cur) - mean(prev)) * 10) / 10 : null }
+    const hasPrev = prev.length >= 3
+    return {
+      kg,
+      n: cur.length,
+      delta_kg: hasPrev ? Math.round((mean(cur) - mean(prev)) * 10) / 10 : null,
+      prev_kg: hasPrev ? Math.round(mean(prev) * 10) / 10 : null,
+    }
   }
 
   /** "creatine saturation through ~Dec 13, weight trend inflated; ..." */
@@ -1870,7 +2255,13 @@ export class FoodService {
       .sort((a, b) => a.ts.localeCompare(b.ts))
       .slice(-WEIGHIN_MAX_PER_BATCH)
     const model = masses.some((m) => m.source === SCALE_SOURCE) ? this.scaleModel() : null
+    const freshUuids = new Set(fresh.map((s) => s.uuid))
     for (const m of masses) {
+      // One step-on the S400 measured twice is announced once: never the
+      // copy that does not count, and never a later take of a step-on an
+      // earlier batch already announced.
+      const excluded = this.book.bodyExcluded(m.uuid)
+      if (excluded === EXCL_REMEASURED || this.remeasureSiblings(m).some((o) => !freshUuids.has(o.uuid) && o.ts < m.ts)) continue
       const freshFat = fresh.find((s) => s.kind === 'fat' && s.ts === m.ts && s.source === m.source) ?? null
       // The label follows what THIS reading's sample carries (its own row),
       // never just the global model.
@@ -1878,15 +2269,18 @@ export class FoodService {
         m.source === SCALE_SOURCE && freshFat ? readingProvenance(this.scaleCal.reading(readingStemOf(freshFat.uuid)), model) : null
       // The stored value: an S400 fat sample may have just been calibrated.
       const fat = freshFat ? { value: this.book.fatAt(m.ts, m.source) ?? freshFat.value } : null
-      const excluded = this.book.bodyExcluded(m.uuid)
       // An outlier still names how far off it is (vs the last included reading).
       const prev = !excluded || excluded === EXCL_OUTLIER ? this.book.previousMass(m.ts) : null
+      // Maybe someone else's (filed as not his, or a possible other person):
+      // never his composition line either, as on the Body tab.
+      const notHis = mayNotBeHis(excluded)
       const extras = {
         ...(excluded
           ? {}
           : { avg7: this.avg7(m.ts), confounders: this.activeConfoundersLine(foodDay(Date.parse(m.ts), this.deps.getConfig().rollover_hour)) }),
         ...(provenance ? { fatCalibration: provenance } : {}),
-        ...(m.source === SCALE_SOURCE ? { body: this.bodyLineFor(m.uuid, freshFat ? (this.book.fatAt(m.ts, m.source) ?? freshFat.value) : null) } : {}),
+        ...(m.source === SCALE_SOURCE && !notHis ? { body: this.bodyLineFor(m.uuid, freshFat ? (this.book.fatAt(m.ts, m.source) ?? freshFat.value) : null) } : {}),
+        ...(excluded === EXCL_NOT_HIS ? { notHisOffKg: this.notHisOffKg(m) } : {}),
       }
       this.deps.emit('body.weighin', `body.weighin:${m.source ?? '?'}:${m.ts}`, weighinEvent(m, fat, prev, excluded, extras))
     }
@@ -1920,6 +2314,9 @@ export class FoodService {
       }
       if (req.method === 'GET' && path === '/meal-photo') {
         return this.servePhoto(url)
+      }
+      if (req.method === 'GET' && path === '/body') {
+        return Response.json(bodyPage(this))
       }
     } catch (err) {
       if (err instanceof BadRequest) return Response.json({ error: err.message }, { status: 400 })

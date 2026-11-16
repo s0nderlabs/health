@@ -50,7 +50,8 @@
 //                                 notification with identifier = id (a resend
 //                                 replaces), then notify_ack it, duplicates too
 //   HTTP (same token): POST /meal, POST /meal/fix, GET /meals, GET /meal-photo
-//   are the food log's routes, served by FoodService (src/food.ts).
+//   are the food log's routes, and GET /body the Body tab's one payload
+//   (src/bodyview.ts), all served by FoodService (src/food.ts).
 //   POST /money-notif {app, title?, body, ts?, client_id?, via?} forwards a
 //   bank / wallet notification, served by MoneyService (src/money.ts).
 //   POST /scale-adv {frame_hex, rssi?, ts?} carries one raw MiBeacon frame
@@ -111,7 +112,7 @@ export interface StepsSample {
 export interface LiveListenerOpts {
   /** Phone-side workout intent; returns whether the event surfaced. */
   onIntent?: (activity: string) => boolean
-  /** Food log HTTP routes (POST /meal, GET /meals, ...). Null = not a food route. */
+  /** Food log HTTP routes (POST /meal, GET /meals, GET /body, ...). Null = not a food route. */
   foodHttp?: (req: Request, url: URL) => Promise<Response | null>
   /** Money notification route (POST /money-notif). Null = not handled. */
   moneyHttp?: (req: Request, url: URL) => Promise<Response | null>
@@ -350,7 +351,7 @@ export class LiveListener {
               return new Response('internal error', { status: 500 })
             })
         }
-        if (self.opts.foodHttp && url.pathname.startsWith('/meal')) {
+        if (self.opts.foodHttp && (url.pathname.startsWith('/meal') || url.pathname === '/body')) {
           if (!self.authorized(req, url)) return new Response('unauthorized', { status: 401 })
           return self.opts
             .foodHttp(req, url)

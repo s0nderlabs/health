@@ -10,10 +10,13 @@
 		00F1C40FF8934D43701AC5DC /* EndSessionIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9582FF7521F2BE06326B5A6 /* EndSessionIntent.swift */; };
 		24B428346BA6421CAF5F8E34 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FDFDBDFCD7BFAA2E34B4160 /* Theme.swift */; };
 		25DA4A346C9E88B93115B975 /* HealthRelayWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 3F75F9042D1CE69087E1D44F /* HealthRelayWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		2BE88FC12953CF7F31F8BD41 /* BodyCardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D376DC2B11652AC1C8A4983 /* BodyCardTests.swift */; };
 		3C802DEEDB74EE65F631BEFB /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DF2D996A0FBD15E16A4F283A /* Assets.xcassets */; };
 		436788EFD07D21B614DCB97F /* EndSessionIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9582FF7521F2BE06326B5A6 /* EndSessionIntent.swift */; };
 		4545C382505B7A2469BA1625 /* LiveView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCEA0F403F414A3D81713AF0 /* LiveView.swift */; };
 		457A2BCAC5D39842C51B55BE /* PlanStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 225726ED5C2B1E6B7E6622FC /* PlanStore.swift */; };
+		45C270E66043569CAC04C650 /* BodyView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A99E745FF51DE29F39551DF9 /* BodyView.swift */; };
+		5509CED7A3EE94FA98D376B7 /* BodyStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5666FB2AF769635CD26EECE9 /* BodyStore.swift */; };
 		558AB8EBDEA37E89C8BFF0DF /* PlanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7047A0E516BF3C61DDBEB905 /* PlanView.swift */; };
 		59CEBCE80094572B77981DA5 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F15C0824BE664359828A19B /* Keychain.swift */; };
 		5E1FFF8CA6502D77E6C0DFAF /* PulseActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7857D126E229CA112B2237A3 /* PulseActivity.swift */; };
@@ -22,12 +25,15 @@
 		6EB2F9F0018648E83921022C /* WeightCourier.swift in Sources */ = {isa = PBXBuildFile; fileRef = A655D27B3D800A61D1C98202 /* WeightCourier.swift */; };
 		775DC092F6664C2AB6082214 /* HealthRelayWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = C29AC53190A143ED4368A8D4 /* HealthRelayWidgets.swift */; };
 		7D22DF2941098B4C4E4FC6C2 /* FoodView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F25B0D85623B54927532F441 /* FoodView.swift */; };
+		80F2DE3044BA26239F426973 /* BodyTabTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D70E3CDCE94EEF988D0EF9A /* BodyTabTests.swift */; };
 		8410EBDE5E0D970CFD9500BD /* Signing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4225180A8C9439EE70560C8C /* Signing.swift */; };
 		858B13EBBA1D2EB0A5F0DB60 /* RelayController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 860056F69532516604902542 /* RelayController.swift */; };
 		8740C3DDC84972E605E74773 /* Quad100.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB37A401CD942EC5294C469F /* Quad100.swift */; };
 		884152E5D1F5FCC35695A1CC /* PulseActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7857D126E229CA112B2237A3 /* PulseActivity.swift */; };
+		89BE2CCF310D706848535A7C /* ProteinLeftTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 020552B378B777794E9ED3ED /* ProteinLeftTests.swift */; };
 		8F119B456B2E6C5A6E5BEF56 /* HealthRelayApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD5742C77ED5B0FE27A6C9A4 /* HealthRelayApp.swift */; };
 		922ADEDC379D9A3D28B03DFE /* BleLeg.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33A0B5A8C357C1E29CC3B4DD /* BleLeg.swift */; };
+		A0A68DF02DDE291F8F3F6B87 /* BodyFigure.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B4D0F8D165A4AE11950D6EB /* BodyFigure.swift */; };
 		A239F28AA97AD2844BF82AFA /* Settings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48C4EF4AB3A7E881A50E208A /* Settings.swift */; };
 		ABC8D64C5466F7F9F993AF41 /* LiveActivityController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54A8187D9DBB0F6A24ECF7FE /* LiveActivityController.swift */; };
 		AE5A906D6DC070E3693F3897 /* RestChime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D4B7FD975836D714362DE5D /* RestChime.swift */; };
@@ -77,6 +83,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		020552B378B777794E9ED3ED /* ProteinLeftTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProteinLeftTests.swift; sourceTree = "<group>"; };
 		0A24BCDD8CFA18FB513E0089 /* SocketLeg.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SocketLeg.swift; sourceTree = "<group>"; };
 		0C8884E29CFA5A3BA217D1DD /* RideCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RideCard.swift; sourceTree = "<group>"; };
 		1684D662AA5DEA9BC7223309 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -92,16 +99,21 @@
 		3F75F9042D1CE69087E1D44F /* HealthRelayWidgets.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = HealthRelayWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		4225180A8C9439EE70560C8C /* Signing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Signing.swift; sourceTree = "<group>"; };
 		48C4EF4AB3A7E881A50E208A /* Settings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Settings.swift; sourceTree = "<group>"; };
+		4D376DC2B11652AC1C8A4983 /* BodyCardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BodyCardTests.swift; sourceTree = "<group>"; };
 		51C8A73AFA15B5E741B4AB4B /* ComposeSheetLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposeSheetLayoutTests.swift; sourceTree = "<group>"; };
 		54A8187D9DBB0F6A24ECF7FE /* LiveActivityController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveActivityController.swift; sourceTree = "<group>"; };
+		5666FB2AF769635CD26EECE9 /* BodyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BodyStore.swift; sourceTree = "<group>"; };
 		7022DF676F936DD86C9FABAD /* FoodStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FoodStore.swift; sourceTree = "<group>"; };
 		7047A0E516BF3C61DDBEB905 /* PlanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanView.swift; sourceTree = "<group>"; };
 		71E9733BB5C2DA0304E3FBCC /* HrLocal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HrLocal.swift; sourceTree = "<group>"; };
 		7857D126E229CA112B2237A3 /* PulseActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PulseActivity.swift; sourceTree = "<group>"; };
 		860056F69532516604902542 /* RelayController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayController.swift; sourceTree = "<group>"; };
+		8B4D0F8D165A4AE11950D6EB /* BodyFigure.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BodyFigure.swift; sourceTree = "<group>"; };
+		8D70E3CDCE94EEF988D0EF9A /* BodyTabTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BodyTabTests.swift; sourceTree = "<group>"; };
 		9D39E0C8BB06E879B66D6E20 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		A4916F51A132071C8CA442D1 /* HealthRelay.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = HealthRelay.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A655D27B3D800A61D1C98202 /* WeightCourier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeightCourier.swift; sourceTree = "<group>"; };
+		A99E745FF51DE29F39551DF9 /* BodyView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BodyView.swift; sourceTree = "<group>"; };
 		AD5742C77ED5B0FE27A6C9A4 /* HealthRelayApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthRelayApp.swift; sourceTree = "<group>"; };
 		B0B118E569EC868CBBAF77A4 /* TailnetTunnel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TailnetTunnel.swift; sourceTree = "<group>"; };
 		C29AC53190A143ED4368A8D4 /* HealthRelayWidgets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthRelayWidgets.swift; sourceTree = "<group>"; };
@@ -121,8 +133,11 @@
 		086FCB67EA6E82CB371ECF0D /* HealthRelayUITests */ = {
 			isa = PBXGroup;
 			children = (
+				4D376DC2B11652AC1C8A4983 /* BodyCardTests.swift */,
+				8D70E3CDCE94EEF988D0EF9A /* BodyTabTests.swift */,
 				51C8A73AFA15B5E741B4AB4B /* ComposeSheetLayoutTests.swift */,
 				FB6811BB8A0DF69304D53B06 /* EnergyRowTests.swift */,
+				020552B378B777794E9ED3ED /* ProteinLeftTests.swift */,
 			);
 			path = HealthRelayUITests;
 			sourceTree = "<group>";
@@ -143,6 +158,7 @@
 				3A9BCFB6449F3C3BBD6BE8D0 /* HealthRelay.entitlements */,
 				AD5742C77ED5B0FE27A6C9A4 /* HealthRelayApp.swift */,
 				1684D662AA5DEA9BC7223309 /* Info.plist */,
+				1749231492B3A76C02BE9999 /* Body */,
 				294C170CD06CE48931D51931 /* Food */,
 				C5E30F9024FC8BD5F851E93C /* LiveActivity */,
 				B7985D40C427975CE68C8957 /* Money */,
@@ -153,6 +169,14 @@
 				F5703017BEC792CADB72495A /* UI */,
 			);
 			path = HealthRelay;
+			sourceTree = "<group>";
+		};
+		1749231492B3A76C02BE9999 /* Body */ = {
+			isa = PBXGroup;
+			children = (
+				5666FB2AF769635CD26EECE9 /* BodyStore.swift */,
+			);
+			path = Body;
 			sourceTree = "<group>";
 		};
 		18ADC39836549C4AC418E387 /* Products */ = {
@@ -256,6 +280,8 @@
 		F5703017BEC792CADB72495A /* UI */ = {
 			isa = PBXGroup;
 			children = (
+				8B4D0F8D165A4AE11950D6EB /* BodyFigure.swift */,
+				A99E745FF51DE29F39551DF9 /* BodyView.swift */,
 				F25B0D85623B54927532F441 /* FoodView.swift */,
 				FCEA0F403F414A3D81713AF0 /* LiveView.swift */,
 				7047A0E516BF3C61DDBEB905 /* PlanView.swift */,
@@ -397,8 +423,11 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				2BE88FC12953CF7F31F8BD41 /* BodyCardTests.swift in Sources */,
+				80F2DE3044BA26239F426973 /* BodyTabTests.swift in Sources */,
 				B7E528A9D02835BAF5A02C53 /* ComposeSheetLayoutTests.swift in Sources */,
 				B3A064577058AB34FD933985 /* EnergyRowTests.swift in Sources */,
+				89BE2CCF310D706848535A7C /* ProteinLeftTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -407,6 +436,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				922ADEDC379D9A3D28B03DFE /* BleLeg.swift in Sources */,
+				A0A68DF02DDE291F8F3F6B87 /* BodyFigure.swift in Sources */,
+				5509CED7A3EE94FA98D376B7 /* BodyStore.swift in Sources */,
+				45C270E66043569CAC04C650 /* BodyView.swift in Sources */,
 				436788EFD07D21B614DCB97F /* EndSessionIntent.swift in Sources */,
 				FF32EDC95BAA03745C125345 /* FoodStore.swift in Sources */,
 				7D22DF2941098B4C4E4FC6C2 /* FoodView.swift in Sources */,
@@ -499,7 +531,7 @@
 				CODE_SIGN_ENTITLEMENTS = HealthRelay/HealthRelay.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 9;
+				CURRENT_PROJECT_VERSION = 10;
 				DEVELOPMENT_TEAM = 4F2SRW2599;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				INFOPLIST_FILE = HealthRelay/Info.plist;
@@ -508,7 +540,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.19.0;
+				MARKETING_VERSION = 0.20.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.s0nderlabs.HealthRelay;
 				PRODUCT_NAME = HealthRelay;
 				SDKROOT = iphoneos;
@@ -521,7 +553,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 9;
+				CURRENT_PROJECT_VERSION = 10;
 				DEVELOPMENT_TEAM = 4F2SRW2599;
 				INFOPLIST_FILE = HealthRelayWidgets/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -529,7 +561,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.19.0;
+				MARKETING_VERSION = 0.20.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.s0nderlabs.HealthRelay.widgets;
 				PRODUCT_NAME = HealthRelayWidgets;
 				SDKROOT = iphoneos;
@@ -546,7 +578,7 @@
 				CODE_SIGN_ENTITLEMENTS = HealthRelay/HealthRelay.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 9;
+				CURRENT_PROJECT_VERSION = 10;
 				DEVELOPMENT_TEAM = 4F2SRW2599;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				INFOPLIST_FILE = HealthRelay/Info.plist;
@@ -555,7 +587,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.19.0;
+				MARKETING_VERSION = 0.20.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.s0nderlabs.HealthRelay;
 				PRODUCT_NAME = HealthRelay;
 				SDKROOT = iphoneos;
@@ -568,7 +600,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 9;
+				CURRENT_PROJECT_VERSION = 10;
 				DEVELOPMENT_TEAM = 4F2SRW2599;
 				INFOPLIST_FILE = HealthRelayWidgets/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -576,7 +608,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.19.0;
+				MARKETING_VERSION = 0.20.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.s0nderlabs.HealthRelay.widgets;
 				PRODUCT_NAME = HealthRelayWidgets;
 				SDKROOT = iphoneos;

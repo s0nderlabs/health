@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.20.0 - 2026-11-16
+
+### Added
+
+- **Body tab** (fourth tab in the phone app). In order: the latest weigh-in
+  with its 7-day average and trend; a body-composition figure (an athletic
+  front silhouette filled bottom-up with mineral, protein, water and fat by
+  mass, the unassigned remainder shown honestly, a dashed outline of the
+  15% goal at today's lean mass, tap a band for its kg, share and 7-day
+  trend); the body metrics; goal progress with the scan-based goal as a
+  labelled reference; active confounders; and a 30-day weigh-in history
+  with both sources of one weigh-in grouped and excluded readings labelled
+  (someone else's values hidden). Explanations live behind (i) sheets.
+  Served by a new `GET /body` route with the same token as the food log.
+- **Protein left** on the Food tab ("52 g protein left", then "target met"
+  or "+12 g over"). No calorie-left figure until the baseline sets a target.
+- **Someone else on the scale.** A reading more than 4 kg from his most
+  recent trusted weigh-in (within 30 days) is filed "not his (weight
+  outlier)" before it is announced, never counts, pairs or calibrates, and
+  is reclaimed with one `weighin_set include:true` (also the escape for a
+  genuine large change). A hand "not his" covers every source's copy.
+- **One step-on, one weigh-in.** S400 readings within 60 s and 0.2 kg of each
+  other are the same weigh-in; the more complete one counts.
+- Weigh-in rules re-decide each other: when a reading is filed as someone
+  else's later, his own reading that day stops being a "repeat"; a hand
+  exclusion worded like an automatic one is always kept as a hand verdict.
+- **Scale diagnostics.** The listener and the daemon each log one line per
+  weigh-in frame (counter and outcome, never a value).
+
+### Changed
+
+- App version 0.20.0 (10).
+
 ## 0.19.1 - 2026-11-16
 
 ### Fixed

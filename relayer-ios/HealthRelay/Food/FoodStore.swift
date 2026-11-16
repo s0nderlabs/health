@@ -512,11 +512,14 @@ enum FoodFormat {
         return "\(months[p[1] - 1]) \(p[2])"
     }
 
+    /// The sign of a nonzero value: a true minus (U+2212) or "+".
+    static func sign(_ v: Double) -> String { v < 0 ? "\u{2212}" : "+" }
+
     /// "−450" / "+200" / "0": a signed kcal balance with a true minus (U+2212).
     static func signed(_ v: Double) -> String {
         let r = v.rounded()
         if r == 0 { return "0" }
-        return (r < 0 ? "\u{2212}" : "+") + int(abs(r))
+        return sign(r) + int(abs(r))
     }
 
     /// The balance band: "±180" when lo/hi sit symmetric around the balance
@@ -540,9 +543,17 @@ enum FoodFormat {
         return "\(int(lo))–\(int(hi))"
     }
 
+    /// The daemon's ISO timestamp (with or without fractional seconds).
+    static func date(_ iso: String) -> Date? {
+        isoFractional.date(from: iso) ?? isoPlain.date(from: iso)
+    }
+
     /// "23:30" from the daemon's ISO timestamp, in the phone's zone.
     static func time(_ iso: String) -> String {
-        guard let date = isoFractional.date(from: iso) ?? isoPlain.date(from: iso) else { return "" }
-        return clock.string(from: date)
+        guard let d = date(iso) else { return "" }
+        return time(d)
     }
+
+    /// "23:30" for a date, in the phone's zone.
+    static func time(_ date: Date) -> String { clock.string(from: date) }
 }

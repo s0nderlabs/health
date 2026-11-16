@@ -166,10 +166,13 @@ struct FoodView: View {
                 .frame(width: 136, height: 136)
 
                 VStack(alignment: .leading, spacing: 12) {
-                    stat(
-                        "PROTEIN",
-                        value: "\(FoodFormat.int(t.protein_g))",
-                        unit: "/ \(FoodFormat.int(day.targets.protein_g)) g")
+                    VStack(alignment: .leading, spacing: 3) {
+                        stat(
+                            "PROTEIN",
+                            value: "\(FoodFormat.int(t.protein_g))",
+                            unit: "/ \(FoodFormat.int(day.targets.protein_g)) g")
+                        proteinLeftLine(logged: t.protein_g, target: day.targets.protein_g)
+                    }
                     if let target = kcalTarget {
                         let left = target - t.kcal
                         stat(
@@ -298,6 +301,24 @@ struct FoodView: View {
                         .foregroundStyle(Theme.textSecondary)
                 }
             }
+        }
+    }
+
+    /// What protein the day still needs, always on under "88 / 140 g". Same
+    /// quiet voice whether short, met or over: going over is never an alarm.
+    /// No target, no line. Protein only: there is deliberately no kcal-left
+    /// here (no kcal target exists during the baseline).
+    @ViewBuilder
+    private func proteinLeftLine(logged: Double, target: Double) -> some View {
+        if let p = FoodFormat.proteinLeft(logged: logged, target: target) {
+            Text(p.text)
+                .font(Theme.rounded(12.5))
+                .monospacedDigit()
+                .foregroundStyle(Theme.textSecondary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityLabel(p.spoken)
+                .accessibilityIdentifier("food.protein.left")
         }
     }
 
@@ -958,6 +979,20 @@ struct CameraPicker: UIViewControllerRepresentable {
     }
 }
 
+extension FoodFormat {
+    /// "52 g protein left" / "target met" / "+12 g over", or nil when there
+    /// is no usable target. Worked on the rounded numbers the card shows, so
+    /// "88 / 140 g" always pairs with exactly "52 g protein left".
+    static func proteinLeft(logged: Double, target: Double) -> (text: String, spoken: String)? {
+        guard target.isFinite, target.rounded() > 0 else { return nil }
+        let have = logged.isFinite ? max(logged.rounded(), 0) : 0
+        let left = target.rounded() - have
+        if left > 0 { return ("\(int(left)) g protein left", "\(int(left)) grams of protein left") }
+        if left == 0 { return ("target met", "Protein target met") }
+        return ("+\(int(-left)) g over", "Protein target met, \(int(-left)) grams over")
+    }
+}
+
 // ── simulator demo (HR_DEMO=1 HR_DEMO_TAB=food) ───────────────────
 
 enum DemoFood {
@@ -1033,6 +1068,9 @@ enum DemoFood {
         if let e = energyMode {
             return energyDay(e, at: at, date: dayDate, morning: [latte, lunch, americano], pending: dinner, item: item)
         }
+        if mode.hasPrefix("protein-") {
+            return proteinDay(String(mode.dropFirst(8)), at: at, morning: [latte, lunch, americano], item: item)
+        }
         let meals = [latte, lunch, americano, dinner]
         return FoodDay(
             date: FoodStore.localFoodDay(), today: FoodStore.localFoodDay(), meals: meals,
@@ -1042,6 +1080,47 @@ enum DemoFood {
                 ? FoodBaseline(ready: true, complete_days: 18, days_needed: 14, weigh_ins: 15, weigh_ins_needed: 8)
                 : FoodBaseline(ready: false, complete_days: 2, days_needed: 14, weigh_ins: 3, weigh_ins_needed: 8),
             weight: FoodWeight(kg: target ? 74.6 : 75.4, at: at(7, 5), fat_pct: 20.6))
+    }
+
+    /// The protein-left states, today, baseline still collecting (so no kcal
+    /// target, exactly as the baseline phase ships). Synthetic numbers kept
+    /// consistent with the meal list: protein-met = 50 + 38 + 52 = 140 of 140,
+    /// protein-over adds a 12 g yogurt (152), protein-notarget sends a zero
+    /// target (the line must not render).
+    private static func proteinDay(
+        _ mode: String, at: (Int, Int) -> String, morning: [FoodMeal],
+        item: (String, Double?, Double, Double, Double, Double, String?) -> FoodItem
+    ) -> FoodDay? {
+        let dinner = FoodMeal(
+            id: 5, source: "app", status: "estimated", eaten_at: at(19, 25), label: "Soto ayam + nasi", note: "soto, 1 centong",
+            confidence: "medium", revision: 1, kcal: 690, kcal_lo: 580, kcal_hi: 820, protein_g: 38, fix_text: nil,
+            items: [item("Soto ayam", 450, 340, 290, 400, 30, nil), item("Rice, 1 centong", 150, 195, 175, 215, 4, nil),
+                    item("Emping + sambal", 30, 155, 115, 205, 4, nil)],
+            photos: [FoodPhoto(n: 0, url: "/meal-photo?meal=4&n=0", thumb_url: "/meal-photo?meal=4&n=0&thumb=1")])
+        let shake = FoodMeal(
+            id: 7, source: "chat", status: "estimated", eaten_at: at(21, 0), label: "Whey shake, 2 scoops", note: "whey 2 scoops",
+            confidence: "high", revision: 1, kcal: 260, kcal_lo: 230, kcal_hi: 290, protein_g: 52, fix_text: nil,
+            items: [item("Whey shake, 2 scoops in milk", 400, 260, 230, 290, 52, nil)], photos: [])
+        let yogurt = FoodMeal(
+            id: 8, source: "chat", status: "estimated", eaten_at: at(22, 15), label: "Greek yogurt", note: "greek yogurt",
+            confidence: "medium", revision: 1, kcal: 120, kcal_lo: 100, kcal_hi: 140, protein_g: 12, fix_text: nil,
+            items: [item("Greek yogurt, plain", 150, 120, 100, 140, 12, nil)], photos: [])
+        let collecting = FoodBaseline(ready: false, complete_days: 6, days_needed: 14, weigh_ins: 4, weigh_ins_needed: 8, status: "collecting")
+        let today = FoodStore.localFoodDay()
+        let meals: [FoodMeal]
+        let totals: FoodTotals
+        switch mode {
+        case "over":
+            meals = morning + [dinner, shake, yogurt]
+            totals = FoodTotals(kcal: 1990, kcal_lo: 1680, kcal_hi: 2340, protein_g: 152, estimated: 6, pending: 0)
+        default: // met, notarget
+            meals = morning + [dinner, shake]
+            totals = FoodTotals(kcal: 1870, kcal_lo: 1580, kcal_hi: 2200, protein_g: 140, estimated: 5, pending: 0)
+        }
+        return FoodDay(
+            date: today, today: today, meals: meals, totals: totals, complete: true,
+            targets: FoodTargets(protein_g: mode == "notarget" ? 0 : 140, kcal: nil),
+            baseline: collecting, weight: FoodWeight(kg: 75.0, at: at(7, 5), fat_pct: 20.0))
     }
 
     /// The energy-row states. Intake, burn and factor are made up but kept

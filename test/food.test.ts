@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'fs
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { Store } from '../src/store.js'
-import { FoodService, kcalText, outlierLimitKg } from '../src/food.js'
+import { FoodService, kcalText, outlierLimitKg, filedAsNotHis, mayNotBeHis } from '../src/food.js'
 import {
   addDays,
   computeBaseline,
@@ -18,6 +18,8 @@ import {
 import { DEFAULT_CONFIG } from '../src/types.js'
 import { hasPersonalMetadata, readPhotoFiles } from '../src/photos.js'
 import { makeJpeg } from './fixtures/images.js'
+import { fatPercent, SCALE_SOURCE } from '../src/scale.js'
+import { pctToFraction, type ScaleRaw } from '../src/scalecal.js'
 
 let dir: string
 beforeAll(() => {
@@ -502,17 +504,19 @@ describe('body.weighin (v0.18.1)', () => {
       setNow(local(2026, 11, d, 6))
       food.ingestBodySamples([{ uuid: `hk-mass-n${d}`, ts: iso(local(2026, 11, d, 5)), kind: 'mass', value: v, source: 'Xiaomi Home' }], [])
     }
-    // Nov 20: a friend steps on first (71.4), then him (82.6).
+    // Nov 20: a visitor steps on first (79.5: within the friend rule's 4 kg
+    // of his 7-day median, past this rule's limit), then him (82.6).
     setNow(local(2026, 11, 20, 6))
     const friend = local(2026, 11, 20, 5, 10), him = local(2026, 11, 20, 5, 20)
     food.ingestBodySamples(
       [
-        { uuid: 'hk-mass-friend', ts: iso(friend), kind: 'mass', value: 71.4, source: 'Xiaomi Home' },
+        { uuid: 'hk-mass-friend', ts: iso(friend), kind: 'mass', value: 79.5, source: 'Xiaomi Home' },
         { uuid: 'hk-fat-friend0', ts: iso(friend), kind: 'fat', value: 0.182, source: 'Xiaomi Home' },
       ],
       [],
     )
-    expect(wib(events.at(-1)!.content)).toBe('Weigh-in 05:10 WIB: 71.4 kg, 18.2% fat (Xiaomi Home). 11.4 kg off your last reading, likely someone else; excluded. Reply if it was you.')
+    expect(wib(events.at(-1)!.content)).toBe('Weigh-in 05:10 WIB: 79.5 kg, 18.2% fat (Xiaomi Home). 3.3 kg off your last reading, likely someone else; excluded. Reply if it was you.')
+    expect(book.bodyExcluded('hk-mass-friend')).toBe('possible other person')
     food.ingestBodySamples([{ uuid: 'hk-mass-him20', ts: iso(him), kind: 'mass', value: 82.6, source: 'Xiaomi Home' }], [])
     expect(book.bodyExcluded('hk-mass-him20')).toBeNull() // NOT a repeat: the friend never counted
     expect(events.at(-1)!.content).toContain('Previous: 82.8 kg')
@@ -526,7 +530,8 @@ describe('body.weighin (v0.18.1)', () => {
     const book = new MealBook(store.db)
     food.ingestBodySamples([{ uuid: 'hk-mass-a17', ts: iso(local(2026, 11, 17, 5)), kind: 'mass', value: 83.1, source: 'Xiaomi Home' }], [])
     setNow(local(2026, 11, 18, 6))
-    food.ingestBodySamples([{ uuid: 'hk-mass-a18', ts: iso(local(2026, 11, 18, 5)), kind: 'mass', value: 72.0, source: 'Xiaomi Home' }], [])
+    // 3.6 kg off: past the outlier limit, inside the friend rule's 4 kg.
+    food.ingestBodySamples([{ uuid: 'hk-mass-a18', ts: iso(local(2026, 11, 18, 5)), kind: 'mass', value: 79.5, source: 'Xiaomi Home' }], [])
     expect(book.bodyExcluded('hk-mass-a18')).toBeNull()
   })
 
@@ -609,10 +614,12 @@ describe('body.weighin review regressions (v0.18.1)', () => {
       food.ingestBodySamples([{ uuid: `hk-mass-s${d}`, ts: iso(local(2026, 11, d, 5)), kind: 'mass', value: v, source: 'Xiaomi Home' }], [])
     }
     setNow(local(2026, 11, 20, 6))
-    food.ingestBodySamples([{ uuid: 'hk-mass-s20', ts: iso(local(2026, 11, 20, 5)), kind: 'mass', value: 76.0, source: 'Xiaomi Home' }], [])
+    // Within 4 kg of his 7-day median (82.9): the outlier rule's case, not
+    // the friend rule's (more than 4 kg off is filed as someone else's).
+    food.ingestBodySamples([{ uuid: 'hk-mass-s20', ts: iso(local(2026, 11, 20, 5)), kind: 'mass', value: 79.2, source: 'Xiaomi Home' }], [])
     expect(book.bodyExcluded('hk-mass-s20')).toBe('possible other person')
     setNow(local(2026, 11, 21, 6))
-    food.ingestBodySamples([{ uuid: 'hk-mass-s21', ts: iso(local(2026, 11, 21, 5)), kind: 'mass', value: 75.8, source: 'Xiaomi Home' }], [])
+    food.ingestBodySamples([{ uuid: 'hk-mass-s21', ts: iso(local(2026, 11, 21, 5)), kind: 'mass', value: 79.1, source: 'Xiaomi Home' }], [])
     expect(book.bodyExcluded('hk-mass-s21')).toBeNull()
   })
 
@@ -626,5 +633,627 @@ describe('body.weighin review regressions (v0.18.1)', () => {
     setNow(local(2026, 11, 18, 6))
     food.ingestBodySamples([{ uuid: 'hk-mass-m18x', ts: iso(local(2026, 11, 18, 5)), kind: 'mass', value: 84.5, source: 'Xiaomi Home' }], [])
     expect(book.bodyExcluded('hk-mass-pm17x')).toBeNull()
+  })
+})
+
+describe('friend rule: not his (weight outlier)', () => {
+  // Every weight here is synthetic. A housemate on his S400 (no Visitor mode)
+  // is filed as someone else's when more than 4 kg off his 7-day median.
+  const iso = (ms: number) => new Date(ms).toISOString()
+  const X = 'Xiaomi Home'
+  const NOT_HIS = 'not his (weight outlier)'
+  const mass = (uuid: string, at: number, kg: number) => ({ uuid, ts: iso(at), kind: 'mass' as const, value: kg, source: X })
+  const withDate = (food: FoodService, from: string) => {
+    const cfg = { ...DEFAULT_CONFIG.food, weighins_from: from }
+    ;(food as unknown as { deps: { getConfig: () => typeof cfg } }).deps.getConfig = () => cfg
+  }
+
+  test('a friend 12 kg lighter is excluded (fat pair too), told in one line, and never pushes his reading out', () => {
+    const { food, events, store, setNow } = harness(local(2026, 11, 19, 6))
+    const book = new MealBook(store.db)
+    for (const [d, v] of [[17, 77.4], [18, 77.2]] as const) {
+      setNow(local(2026, 11, d, 6))
+      food.ingestBodySamples([mass(`hk-mass-f${d}`, local(2026, 11, d, 5), v)], [])
+    }
+    // Only 2 counted readings: the older outlier rule (3+) would let this in.
+    setNow(local(2026, 11, 19, 6))
+    const pal = local(2026, 11, 19, 5, 10), him = local(2026, 11, 19, 5, 25)
+    food.ingestBodySamples([mass('hk-mass-pal19', pal, 65.3), { uuid: 'hk-fat-pal1900', ts: iso(pal), kind: 'fat', value: 0.15, source: X }], [])
+    expect(book.bodyExcluded('hk-mass-pal19')).toBe(NOT_HIS)
+    expect(book.bodyExcluded('hk-fat-pal1900')).toBe(NOT_HIS)
+    const e = events.at(-1)!
+    expect(wib(e.content)).toBe("Weigh-in 05:10 WIB: 65.3 kg, 15.0% fat (Xiaomi Home). 65.3 kg is 11.9 kg off your recent weigh-ins, so it is filed as someone else's; reply if it was you.")
+    expect(e.meta.excluded).toBe(NOT_HIS)
+    expect(e.meta.avg7_kg).toBeUndefined()
+    expect(e.content).not.toContain('\u2014')
+    // His own reading after it counts (not a repeat) against HIS last one.
+    food.ingestBodySamples([mass('hk-mass-me19', him, 77.0)], [])
+    expect(book.bodyExcluded('hk-mass-me19')).toBeNull()
+    expect(events.at(-1)!.content).toContain('Previous: 77.2 kg')
+    expect(book.bodySamplesSince(iso(local(2026, 11, 10, 0))).map((r) => r.value)).toEqual([77.4, 77.2, 77.0])
+    expect(food.weighins(7).find((r) => r.measured_at === iso(pal))!.excluded).toBe(NOT_HIS)
+  })
+
+  test('his real 1.5 kg drop is kept', () => {
+    const { food, events, store, setNow } = harness(local(2026, 11, 20, 6))
+    const book = new MealBook(store.db)
+    for (const [d, v] of [[17, 78.0], [18, 78.2], [19, 77.9]] as const) {
+      setNow(local(2026, 11, d, 6))
+      food.ingestBodySamples([mass(`hk-mass-d${d}`, local(2026, 11, d, 5), v)], [])
+    }
+    setNow(local(2026, 11, 20, 6))
+    food.ingestBodySamples([mass('hk-mass-d20', local(2026, 11, 20, 5), 76.4)], [])
+    expect(book.bodyExcluded('hk-mass-d20')).toBeNull()
+    expect(events.at(-1)!.content).toContain('Previous: 77.9 kg')
+    expect(events.at(-1)!.content).toContain('(-1.5 kg)')
+  })
+
+  test('test-flagged readings are his reference on day one (and not-morning ones too)', () => {
+    const { food, events, store, setNow } = harness(local(2026, 11, 17, 6))
+    const book = new MealBook(store.db)
+    withDate(food, '2026-11-18')
+    // Nov 16-17: before the first fasted day, so his readings are TEST readings.
+    setNow(local(2026, 11, 16, 6))
+    food.ingestBodySamples([mass('hk-mass-t16', local(2026, 11, 16, 5), 77.0)], [])
+    setNow(local(2026, 11, 17, 6))
+    food.ingestBodySamples([mass('hk-mass-t17', local(2026, 11, 17, 5), 77.0)], [])
+    expect(book.bodyExcluded('hk-mass-t17')).toContain('test: ')
+    // A housemate the same morning: filed as not his, never "test".
+    food.ingestBodySamples([mass('hk-mass-pal17', local(2026, 11, 17, 5, 15), 64.0)], [])
+    expect(book.bodyExcluded('hk-mass-pal17')).toBe(NOT_HIS)
+    expect(events.at(-1)!.content).toContain("64.0 kg is 13.0 kg off your recent weigh-ins, so it is filed as someone else's")
+    // His evening reading (not morning) is his body: a reference too.
+    setNow(local(2026, 11, 18, 20))
+    food.ingestBodySamples([mass('hk-mass-pm18', local(2026, 11, 18, 19), 78.0)], [])
+    expect(book.bodyExcluded('hk-mass-pm18')).toBe('not a morning reading')
+    food.ingestBodySamples([mass('hk-mass-pal18', local(2026, 11, 18, 19, 30), 64.2)], [])
+    expect(book.bodyExcluded('hk-mass-pal18')).toBe(NOT_HIS)
+    // Nov 19: his first fasted reading counts (the friend never did).
+    setNow(local(2026, 11, 19, 6))
+    food.ingestBodySamples([mass('hk-mass-m19', local(2026, 11, 19, 5), 76.9)], [])
+    expect(book.bodyExcluded('hk-mass-m19')).toBeNull()
+  })
+
+  test('a manual include always wins (and survives the next pass)', () => {
+    const { food, store, setNow } = harness(local(2026, 11, 18, 6))
+    const book = new MealBook(store.db)
+    setNow(local(2026, 11, 16, 6))
+    food.ingestBodySamples([mass('hk-mass-i16', local(2026, 11, 16, 5), 77.2)], [])
+    setNow(local(2026, 11, 17, 6))
+    food.ingestBodySamples([mass('hk-mass-i17', local(2026, 11, 17, 5), 77.0)], [])
+    setNow(local(2026, 11, 18, 6))
+    food.ingestBodySamples([mass('hk-mass-i18', local(2026, 11, 18, 5), 71.0)], [])
+    expect(book.bodyExcluded('hk-mass-i18')).toBe(NOT_HIS)
+    food.setWeighin({ uuid: 'hk-mass-i18', include: true })
+    expect(book.bodyExcluded('hk-mass-i18')).toBeNull()
+    setNow(local(2026, 11, 19, 6))
+    food.ingestBodySamples([mass('hk-mass-i19', local(2026, 11, 19, 5), 76.8)], [])
+    expect(book.bodyExcluded('hk-mass-i18')).toBeNull()
+    // A hand exclusion with the rule's own words is a hand verdict, never lifted.
+    food.setWeighin({ uuid: 'hk-mass-i18', include: false, reason: NOT_HIS })
+    expect(book.bodyExcluded('hk-mass-i18')).toBe(`${NOT_HIS} (by hand)`)
+    food.ingestBodySamples([mass('hk-mass-i19b', local(2026, 11, 19, 5, 30), 76.7)], [])
+    expect(book.bodyExcluded('hk-mass-i18')).toBe(`${NOT_HIS} (by hand)`)
+  })
+
+  test('a reference that changes re-decides: late reference files it, a deleted one lifts it back to its timing verdict', () => {
+    const { food, store, setNow } = harness(local(2026, 11, 18, 20))
+    const book = new MealBook(store.db)
+    // An evening reading with no reference at all: nothing to decide.
+    food.ingestBodySamples([mass('hk-mass-r18', local(2026, 11, 18, 19), 64.0)], [])
+    expect(book.bodyExcluded('hk-mass-r18')).toBe('not a morning reading')
+    // One earlier reading of his syncs late: one is no reference yet.
+    food.ingestBodySamples([mass('hk-mass-r17', local(2026, 11, 17, 5), 78.0)], [])
+    expect(book.bodyExcluded('hk-mass-r17')).toBeNull()
+    expect(book.bodyExcluded('hk-mass-r18')).toBe('not a morning reading')
+    // A second one: now the evening one is not his.
+    food.ingestBodySamples([mass('hk-mass-r15', local(2026, 11, 15, 5), 78.2)], [])
+    expect(book.bodyExcluded('hk-mass-r18')).toBe(NOT_HIS)
+    // A reference is deleted in Apple Health: lifted, the window rule again.
+    setNow(local(2026, 11, 18, 21))
+    food.ingestBodySamples([], ['hk-mass-r17'])
+    expect(book.bodyExcluded('hk-mass-r18')).toBe('not a morning reading')
+    // A reference hand-excluded as someone else's is no reference either.
+    food.ingestBodySamples([mass('hk-mass-r16', local(2026, 11, 16, 5), 78.0)], [])
+    expect(book.bodyExcluded('hk-mass-r18')).toBe(NOT_HIS)
+    food.setWeighin({ uuid: 'hk-mass-r16', include: false, reason: 'my housemate, not me' })
+    expect(book.bodyExcluded('hk-mass-r16')).toBe('my housemate, not me')
+    expect(book.bodyExcluded('hk-mass-r18')).toBe('not a morning reading')
+  })
+
+  test('after a trip the first reading back is judged against his last ones, and his own readings after it count', () => {
+    const { food, store, setNow } = harness(local(2026, 11, 3, 6))
+    const book = new MealBook(store.db)
+    for (const [d, v] of [[1, 77.4], [2, 77.1], [3, 77.3]] as const) {
+      setNow(local(2026, 11, d, 6))
+      food.ingestBodySamples([mass(`hk-mass-g${d}`, local(2026, 11, d, 5), v)], [])
+    }
+    // Nine days away, then a housemate steps on first.
+    setNow(local(2026, 11, 12, 6))
+    food.ingestBodySamples([mass('hk-mass-pal12', local(2026, 11, 12, 5), 64.5)], [])
+    expect(book.bodyExcluded('hk-mass-pal12')).toBe(NOT_HIS)
+    // His three mornings back count (judged against his, never the housemate).
+    for (const [d, v] of [[13, 77.8], [14, 77.6], [15, 77.5]] as const) {
+      setNow(local(2026, 11, d, 6))
+      food.ingestBodySamples([mass(`hk-mass-b${d}`, local(2026, 11, d, 5), v)], [])
+      expect(book.bodyExcluded(`hk-mass-b${d}`)).toBeNull()
+    }
+    expect(book.bodyExcluded('hk-mass-pal12')).toBe(NOT_HIS)
+  })
+
+  test('with nothing before it, a housemate is filed once his own readings follow', () => {
+    const { food, store, setNow } = harness(local(2026, 11, 10, 6))
+    const book = new MealBook(store.db)
+    food.ingestBodySamples([mass('hk-mass-pal10', local(2026, 11, 10, 5), 63.0)], [])
+    expect(book.bodyExcluded('hk-mass-pal10')).toBeNull() // nothing to judge it against yet
+    for (const [d, v] of [[11, 77.0], [12, 77.2]] as const) {
+      setNow(local(2026, 11, d, 6))
+      food.ingestBodySamples([mass(`hk-mass-n${d}`, local(2026, 11, d, 5), v)], [])
+    }
+    expect(book.bodyExcluded('hk-mass-pal10')).toBe(NOT_HIS)
+    expect(book.bodyExcluded('hk-mass-n11')).toBeNull()
+    expect(book.bodyExcluded('hk-mass-n12')).toBeNull()
+  })
+
+  test('excluding a not-his weigh-in with no reason keeps it not his', () => {
+    const { food, store, setNow } = harness(local(2026, 11, 18, 6))
+    const book = new MealBook(store.db)
+    for (const [d, v] of [[16, 77.2], [17, 77.0]] as const) {
+      setNow(local(2026, 11, d, 6))
+      food.ingestBodySamples([mass(`hk-mass-x${d}`, local(2026, 11, d, 5), v)], [])
+    }
+    setNow(local(2026, 11, 18, 6))
+    food.ingestBodySamples([mass('hk-mass-pal18', local(2026, 11, 18, 5), 64.0)], [])
+    expect(book.bodyExcluded('hk-mass-pal18')).toBe(NOT_HIS)
+    const r = food.setWeighin({ uuid: 'hk-mass-pal18', include: false })
+    expect(r.weighin!.excluded).toBe(`${NOT_HIS} (by hand)`)
+    expect(filedAsNotHis(book.bodyExcluded('hk-mass-pal18'))).toBe(true)
+    // A plain hand exclusion on HIS reading stays the plain default.
+    expect(food.setWeighin({ uuid: 'hk-mass-x17', include: false }).weighin!.excluded).toBe('excluded by hand')
+  })
+
+  test('only a reason that SAYS it is someone else files it as not his', () => {
+    for (const yes of ['not me', 'not mine.', 'my housemate, not me', "friend's reading", 'a guest weighed', 'someone else', 'housemate', 'not his (by hand)'])
+      expect(filedAsNotHis(yes)).toBe(true)
+    for (const no of ["after dinner at a friend's", 'guest bathroom scale', 'not me being honest, ate late', 'visitor parking, rushed', 'excluded by hand', null])
+      expect(filedAsNotHis(no)).toBe(false)
+    expect(mayNotBeHis('possible other person (by hand)')).toBe(true)
+    expect(filedAsNotHis('possible other person')).toBe(false)
+  })
+})
+
+describe('friend rule: the anchor (review fixes)', () => {
+  // Every weight, profile and date here is synthetic.
+  const iso = (ms: number) => new Date(ms).toISOString()
+  const X = 'Xiaomi Home'
+  const NOT_HIS = 'not his (weight outlier)'
+  const mass = (uuid: string, at: number, kg: number) => ({ uuid, ts: iso(at), kind: 'mass' as const, value: kg, source: X })
+  const DAY = 86_400_000
+
+  /** Body rows exactly as an older daemon stored them: no verdict at all. */
+  const stored = (store: Store, uuid: string, at: number, kg: number) =>
+    store.db.run("INSERT INTO body_samples (uuid, ts, kind, value, source, received_at) VALUES (?, ?, 'mass', ?, ?, ?)", [uuid, iso(at), kg, X, iso(at)])
+
+  test('a split history files only the housemate (never the midpoint of the two)', () => {
+    const { food, store, setNow } = harness(local(2026, 10, 31, 6))
+    const book = new MealBook(store.db)
+    for (const [d, v] of [[28, 70.0], [29, 70.2], [30, 69.9], [31, 70.1]] as const) {
+      setNow(local(2026, 10, d, 6))
+      food.ingestBodySamples([mass(`hk-mass-h${d}`, local(2026, 10, d, 5), v)], [])
+    }
+    // Nov 1-3 synced by an older daemon, unfiled: him and a housemate 15 kg
+    // apart, in both orders within a morning.
+    stored(store, 'hk-mass-pal01', local(2026, 11, 1, 5, 0), 85.0)
+    stored(store, 'hk-mass-him01', local(2026, 11, 1, 5, 20), 70.0)
+    stored(store, 'hk-mass-him02', local(2026, 11, 2, 5, 0), 70.1)
+    stored(store, 'hk-mass-pal02', local(2026, 11, 2, 5, 30), 85.2)
+    stored(store, 'hk-mass-him03', local(2026, 11, 3, 5, 0), 69.8)
+    stored(store, 'hk-mass-pal03', local(2026, 11, 3, 5, 30), 84.9)
+    setNow(local(2026, 11, 3, 12))
+    food.reclassifyWeighins()
+    const check = () => {
+      for (const d of ['01', '02', '03']) {
+        expect(book.bodyExcluded(`hk-mass-pal${d}`)).toBe(NOT_HIS)
+        expect(book.bodyExcluded(`hk-mass-him${d}`)).toBeNull()
+      }
+    }
+    check()
+    // The next mornings through the ingest path: same split, same verdicts.
+    for (const d of [4, 5]) {
+      setNow(local(2026, 11, d, 6))
+      food.ingestBodySamples([mass(`hk-mass-pal0${d}`, local(2026, 11, d, 5, 0), 85.1)], [])
+      food.ingestBodySamples([mass(`hk-mass-him0${d}`, local(2026, 11, d, 5, 15), 70.0)], [])
+      expect(book.bodyExcluded(`hk-mass-pal0${d}`)).toBe(NOT_HIS)
+      expect(book.bodyExcluded(`hk-mass-him0${d}`)).toBeNull()
+    }
+    check()
+    expect(book.bodySamplesSince(iso(local(2026, 11, 1, 0))).map((r) => r.value)).toEqual([70.0, 70.1, 69.8, 70.0, 70.0])
+  })
+
+  test('a genuine 5 kg drop is filed until he counts one by hand; then the readings near the new weight count', () => {
+    const { food, events, store, setNow } = harness(local(2026, 11, 10, 6))
+    const book = new MealBook(store.db)
+    for (const [d, v] of [[10, 80.0], [11, 79.8], [12, 80.1]] as const) {
+      setNow(local(2026, 11, d, 6))
+      food.ingestBodySamples([mass(`hk-mass-g${d}`, local(2026, 11, d, 5), v)], [])
+    }
+    for (const [d, v] of [[13, 75.0], [14, 74.9], [15, 75.1]] as const) {
+      setNow(local(2026, 11, d, 6))
+      food.ingestBodySamples([mass(`hk-mass-g${d}`, local(2026, 11, d, 5), v)], [])
+      expect(book.bodyExcluded(`hk-mass-g${d}`)).toBe(NOT_HIS)
+      expect(events.at(-1)!.content).toContain("so it is filed as someone else's; reply if it was you.")
+    }
+    // He says the Nov 13 one was him: it anchors, and the pass re-decides
+    // the readings after it.
+    food.setWeighin({ uuid: 'hk-mass-g13', include: true })
+    for (const d of [13, 14, 15]) expect(book.bodyExcluded(`hk-mass-g${d}`)).toBeNull()
+    setNow(local(2026, 11, 16, 6))
+    food.ingestBodySamples([mass('hk-mass-g16', local(2026, 11, 16, 5), 74.8)], [])
+    expect(book.bodyExcluded('hk-mass-g16')).toBeNull()
+    expect(events.at(-1)!.content).toContain('Previous: 75.1 kg')
+    // A housemate near his OLD weight is now the one filed.
+    food.ingestBodySamples([mass('hk-mass-pal16', local(2026, 11, 16, 5, 30), 80.0)], [])
+    expect(book.bodyExcluded('hk-mass-pal16')).toBe(NOT_HIS)
+    expect(book.bodyExcluded('hk-mass-g12')).toBeNull()
+  })
+
+  test('the 400-day edge: an old not-his verdict is never lifted, counted as moved, or used as his anchor', () => {
+    const now0 = local(2025, 10, 20, 6)
+    const { food, store, setNow } = harness(now0)
+    const book = new MealBook(store.db)
+    const pal14 = local(2025, 10, 14, 5, 30)
+    food.ingestBodySamples(
+      [
+        mass('hk-mass-o10', local(2025, 10, 10, 5), 77.0),
+        mass('hk-mass-o12', local(2025, 10, 12, 5), 77.1),
+        mass('hk-mass-opal14', pal14, 63.0),
+        mass('hk-mass-opal19', local(2025, 10, 19, 5, 30), 63.4),
+      ],
+      [],
+    )
+    expect(book.bodyExcluded('hk-mass-opal14')).toBe(NOT_HIS)
+    expect(book.bodyExcluded('hk-mass-opal19')).toBe(NOT_HIS)
+    // Nov 2026: the Oct 14 reading is a day past the walk window; Oct 19 is
+    // still in it, and its only reading within 4 kg is the old housemate one.
+    setNow(pal14 + 401 * DAY)
+    expect(food.reclassifyWeighins()).toBe(false)
+    expect(book.bodyExcluded('hk-mass-opal14')).toBe(NOT_HIS)
+    expect(book.bodyExcluded('hk-mass-opal19')).toBe(NOT_HIS)
+  })
+
+  test('a hand reason that only starts with "not his" is a plain exclusion: visible and pairable', () => {
+    const h = s400Harness()
+    for (let i = 0; i < 3; i++) {
+      const at = local(2026, 11, 10 + i, 6, 5)
+      h.s400(`s400-w${i}`, at, 76.0 + i / 10, 480 + i)
+      h.xiaomi(`w${i}`, at, 76.0 + i / 10, 21.0 + i / 10)
+    }
+    const late = iso(local(2026, 11, 12, 6, 5))
+    const r = h.food.setWeighin({ uuid: 's400-w2-m', include: false, reason: 'not his usual wake time' })
+    expect(r.weighin!.excluded).toBe('not his usual wake time')
+    expect(filedAsNotHis('not his usual wake time')).toBe(false)
+    expect(mayNotBeHis('not his usual wake time')).toBe(false)
+    expect(h.food.weighins(7).find((w) => w.uuids.includes('s400-w2-m'))!.kg).toBe(76.2)
+    expect(h.food.scaleCalibration().pairs.map((p) => p.measured_at)).toContain(late)
+    // The anchored forms still file: the rule's own verdict and a reason that SAYS so.
+    expect(filedAsNotHis(NOT_HIS)).toBe(true)
+    expect(filedAsNotHis(`${NOT_HIS} (by hand)`)).toBe(true)
+    expect(filedAsNotHis('not his.')).toBe(true)
+  })
+
+  test('boot order: the rules run before the calibration, so a housemate never keeps a pair', () => {
+    const h = s400Harness()
+    for (let i = 0; i < 3; i++) {
+      const at = local(2026, 11, 10 + i, 6, 5)
+      h.s400(`s400-w${i}`, at, 76.0 + i / 10, 480 + i)
+      h.xiaomi(`w${i}`, at, 76.0 + i / 10, 21.0 + i / 10)
+    }
+    const pal = local(2026, 11, 12, 7, 30)
+    h.s400('s400-pal', pal, 58.0, 520)
+    h.xiaomi('pal', pal, 58.0, 17.0)
+    // The store as an older daemon left it: no verdicts, and the boot-time
+    // calibration it ran paired the housemate.
+    h.store.db.run('UPDATE body_samples SET excluded = NULL')
+    h.food.recalibrateScale()
+    expect(h.food.scaleCalibration().pairs.map((p) => p.measured_at)).toContain(iso(pal))
+    // The daemon's boot: settleWeighins (friend rule, calibration, timing rules).
+    h.food.settleWeighins()
+    expect(h.store.db.query("SELECT excluded FROM body_samples WHERE uuid = 's400-pal-m'").get()).toEqual({ excluded: NOT_HIS })
+    const pairs = h.food.scaleCalibration().pairs.map((p) => p.measured_at)
+    expect(pairs).not.toContain(iso(pal))
+    expect(pairs).toHaveLength(3)
+  })
+
+  test('the friend walk runs once per ingest and never on a meal write (the meal rules still do)', async () => {
+    const { food, store, setNow } = harness(local(2026, 11, 17, 6))
+    const book = new MealBook(store.db)
+    const f = food as unknown as { classifyNotHis: () => boolean }
+    const walk = f.classifyNotHis.bind(food)
+    let walks = 0
+    f.classifyNotHis = () => {
+      walks++
+      return walk()
+    }
+    for (const [d, v] of [[15, 77.0], [16, 77.1], [17, 76.9]] as const) {
+      setNow(local(2026, 11, d, 6))
+      food.ingestBodySamples([mass(`hk-mass-k${d}`, local(2026, 11, d, 5, 30), v)], [])
+    }
+    expect(walks).toBe(3)
+    await food.logFromChat({ items: [{ name: 'toast', kcal: 200, protein_g: 6 }], at: iso(local(2026, 11, 17, 5)) })
+    expect(book.bodyExcluded('hk-mass-k17')).toBe('after a meal')
+    expect(walks).toBe(3)
+  })
+})
+
+describe('friend rule: hand verdicts cover every source (final review)', () => {
+  // Every weight, profile and date here is synthetic.
+  const iso = (ms: number) => new Date(ms).toISOString()
+  const verdicts = (h: ReturnType<typeof s400Harness>, stems: string[]) =>
+    stems.map((u) => (h.store.db.query('SELECT excluded FROM body_samples WHERE uuid = ?').get(u) as { excluded: string | null }).excluded)
+  const his = (h: ReturnType<typeof s400Harness>) => {
+    for (let i = 0; i < 3; i++) {
+      const at = local(2026, 11, 10 + i, 6, 5)
+      h.s400(`s400-w${i}`, at, 76.0 + i / 10, 480 + i)
+      h.xiaomi(`w${i}`, at, 76.0 + i / 10, 21.0 + i / 10)
+    }
+  }
+
+  test('"my housemate" on one source\'s copy files every copy of that weigh-in, which never anchors', () => {
+    const h = s400Harness()
+    const book = new MealBook(h.store.db)
+    his(h)
+    // A housemate within 4 kg of him: the friend rule keeps it, one copy counts.
+    const pal = local(2026, 11, 13, 6, 5)
+    h.s400('s400-pal', pal, 74.0, 520)
+    h.xiaomi('pal', pal, 74.0, 17.0)
+    expect(verdicts(h, ['s400-pal-m', 'xiaomi-pal-m'])).toEqual([null, 'same weigh-in, other source'])
+    // He says so on the S400 copy: the Xiaomi copy takes the same verdict
+    // (fat samples too) instead of counting in its place.
+    const r = h.food.setWeighin({ uuid: 's400-pal-m', include: false, reason: 'my housemate' })
+    expect(r.weighin!.excluded).toBe('my housemate')
+    expect(verdicts(h, ['s400-pal-m', 's400-pal-f', 'xiaomi-pal-m', 'xiaomi-pal-f'])).toEqual(Array(4).fill('my housemate'))
+    expect(book.bodySamplesSince(iso(local(2026, 11, 13, 0))).map((x) => x.value)).toEqual([])
+    // Never his anchor: 2.1 kg over his own last reading counts, where the
+    // housemate's copy as anchor (4.3 kg off) would file it.
+    const next = local(2026, 11, 14, 6, 5)
+    h.s400('s400-n', next, 78.3, 470)
+    h.xiaomi('n', next, 78.3, 22.0)
+    expect(verdicts(h, ['s400-n-m', 'xiaomi-n-m', 'xiaomi-pal-m'])).toEqual([null, 'same weigh-in, other source', 'my housemate'])
+    // "It was me after all": the include lifts the other copy's hand verdict
+    // too, and the weigh-in counts once.
+    h.food.setWeighin({ measured_at: iso(pal), include: true })
+    expect(verdicts(h, ['s400-pal-m', 'xiaomi-pal-m', 'xiaomi-pal-f'])).toEqual([null, 'same weigh-in, other source', 'same weigh-in, other source'])
+  })
+
+  test('a copy that syncs after his verdict takes it; a plain hand reason stays on its own copy', () => {
+    const h = s400Harness()
+    his(h)
+    const pal = local(2026, 11, 13, 6, 5)
+    h.s400('s400-pal', pal, 74.0, 520)
+    h.food.setWeighin({ measured_at: iso(pal), include: false, reason: 'not me' })
+    h.xiaomi('pal', pal, 74.0, 17.0) // Xiaomi Home syncs it later
+    expect(verdicts(h, ['s400-pal-m', 'xiaomi-pal-m', 'xiaomi-pal-f'])).toEqual(['not me', 'not me', 'not me'])
+    expect(mayNotBeHis('not me')).toBe(true)
+    // A reason that does not say someone else's covers only the copy it names.
+    const late = local(2026, 11, 12, 6, 5)
+    h.food.setWeighin({ uuid: 's400-w2-m', include: false, reason: 'scale on the rug' })
+    expect(verdicts(h, ['s400-w2-m', 'xiaomi-w2-m'])).toEqual(['scale on the rug', null])
+    expect(h.food.weighins(7).find((w) => w.measured_at === iso(late) && w.source === 'Xiaomi Home')!.excluded).toBeNull()
+  })
+
+  test('body.weighin never carries the S400 composition line for a possible other person', () => {
+    const h = s400Harness(local(2026, 11, 12, 8))
+    his(h)
+    const own = h.events.filter((e) => e.cls === 'body.weighin' && e.key === `body.weighin:${SCALE_SOURCE}:${iso(local(2026, 11, 12, 6, 5))}`)
+    expect(own).toHaveLength(1)
+    expect(own[0].content).toContain('\nVisceral')
+    expect(own[0].meta.visceral).toBeDefined()
+    // A visitor 3.2 kg off his reading the same morning: within 4 kg, so the
+    // friend rule keeps it, and the outlier rule files it.
+    const visitor = local(2026, 11, 12, 7, 30)
+    h.s400('s400-vis', visitor, 73.0, 530)
+    expect(verdicts(h, ['s400-vis-m'])).toEqual(['possible other person'])
+    const e = h.events.at(-1)!
+    expect(e.key).toBe(`body.weighin:${SCALE_SOURCE}:${iso(visitor)}`)
+    expect(e.content).toContain('likely someone else')
+    expect(e.content).not.toContain('\n')
+    expect(e.meta.visceral).toBeUndefined()
+    expect(e.meta.muscle_kg).toBeUndefined()
+  })
+})
+
+describe('S400 re-measure: one step-on measured twice (final review)', () => {
+  // Every weight, profile and date here is synthetic.
+  const iso = (ms: number) => new Date(ms).toISOString()
+  const verdict = (h: ReturnType<typeof s400Harness>, u: string) =>
+    (h.store.db.query('SELECT excluded FROM body_samples WHERE uuid = ?').get(u) as { excluded: string | null }).excluded
+  /** A mass-only S400 reading (no 50 kHz impedance, so no fat). */
+  const bare = (h: ReturnType<typeof s400Harness>, stem: string, at: number, kg: number) =>
+    h.food.ingestBodySamples(
+      [{ uuid: `${stem}-m`, ts: iso(at), kind: 'mass', value: kg, source: SCALE_SOURCE }],
+      [],
+      { uuid: stem, measured_at: iso(at), kg, impedance_low: null, impedance_high: null, hr: null, scale_ts: Math.floor(at / 1000), fat_raw_pct: null },
+    )
+  const announced = (h: ReturnType<typeof s400Harness>) => h.events.filter((e) => e.cls === 'body.weighin').map((e) => e.meta.measured_at)
+  const t0 = local(2026, 11, 14, 6, 5)
+
+  test('two mass-only readings 10 s apart at the same kg: one weigh-in, announced once; 90 s or 0.5 kg apart stay separate', () => {
+    const h = s400Harness(local(2026, 11, 14, 8))
+    bare(h, 's400-a', t0, 70.5)
+    bare(h, 's400-b', t0 + 10_000, 70.5)
+    expect(verdict(h, 's400-a-m')).toBeNull()
+    expect(verdict(h, 's400-b-m')).toBe('same weigh-in, re-measured')
+    expect(announced(h)).toEqual([iso(t0)])
+    expect(h.food.weighins(2).filter((w) => w.excluded == null)).toHaveLength(1)
+    // Past the 60 s window, or past 0.2 kg: another weigh-in (a repeat).
+    bare(h, 's400-c', t0 + 90_000, 70.5)
+    bare(h, 's400-d', t0 + 100_000 + 30_000, 71.1)
+    expect(verdict(h, 's400-c-m')).toBe('repeat: a morning reading already counts today')
+    expect(verdict(h, 's400-d-m')).toBe('repeat: a morning reading already counts today')
+    // Re-decided like the other timing verdicts: excluding the first by hand
+    // lets the re-measure count in its place.
+    h.food.setWeighin({ uuid: 's400-a-m', include: false, reason: 'scale on the rug' })
+    expect(verdict(h, 's400-b-m')).toBeNull()
+  })
+
+  test('the more complete take counts (fat + impedance) even when it comes second; still one announcement', () => {
+    const h = s400Harness(local(2026, 11, 14, 8))
+    bare(h, 's400-a', t0, 70.5)
+    expect(announced(h)).toEqual([iso(t0)])
+    h.s400('s400-b', t0 + 10_000, 70.6, 500)
+    expect(verdict(h, 's400-a-m')).toBe('same weigh-in, re-measured')
+    expect(verdict(h, 's400-b-m')).toBeNull()
+    expect(verdict(h, 's400-b-f')).toBeNull()
+    expect(announced(h)).toEqual([iso(t0)])
+    const counted = h.food.weighins(2).filter((w) => w.excluded == null)
+    expect(counted.map((w) => w.measured_at)).toEqual([iso(t0 + 10_000)])
+    expect(counted[0].fat_pct).not.toBeNull()
+  })
+
+  test('both takes in one batch: only the counted one is announced', () => {
+    const h = s400Harness(local(2026, 11, 14, 8))
+    const PROFILE_FAT = 20 // raw % for the batch below (synthetic)
+    h.food.ingestBodySamples(
+      [
+        { uuid: 's400-a-m', ts: iso(t0), kind: 'mass', value: 70.5, source: SCALE_SOURCE },
+        { uuid: 's400-b-m', ts: iso(t0 + 10_000), kind: 'mass', value: 70.5, source: SCALE_SOURCE },
+        { uuid: 's400-b-f', ts: iso(t0 + 10_000), kind: 'fat', value: PROFILE_FAT / 100, source: SCALE_SOURCE },
+      ],
+      [],
+      [
+        { uuid: 's400-a', measured_at: iso(t0), kg: 70.5, impedance_low: null, impedance_high: null, hr: null, scale_ts: null, fat_raw_pct: null },
+        { uuid: 's400-b', measured_at: iso(t0 + 10_000), kg: 70.5, impedance_low: 500, impedance_high: 460, hr: null, scale_ts: null, fat_raw_pct: PROFILE_FAT },
+      ],
+    )
+    expect(verdict(h, 's400-a-m')).toBe('same weigh-in, re-measured')
+    expect(verdict(h, 's400-b-m')).toBeNull()
+    expect(announced(h)).toEqual([iso(t0 + 10_000)])
+  })
+})
+
+/** S400 + Xiaomi Home ingest helpers (synthetic profile). */
+function s400Harness(nowMs = local(2026, 11, 16, 12)) {
+  const PROFILE = { height_cm: 168, birth_date: '1990-04-11', sex: 'male' as const } // made up
+  const store = new Store(':memory:')
+  const meta = new Map<string, string>()
+  const events: Array<{ cls: string; key: string; content: string; meta: Record<string, string> }> = []
+  const food = new FoodService({
+    db: store.db,
+    photosDir: join(dir, `meals-${Math.random().toString(36).slice(2)}`),
+    getConfig: () => DEFAULT_CONFIG.food,
+    getMeta: (k) => meta.get(k) ?? null,
+    setMeta: (k, v) => void meta.set(k, v),
+    emit: (cls, key, p) => {
+      events.push({ cls, key, ...p })
+      return true
+    },
+    broadcast: () => {},
+    getScaleProfile: () => PROFILE,
+    now: () => nowMs,
+  })
+  const iso = (ms: number) => new Date(ms).toISOString()
+  const s400 = (stem: string, at: number, kg: number, imp: number) => {
+    const ts = iso(at)
+    const fat = fatPercent(kg, PROFILE.height_cm, 36, 'male', imp)!
+    const raw: ScaleRaw = { uuid: stem, measured_at: ts, kg, impedance_low: imp, impedance_high: imp - 40, hr: 62, scale_ts: Math.floor(at / 1000), fat_raw_pct: fat }
+    food.ingestBodySamples(
+      [
+        { uuid: `${stem}-m`, ts, kind: 'mass', value: kg, source: SCALE_SOURCE },
+        { uuid: `${stem}-f`, ts, kind: 'fat', value: pctToFraction(fat), source: SCALE_SOURCE },
+      ],
+      [],
+      raw,
+    )
+  }
+  const xiaomi = (id: string, at: number, kg: number, fatPct: number) =>
+    food.ingestBodySamples(
+      [
+        { uuid: `xiaomi-${id}-m`, ts: iso(at), kind: 'mass', value: kg, source: 'Xiaomi Home' },
+        { uuid: `xiaomi-${id}-f`, ts: iso(at), kind: 'fat', value: fatPct / 100, source: 'Xiaomi Home' },
+      ],
+      [],
+    )
+  return { food, store, s400, xiaomi, events }
+}
+
+describe('seal v0.20.0 review regressions', () => {
+  // Every weight, profile and date here is synthetic.
+  const iso = (ms: number) => new Date(ms).toISOString()
+  const X = 'Xiaomi Home'
+  const NOT_HIS = 'not his (weight outlier)'
+  const REPEAT = 'repeat: a morning reading already counts today'
+  const mass = (uuid: string, at: number, kg: number) => ({ uuid, ts: iso(at), kind: 'mass' as const, value: kg, source: X })
+  const verdict = (store: Store, u: string) =>
+    (store.db.query('SELECT excluded FROM body_samples WHERE uuid = ?').get(u) as { excluded: string | null }).excluded
+  const bare = (h: ReturnType<typeof s400Harness>, stem: string, at: number, kg: number) =>
+    h.food.ingestBodySamples(
+      [{ uuid: `${stem}-m`, ts: iso(at), kind: 'mass', value: kg, source: SCALE_SOURCE }],
+      [],
+      { uuid: stem, measured_at: iso(at), kg, impedance_low: null, impedance_high: null, hr: null, scale_ts: Math.floor(at / 1000), fat_raw_pct: null },
+    )
+
+  test('the friend rule filing a housemate re-decides his repeat on that day', () => {
+    const { food, store, setNow } = harness(local(2026, 11, 10, 6))
+    // A housemate first (nothing before it: a weak anchor that counts), then him.
+    food.ingestBodySamples([mass('hk-mass-pal10', local(2026, 11, 10, 5), 61.5)], [])
+    food.ingestBodySamples([mass('hk-mass-me10', local(2026, 11, 10, 5, 30), 74.6)], [])
+    expect(verdict(store, 'hk-mass-pal10')).toBeNull()
+    expect(verdict(store, 'hk-mass-me10')).toBe(REPEAT)
+    // His next morning lets the lookahead file the housemate's reading.
+    setNow(local(2026, 11, 11, 6))
+    food.ingestBodySamples([mass('hk-mass-me11', local(2026, 11, 11, 5), 74.8)], [])
+    expect(verdict(store, 'hk-mass-pal10')).toBe(NOT_HIS)
+    // His own reading that morning now counts (no longer a repeat of hers).
+    expect(verdict(store, 'hk-mass-me10')).toBeNull()
+    expect(verdict(store, 'hk-mass-me11')).toBeNull()
+  })
+
+  test('day.body shows the counted take of a re-measured step-on, never the losing one', () => {
+    const t0 = local(2026, 11, 12, 6, 5)
+    const h = s400Harness(local(2026, 11, 12, 8))
+    h.s400('s400-full', t0, 70.5, 500)
+    bare(h, 's400-thin', t0 + 30_000, 70.5)
+    expect(verdict(h.store, 's400-full-m')).toBeNull()
+    expect(verdict(h.store, 's400-thin-m')).toBe('same weigh-in, re-measured')
+    expect(h.food.dayBody()?.measured_at).toBe(iso(t0))
+  })
+
+  test('a re-measure rival the same pass excludes never takes the step-on with it', () => {
+    const h = s400Harness(local(2026, 11, 12, 10))
+    const t1 = local(2026, 11, 12, 8, 59) + 40_000 // 08:59:40
+    const t2 = t1 + 40_000 // 09:00:20: past the morning window
+    bare(h, 's400-one', t1, 70.5)
+    expect(verdict(h.store, 's400-one-m')).toBeNull()
+    h.s400('s400-two', t2, 70.6, 500)
+    expect(verdict(h.store, 's400-two-m')).toBe('not a morning reading')
+    expect(verdict(h.store, 's400-one-m')).toBeNull()
+  })
+
+  test('a hand reason worded like an automatic verdict stays a hand verdict', () => {
+    const { food, store, setNow } = harness(local(2026, 11, 12, 6))
+    for (const [d, v] of [[10, 74.6], [11, 74.8]] as const) {
+      setNow(local(2026, 11, d, 6))
+      food.ingestBodySamples([mass(`hk-mass-d${d}`, local(2026, 11, d, 5), v)], [])
+    }
+    setNow(local(2026, 11, 12, 6))
+    food.ingestBodySamples([mass('hk-mass-off12', local(2026, 11, 12, 5), 69.5)], [])
+    food.ingestBodySamples([mass('hk-mass-me12', local(2026, 11, 12, 5, 30), 74.7)], [])
+    expect(verdict(store, 'hk-mass-off12')).toBe(NOT_HIS)
+    expect(verdict(store, 'hk-mass-me12')).toBeNull()
+    // His words, exactly the window rule's: never a friend-rule candidate.
+    food.setWeighin({ uuid: 'hk-mass-off12', include: false, reason: 'not a morning reading' })
+    expect(verdict(store, 'hk-mass-off12')).toBe('not a morning reading (by hand)')
+    // The repeat rule's words by hand survive the friend rule moving that day.
+    food.setWeighin({ uuid: 'hk-mass-me12', include: false, reason: REPEAT })
+    expect(verdict(store, 'hk-mass-me12')).toBe(`${REPEAT} (by hand)`)
+    food.setWeighin({ uuid: 'hk-mass-d11', include: false, reason: NOT_HIS })
+    food.setWeighin({ uuid: 'hk-mass-d11', include: true })
+    expect(verdict(store, 'hk-mass-me12')).toBe(`${REPEAT} (by hand)`)
+    expect(verdict(store, 'hk-mass-off12')).toBe('not a morning reading (by hand)')
+    // The date rule's words by hand survive a weighins_from change.
+    food.setWeighin({ uuid: 'hk-mass-d10', include: false, reason: 'test: before the first fasted weigh-in' })
+    expect(verdict(store, 'hk-mass-d10')).toBe('test: before the first fasted weigh-in (by hand)')
+    food.reclassifyWeighins({ dateRuleChanged: true })
+    expect(verdict(store, 'hk-mass-d10')).toBe('test: before the first fasted weigh-in (by hand)')
   })
 })

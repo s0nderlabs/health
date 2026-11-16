@@ -906,6 +906,21 @@ export class ScaleService {
   }
 
   private lastProductId: string | null = null
+  private loggedFrames = new Map<string, number>()
+
+  /** Diagnostics: one line per distinct outcome of a weigh-in frame
+   *  (MiBeacon frame counter) that carries an object, within SETTLE_MS.
+   *  Never a value: the counter, the outcome and the readings count only.
+   *  Idle beacons (no object) are not logged. A refused (no_key) post and
+   *  its accepted re-post are two outcomes, so both are logged. */
+  private logFrameOutcome(hex: string, res: { accepted: boolean; reason?: string; readings?: number }): void {
+    const b = Buffer.from(hex, 'hex')
+    if (b.length < 5 || !(b[0] & 0x40)) return
+    const counter = b[4]
+    const verdict = res.accepted ? `accepted${res.reason ? ` (${res.reason})` : ''}` : `refused (${res.reason ?? 'unknown'})`
+    if (!firstFrameOutcome(this.loggedFrames, counter, verdict, this.now())) return
+    this.deps.log(`scale: frame #${counter} with object -> ${verdict}, readings ${res.readings ?? 0}`)
+  }
 
   private reject(reason: string): { accepted: false; reason: string; readings: 0 } {
     this.stats.rejected++
@@ -941,8 +956,20 @@ export class ScaleService {
       return new Response('frame_hex must be an even-length hex string', { status: 400 })
     }
     const res = this.ingestFrame(hex, (body as { ts?: unknown }).ts)
+    this.logFrameOutcome(hex, res)
     return Response.json({ ok: true, ...res })
   }
+}
+
+/** The frame-log dedupe: true the first time this (counter, verdict) is
+ *  seen within SETTLE_MS (and remembers it), false for a repeat. Entries
+ *  older than SETTLE_MS are dropped on every call. */
+export function firstFrameOutcome(seen: Map<string, number>, counter: number, verdict: string, now: number): boolean {
+  for (const [k, t] of seen) if (now - t > SETTLE_MS) seen.delete(k)
+  const key = `${counter}\n${verdict}`
+  if (seen.has(key)) return false
+  seen.set(key, now)
+  return true
 }
 
 /** The scanner's receive time when sane (it may retry a frame for a few
