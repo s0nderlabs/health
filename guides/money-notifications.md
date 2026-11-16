@@ -28,8 +28,8 @@ with no transaction in them ("Your balance is running low").
 
 ## Two ways to send
 
-**A. Through the HealthRelay app (recommended; arrives with the HealthRelay
-build after 0.13.0).** The shortcut runs the app's "Log Money Notification" action.
+**A. Through the HealthRelay app (recommended; HealthRelay 0.16.0 and
+later).** The shortcut runs the app's "Log Money Notification" action.
 The app sends it through its own tailnet tunnel, so it works with iCloud
 Private Relay on, the token never sits inside a shortcut, and a send that
 fails (Mac asleep, no signal) waits in the app's outbox and goes out on the

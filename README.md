@@ -205,8 +205,13 @@ a one-tap workout intent that lands in your live Claude session (while a
 session runs, the start button becomes a live session bar with an elapsed
 timer and an in-app End, mirrored in the Plan header), a
 lock-screen Live Activity (live BPM pulse card; during sessions a timer +
-next-set card with a rest countdown and end button), and a HealthKit courier
-that streams WHOOP-sourced step counts into the daily read. Build and
+next-set card with a rest countdown and end button), a HealthKit courier
+that streams WHOOP-sourced step counts into the daily read, a Food tab (the
+day's kcal and protein ring, meals with thumbnails, one-tap photo or text
+capture through an offline-safe outbox, a fix line per meal), weigh-ins
+(body mass and body fat from Apple Health, for the food log's baseline), and
+a "Log Money Notification" Shortcuts action for forwarding bank and wallet
+alerts (see the money notifications guide). Build and
 sideload with a free Apple ID (7-day re-sign; one-time Xcode signing setup):
 
 ```bash

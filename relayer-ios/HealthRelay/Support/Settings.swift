@@ -96,6 +96,19 @@ final class Settings: ObservableObject {
         return comps.url
     }
 
+    /// A food-log route (/meals, /meal, /meal/fix, or a photo path the daemon
+    /// handed out like "/meal-photo?meal=3&n=0&thumb=1"), token attached.
+    func foodURL(path: String) -> URL? {
+        guard configured, var comps = URLComponents(string: "https://\(host)\(path)") else { return nil }
+        comps.queryItems = (comps.queryItems ?? []) + [URLQueryItem(name: "token", value: token)]
+        return comps.url
+    }
+
+    /// One daemon request with a body (POST /meal) on the current route.
+    func send(_ request: URLRequest, completion: @escaping (Data?, URLResponse?, Error?) -> Void) {
+        TailnetTunnel.send(request, configuration: sessionConfiguration(), completion: completion)
+    }
+
     var planURL: URL? {
         guard configured,
               var comps = URLComponents(string: "https://\(host)/plan")

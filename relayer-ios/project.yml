@@ -20,8 +20,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.s0nderlabs.HealthRelay
         PRODUCT_NAME: HealthRelay
-        MARKETING_VERSION: "0.13.0"
-        CURRENT_PROJECT_VERSION: "3"
+        MARKETING_VERSION: "0.16.0"
+        CURRENT_PROJECT_VERSION: "4"
         SWIFT_VERSION: "5.9"
         TARGETED_DEVICE_FAMILY: "1"
         CODE_SIGN_STYLE: Automatic
@@ -44,8 +44,12 @@ targets:
           Receives your WHOOP band's Broadcast Heart Rate over Bluetooth and
           relays it to your health daemon at home.
         NSHealthShareUsageDescription: >-
-          Reads WHOOP-recorded step counts from Apple Health so your health
-          daemon can see daily movement. Nothing is written back.
+          Reads WHOOP-recorded step counts, and your weigh-ins (body weight and
+          body fat) from Apple Health, so your health daemon can see daily
+          movement and your weight trend. Nothing is written back.
+        NSCameraUsageDescription: >-
+          Takes a photo of a meal so Claude can estimate it for your food log.
+          Photos go only to your own Mac.
         NSHealthUpdateUsageDescription: >-
           Not used. The app never writes health data.
         ITSAppUsesNonExemptEncryption: false
@@ -71,8 +75,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.s0nderlabs.HealthRelay.widgets
         PRODUCT_NAME: HealthRelayWidgets
-        MARKETING_VERSION: "0.13.0"
-        CURRENT_PROJECT_VERSION: "3"
+        MARKETING_VERSION: "0.16.0"
+        CURRENT_PROJECT_VERSION: "4"
         SWIFT_VERSION: "5.9"
         TARGETED_DEVICE_FAMILY: "1"
         CODE_SIGN_STYLE: Automatic

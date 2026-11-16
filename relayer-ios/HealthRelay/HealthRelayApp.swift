@@ -1,6 +1,7 @@
 // HealthRelay: the iPhone leg of the health plugin. BLE dumb pipe for the
-// band's Broadcast HR, HealthKit steps courier, workout-intent trigger, and
-// the /gym plan in your pocket. All interpretation happens daemon-side.
+// band's Broadcast HR, HealthKit steps + weigh-in couriers, workout-intent
+// trigger, the /gym plan in your pocket, and the food log's capture. All
+// interpretation happens daemon-side (and in Claude's session).
 
 import SwiftUI
 
@@ -9,11 +10,13 @@ struct HealthRelayApp: App {
     @StateObject private var relay = RelayController()
     @StateObject private var steps = StepsCourier()
     @StateObject private var plan = PlanStore()
+    @StateObject private var food = FoodStore()
+    @StateObject private var weight = WeightCourier()
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
-            RootView(relay: relay, steps: steps, plan: plan)
+            RootView(relay: relay, steps: steps, plan: plan, food: food)
                 .preferredColorScheme(.dark)
                 .tint(Theme.accent)
                 .onAppear { boot() }
@@ -22,6 +25,10 @@ struct HealthRelayApp: App {
                         SessionProgress.shared.noteSceneActive()
                         plan.refresh()
                         steps.syncNow()
+                        weight.syncNow()
+                        food.refresh()
+                        food.flush() // anything captured offline goes out now
+                        MoneyOutbox.shared.flush()
                         relay.kick() // trade a long-stale pending connect for a scan
                         // Heals a missed boot lookup or a stale tailnet IP
                         // without a cold launch (throttled, one UDP packet).
@@ -41,9 +48,20 @@ struct HealthRelayApp: App {
     private func boot() {
         RestNotificationDelegate.shared.install()
         relay.onPlanUpdated = { plan.refresh() }
+        relay.onMealsUpdated = { food.refresh() }
+        relay.onSocketUp = {
+            food.flush()
+            MoneyOutbox.shared.flush() // money notifications queued while offline
+        }
         #if DEBUG
         if ProcessInfo.processInfo.environment["HR_DEMO"] != nil {
             DemoDriver.shared.drive(relay: relay, plan: plan)
+            if let mode = ProcessInfo.processInfo.environment["HR_DEMO_FOOD"] {
+                food.day = DemoFood.day(mode)
+                if ProcessInfo.processInfo.environment["HR_DEMO_FOOD_QUEUED"] != nil {
+                    food.outbox = [OutboxEntry(id: "demo-q", kind: .meal, createdAt: Date(), note: "es teh manis", attempts: 2)]
+                }
+            }
             return
         }
         #endif
@@ -51,7 +69,11 @@ struct HealthRelayApp: App {
         relay.start()
         steps.attach(relay)
         steps.startIfAuthorized()
+        weight.attach(relay)
+        weight.startIfAuthorized()
         plan.refresh()
+        food.refresh()
+        food.flush()
         relay.learnTailnetIP(force: true)
     }
 }
@@ -60,9 +82,16 @@ struct RootView: View {
     @ObservedObject var relay: RelayController
     @ObservedObject var steps: StepsCourier
     @ObservedObject var plan: PlanStore
+    @ObservedObject var food: FoodStore
     @ObservedObject private var progress = SessionProgress.shared
     @State private var showSettings = false
-    @State private var tab = ProcessInfo.processInfo.environment["HR_DEMO_TAB"] == "plan" ? 1 : 0
+    @State private var tab: Int = {
+        switch ProcessInfo.processInfo.environment["HR_DEMO_TAB"] {
+        case "plan": return 1
+        case "food": return 2
+        default: return 0
+        }
+    }()
 
     var body: some View {
         TabView(selection: $tab) {
@@ -72,6 +101,9 @@ struct RootView: View {
             PlanView(store: plan, onStartSession: startTodaySession, onEndSession: endTodaySession)
                 .tabItem { Label("Plan", systemImage: "list.bullet.rectangle") }
                 .tag(1)
+            FoodView(store: food)
+                .tabItem { Label("Food", systemImage: "fork.knife") }
+                .tag(2)
         }
         .background(Theme.ground.ignoresSafeArea())
         .overlay(alignment: .bottom) {

@@ -113,6 +113,15 @@ final class TailnetTunnel {
         }
     }
 
+    /// Same as fetch, for a full request (method + body): one task on a
+    /// throwaway session, on the route current at call time.
+    static func send(_ request: URLRequest, configuration: URLSessionConfiguration,
+                     completion: @escaping (Data?, URLResponse?, Error?) -> Void) {
+        let session = URLSession(configuration: configuration)
+        session.dataTask(with: request, completionHandler: completion).resume()
+        session.finishTasksAndInvalidate()
+    }
+
     /// One GET on a throwaway session. Per fetch, never URLSession.shared, so
     /// it takes the route (and a fresh listener) current at call time;
     /// invalidating after resume lets the task finish, then frees the session.

@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.16.0 - 2026-11-16
+
+### Added
+
+- **Food tab in the iPhone app.** The day at a glance: a ring with protein
+  against its target (from day one) and, once a budget exists, kcal against
+  it with the estimate range as a faint band; the kcal number with its range
+  before that. Today's meals with thumbnails, time, source (chat logs show
+  too) and per-meal kcal + protein, or "waiting on Claude" while an estimate
+  is pending. A Photo button (long-press for the library) and a quick-text
+  field ("americano") capture a meal; a compose sheet adds an optional
+  one-line note. Tapping a meal opens its photo, the per-item breakdown, the
+  total with its range, and a fix line that sends a correction.
+- A persisted capture outbox: every photo or note is written to the phone
+  first and leaves only when the daemon confirms it, so a meal logged with
+  no signal, or with the app killed mid-upload, goes out on the next
+  connection stamped with when it was eaten. Photos are re-rendered before
+  upload, which bakes the orientation and carries no metadata.
+- A local notification with the number when an estimate lands while the
+  app is in the background.
+- Weigh-ins from Apple Health: body mass and body fat % (from a smart scale
+  syncing to Health) go to the daemon with the same ack-gated anchors as
+  steps. WHOOP's own entries are excluded so a typed-in profile weight
+  cannot flatten the trend.
+- **"Log Money Notification" Shortcuts action.** A notification-triggered
+  personal automation hands a bank or wallet notification to the app, which
+  forwards it to the daemon through its own tailnet tunnel (works with
+  iCloud Private Relay on, no token inside the shortcut) and keeps it in an
+  outbox until the daemon confirms. One-time codes are dropped on the phone
+  before anything is written.
+- Requests with a body (POST) through the in-app tailnet tunnel.
+- App version 0.16.0 (4).
+
 ## 0.15.0 - 2026-11-16
 
 ### Added

@@ -52,6 +52,12 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
     var onPlanUpdated: (() -> Void)?
     /// Set by StepsCourier: fired when the daemon acks a steps batch.
     var onStepsAck: (() -> Void)?
+    /// The food log changed daemon-side (an estimate landed): refetch the day.
+    var onMealsUpdated: (() -> Void)?
+    /// Weigh-in batch confirmed: the courier may commit its HealthKit anchors.
+    var onBodyMassAck: (() -> Void)?
+    /// The daemon socket came up: a good moment to drain the food outbox.
+    var onSocketUp: (() -> Void)?
 
     private let socket = SocketLeg()
     private let ble = BleLeg()
@@ -209,6 +215,11 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
         }
     }
 
+    func sendBodyMass(_ samples: [[String: Any]], deleted: [String] = []) {
+        guard !samples.isEmpty || !deleted.isEmpty else { return }
+        socket.sendJSON(["type": "body_mass", "samples": samples, "deleted": deleted])
+    }
+
     func sendSteps(_ samples: [[String: Any]], deleted: [String] = []) {
         guard !samples.isEmpty || !deleted.isEmpty else { return }
         socket.sendJSON(["type": "steps", "samples": samples, "deleted": deleted])
@@ -290,6 +301,7 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
         // plan rewritten during a socket blip would be missed while the app
         // stays foregrounded (scenePhase never re-fires). Reconcile on connect.
         onPlanUpdated?()
+        onSocketUp?()
     }
 
     func socketDidDisconnect(reason: String) {
@@ -400,6 +412,12 @@ final class RelayController: ObservableObject, SocketLegDelegate, BleLegDelegate
             lastAck = removed > 0 ? "steps synced (\(added) new, \(removed) revised)" : "steps synced (\(added) new)"
             onStepsAck?() // commit the anchor + drain any remaining pages
 
+        case "meals_updated":
+            onMealsUpdated?()
+        case "body_mass_ack":
+            let added = (payload["added"] as? Int) ?? 0
+            lastAck = "weigh-ins synced (\(added) new)"
+            onBodyMassAck?()
         case "intent_ack":
             let activity = (payload["activity"] as? String) ?? ""
             lastAck = "intent logged: \(activity)"

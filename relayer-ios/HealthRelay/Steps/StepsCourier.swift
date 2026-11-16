@@ -25,6 +25,12 @@ import HealthKit
 // bounded batch per round-trip, each committed on its own ack.
 private let STEPS_BATCH_LIMIT = 4000
 
+/// WHOOP as a HealthKit source (the WHOOP app writes steps, and sometimes
+/// the profile weight). Shared by the steps and weigh-in couriers.
+func isWhoopSource(_ source: HKSource) -> Bool {
+    source.bundleIdentifier.lowercased().contains("whoop") || source.name.lowercased().contains("whoop")
+}
+
 // Plain class; HealthKit callbacks arrive on background queues, so every
 // @Published mutation hops to main explicitly.
 final class StepsCourier: ObservableObject {
@@ -100,10 +106,7 @@ final class StepsCourier: ObservableObject {
         let sourceQuery = HKSourceQuery(sampleType: stepType, samplePredicate: nil) { [weak self] _, sources, _ in
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                let whoop = (sources ?? []).filter {
-                    $0.bundleIdentifier.lowercased().contains("whoop")
-                        || $0.name.lowercased().contains("whoop")
-                }
+                let whoop = (sources ?? []).filter(isWhoopSource)
                 guard !whoop.isEmpty else {
                     if self.state != .active { self.state = .noWhoopSource }
                     return

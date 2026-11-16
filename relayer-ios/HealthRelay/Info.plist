@@ -24,8 +24,10 @@
 	<false/>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Receives your WHOOP band's Broadcast Heart Rate over Bluetooth and relays it to your health daemon at home.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Takes a photo of a meal so Claude can estimate it for your food log. Photos go only to your own Mac.</string>
 	<key>NSHealthShareUsageDescription</key>
-	<string>Reads WHOOP-recorded step counts from Apple Health so your health daemon can see daily movement. Nothing is written back.</string>
+	<string>Reads WHOOP-recorded step counts, and your weigh-ins (body weight and body fat) from Apple Health, so your health daemon can see daily movement and your weight trend. Nothing is written back.</string>
 	<key>NSHealthUpdateUsageDescription</key>
 	<string>Not used. The app never writes health data.</string>
 	<key>NSSupportsLiveActivities</key>
