@@ -210,3 +210,148 @@ describe('review regressions (v0.15.0)', () => {
     expect(row.posted_at).toBe('2030-01-01T00:00:30.000Z')
   })
 })
+
+describe('v0.17.0: every money app', () => {
+  const { appClass, moneyEvent, crypto, parseCryptoAmount } = require('../src/money.js') as typeof import('../src/money.js')
+
+  test('app classes', () => {
+    expect(['Tokopedia', 'Shopee', 'Gojek', 'GoPay', 'Grab'].map(appClass)).toEqual(Array(5).fill('marketplace'))
+    expect(appClass('Tangem')).toBe('crypto')
+    expect(['SeaBank', 'BCA mobile', 'Jenius', 'Plasma One', 'RedotPay', 'Pintu'].map(appClass)).toEqual(Array(6).fill('bank'))
+  })
+
+  test('marketplace marketing is dropped, counted, never stored', () => {
+    const { money, events, count } = harness()
+    const promos = [
+      { app: 'Gojek', title: 'Cara nikmatin weekend', body: 'Cara nikmatin weekend tanpa macet? OTW pakai GoCar, diskon 30% buat kamu!' },
+      { app: 'Shopee', title: 'Flash Sale 11.11', body: 'Kejar Flash Sale jam 12! Gratis ongkir + cashback hingga 50%' },
+      { app: 'Tokopedia', title: 'Barang di keranjangmu', body: 'Barang di keranjangmu hampir habis, checkout sekarang yuk' },
+      { app: 'Shopee', title: 'SPayLater', body: 'Aktifkan SPayLater dan nikmati cicilan 0%! Top up sekarang, cashback 50%' },
+    ]
+    for (const p of promos) expect(money.ingest(p, 'app').status).toBe('ignored')
+    expect(count()).toBe(0)
+    expect(events).toHaveLength(0)
+    expect(money.recent(7).ignored_noise.map((n) => `${n.app}:${n.n}`).sort()).toEqual(['Gojek:1', 'Shopee:2', 'Tokopedia:1'])
+  })
+
+  test('marketplace money events survive, with the right kind', () => {
+    const { money } = harness()
+    const keep: Array<[Record<string, string>, string]> = [
+      [{ app: 'GoPay', title: 'Pembayaran berhasil', body: 'Pembayaran Rp25.000 ke Kopi Kenangan berhasil.' }, 'payment'],
+      [{ app: 'Tokopedia', title: 'Pembayaran berhasil', body: 'Pembayaran untuk pesanan INV/20261116/MPL/123 sebesar Rp 1.250.000 berhasil diverifikasi.' }, 'payment'],
+      [{ app: 'Shopee', title: 'Pengembalian Dana', body: 'Pengembalian dana Rp89.000 untuk pesanan 2611ABC sudah masuk ke ShopeePay.' }, 'refund'],
+      [{ app: 'Gojek', title: 'Top up berhasil', body: 'Top up GoPay Rp200.000 berhasil.' }, 'topup'],
+      [{ app: 'Shopee', title: 'Tagihan SPayLater', body: 'Tagihan SPayLater kamu Rp 1.250.000 jatuh tempo 25 Nov 2026.' }, 'bill'],
+      [{ app: 'Tokopedia', title: 'Pembayaran tagihan', body: 'Pembayaran tagihan PLN Rp 150.000 berhasil.' }, 'payment'],
+      [{ app: 'GoPay', title: 'Transfer', body: 'Kamu menerima uang Rp50.000 dari BUDI.' }, 'incoming'],
+    ]
+    for (const [n, kind] of keep) {
+      const r = money.ingest(n, 'app')
+      expect(r.status).toBe('stored')
+      expect((r as { kind: string }).kind).toBe(kind)
+    }
+  })
+
+  test('decline alerts (dead card) are kept as declined', () => {
+    const { money, events } = harness()
+    const r = money.ingest({ app: 'RedotPay', title: 'Transaction declined', body: 'Your card transaction of $12.50 at NETFLIX.COM was declined: insufficient balance.' }, 'app')
+    expect(r).toMatchObject({ status: 'stored', kind: 'declined', amount: 12.5, currency: 'USD' })
+    expect(events[0].content).toContain('DECLINED')
+    expect(moneyEvent('Pembayaran gagal, saldo tidak cukup')).toBe('declined')
+  })
+
+  test('crypto amounts in both notations', () => {
+    expect(parseCryptoAmount('0.0001')).toBe(0.0001)
+    expect(parseCryptoAmount('0,25')).toBe(0.25)
+    expect(parseCryptoAmount('1,250.5')).toBe(1250.5)
+    expect(parseCryptoAmount('1,000')).toBe(1000)
+    expect(parseCryptoAmount('+5')).toBe(5)
+  })
+
+  test('Tangem: real income, sends, and address poisoning', () => {
+    expect(crypto('Tangem', 'Incoming transaction', 'You received 120 USDT from 0x5e0...aCd1')).toMatchObject({
+      kind: 'incoming', amount: 120, currency: 'USDT', counterparty: '0x5e0...aCd1', flag: null,
+    })
+    expect(crypto('Tangem', 'Outgoing transaction', 'Sent 0.5 SOL to 7xKX...gAsU')).toMatchObject({ kind: 'transfer_out', amount: 0.5, currency: 'SOL', counterparty: '7xKX...gAsU' })
+    expect(crypto('Tangem', 'Incoming transaction', 'You received 0 USDT from 0x5e0...aCd2')!.flag).toBe('address_poisoning')
+    expect(crypto('Tangem', 'Incoming transaction', 'You received 0.01 USDC from 0x5e0...aCd2')!.flag).toBe('address_poisoning')
+    expect(crypto('Tangem', 'Incoming', '+0.00001 ETH received from 0xA1b2...c3D4')!.flag).toBe('address_poisoning')
+    expect(crypto('Tangem', 'Incoming', 'You received 5000 ELONAI from 0xdead...beef')!.flag).toBe('unknown_token')
+    expect(crypto('Tangem', 'Incoming', 'You received 0.2 ETH from 0xA1b2...c3D4')!.flag).toBe(null)
+  })
+
+  test('poisoning is stored + flagged, and the event says not income', () => {
+    const { money, events, store } = harness()
+    const r = money.ingest({ app: 'Tangem', title: 'Incoming transaction', body: 'You received 0 USDT from 0x5e0...aCd2' }, 'app')
+    expect(r).toMatchObject({ status: 'stored', kind: 'incoming' })
+    expect((store.db.query('SELECT flag FROM money_notifs').get() as { flag: string }).flag).toBe('address_poisoning')
+    expect(events[0].meta.flag).toBe('address_poisoning')
+    expect(events[0].content).toContain('ADDRESS POISONING')
+    expect(events[0].content).toContain('Not income')
+  })
+
+  test('a crypto "token" amount is not mistaken for an OTP code', () => {
+    const { money } = harness()
+    expect(money.ingest({ app: 'Tangem', title: 'Incoming', body: 'You received 5000 TOKEN from 0xdead...beef' }, 'app').status).toBe('stored')
+    // ...while real OTP language still drops in a wallet too.
+    expect(money.ingest({ app: 'Tangem', title: 'Verification', body: 'Your verification code is 123456' }, 'app').status).toBe('dropped')
+  })
+
+  test('the flag column migrates onto an archive that predates it', () => {
+    const { Database } = require('bun:sqlite')
+    const db = new Database(':memory:')
+    db.run(`CREATE TABLE money_notifs (id INTEGER PRIMARY KEY AUTOINCREMENT, dedupe TEXT NOT NULL UNIQUE, app TEXT NOT NULL,
+      title TEXT, body TEXT NOT NULL, posted_at TEXT NOT NULL, received_at TEXT NOT NULL, via TEXT NOT NULL, kind TEXT NOT NULL,
+      amount REAL, currency TEXT, amount_alt REAL, alt_currency TEXT, merchant TEXT, counterparty TEXT, balance_after REAL,
+      balance_currency TEXT, occurred_at TEXT, parser TEXT NOT NULL)`)
+    const { MoneyBook } = require('../src/money.js')
+    MoneyBook.ensureSchema(db)
+    MoneyBook.ensureSchema(db) // idempotent
+    const cols = (db.query('PRAGMA table_info(money_notifs)').all() as Array<{ name: string }>).map((c) => c.name)
+    expect(cols).toContain('flag')
+  })
+})
+
+describe('review regressions (v0.17.0)', () => {
+  const { crypto, moneyEvent, parseCryptoAmount, hasAmount } = require('../src/money.js') as typeof import('../src/money.js')
+
+  test('"Transfer masuk" is incoming, not outgoing', () => {
+    expect(parseMoney('myBCA', 'Transfer Masuk', 'Transfer masuk Rp 500.000 dari BUDI').kind).toBe('incoming')
+    expect(parseMoney('Jago', 'Dana masuk', 'Dana masuk ke Kantong Utama Rp 1.000.000').kind).toBe('incoming')
+  })
+
+  test('upper-case currency prefixes count as amounts; RB/JT shorthand is not a ticker', () => {
+    expect(hasAmount('Pembayaran IDR 50.000 berhasil')).toBe(true)
+    expect(isNoise('Shopee', 'Pembayaran IDR 50.000 berhasil, cashback 5%', 'marketplace')).toBe(false)
+    expect(hasAmount('Top up min 50RB')).toBe(false)
+  })
+
+  test('a promo that names an amount is still a promo unless something happened', () => {
+    expect(isNoise('GoPay', 'Top up saldo GoPay sekarang dan dapatkan cashback Rp5.000!', 'marketplace')).toBe(true)
+    expect(isNoise('GoPay', 'Top up min 50RB, cashback 10RB', 'marketplace')).toBe(true)
+    expect(isNoise('GoPay', 'Top up GoPay Rp200.000 berhasil. Ada promo cashback buat kamu!', 'marketplace')).toBe(false)
+  })
+
+  test('"Transaksi ... berhasil" with words in between is a payment', () => {
+    expect(isNoise('GoPay', 'Transaksi GoPay kamu di Kopi Kenangan sebesar Rp25.000 berhasil', 'marketplace')).toBe(false)
+    expect(moneyEvent('Transaksi GoPay kamu di Kopi Kenangan sebesar Rp25.000 berhasil')).toBe('payment')
+  })
+
+  test('a failure DISCLAIMER does not make a payment declined; change is not a refund', () => {
+    expect(moneyEvent('Pembayaran Rp25.000 berhasil. Jika transaksi gagal, dana dikembalikan otomatis.')).toBe('payment')
+    expect(moneyEvent('Pembayaran Rp30.000 berhasil. Uang kembali Rp 5.000')).toBe('payment')
+    expect(moneyEvent('Pembayaran Rp30.000 gagal')).toBe('declined')
+  })
+
+  test('crypto: addresses and timestamps are not amounts', () => {
+    expect(crypto('Tangem', 'Incoming', 'Incoming from 0x9F3E...1a2b: +100 USDT')).toMatchObject({ amount: 100, currency: 'USDT', flag: null, kind: 'incoming' })
+    expect(crypto('Tangem', 'Incoming', '16 Nov 2026 18:05 WIB received 100 USDT')).toMatchObject({ amount: 100, currency: 'USDT', flag: null })
+  })
+
+  test('crypto: first direction word wins; signs and both separator styles', () => {
+    expect(crypto('Tangem', 'Sent', 'Sent 1 ETH. It will be received shortly')!.kind).toBe('transfer_out')
+    expect(crypto('Tangem', 'Outgoing', '-0.5 SOL to 7xKX...gAsU')).toMatchObject({ kind: 'transfer_out', amount: 0.5 })
+    expect(parseCryptoAmount('1.250,5')).toBe(1250.5)
+    expect(parseCryptoAmount('1,250.5')).toBe(1250.5)
+  })
+})

@@ -16,7 +16,20 @@ the archive. Nothing goes to a third party.
 |---|---|---|
 | SeaBank | QRIS payment ("Pembayaran QRIS untuk X sebesar 110.000"), Bayar Instan ("... sebesar Rp 57.800 pada 15 Nov 2026 18:05 WIB berhasil"), transfers | amount (IDR), merchant, time when the text carries one |
 | Plasma One | "Paid 186,400 IDR ($10.43) at Tokopedia / Balance: $9.83", "Received $120.00 From: 0x... Balance: $414.31" | amount + currency, USD equivalent, merchant or sender, balance after |
-| GoPay, ShopeePay, Pintu, anything else | generic rule: first Rp / IDR / $ amount, direction keywords, "at / di / ke X" merchant | best effort, flagged `generic` so the session double-checks the raw text |
+| Tangem (and other self-custody wallets) | received / sent + amount + token + address prefix | incoming zero or dust-sized transfers, and unknown tokens, are flagged as possible **address poisoning** / spam, never counted as income |
+| Tokopedia, Shopee (ShopeePay, SPayLater), Gojek (GoPay, GoPay Later), Grab, BCA mobile, Jenius, RedotPay, Pintu, anything else | generic rule: first Rp / IDR / $ amount, the money event (payment, refund, top-up, transfer, decline, bill due), "at / di / ke X" merchant | best effort, flagged `generic` so the session double-checks the raw text |
+
+Kinds: `payment` (the only one that is spending), `refund`, `topup` (your own
+money moving into a wallet), `incoming`, `transfer_out`, `trade` (an
+exchange order), `declined` (nothing moved, but a dead card or low balance
+matters), `bill` (a paylater or statement coming due).
+
+**Marketplaces and super-apps are allowlisted.** Tokopedia, Shopee, Gojek,
+Grab and similar apps send far more marketing than money ("Cara nikmatin
+weekend... OTW pakai GoCar"). From those apps a notification is kept ONLY if
+it is a money event (payment / order paid, refund, top-up, transfer, decline,
+paylater bill); everything else is dropped without storing anything but a
+per-app count, so you can wire them with an empty content filter.
 
 Dropped before storage (no text, no hash; only a per-app count so a
 withheld message is visible): anything in OTP language (OTP, verification
@@ -44,7 +57,8 @@ below).
 
 ## Setup, once per app (iOS 27)
 
-Do this for each of: SeaBank, Plasma One, GoPay, ShopeePay, Pintu.
+Do this for each app that touches your money, e.g. SeaBank, Plasma One,
+Tangem, Tokopedia, Shopee, Gojek, Pintu, BCA mobile, Jenius, RedotPay.
 
 1. Open **Shortcuts**, tab **Automation**, tap **+** (New Automation).
 2. Choose the **Notification** trigger ("When I get a notification from...").

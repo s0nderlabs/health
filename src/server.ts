@@ -11,7 +11,7 @@ import { DB_PATH } from './config.js'
 import { existsSync } from 'fs'
 import { readPhotoFiles } from './photos.js'
 
-const VERSION = '0.16.0'
+const VERSION = '0.17.0'
 
 const INSTRUCTIONS = `
 health: WHOOP recovery, sleep, and strain as a live channel. The daemon on this
@@ -272,8 +272,14 @@ the target (maintenance minus the configured deficit) only once he agrees.
 MONEY NOTIFICATIONS. money.notif: a bank / wallet notification (SeaBank,
 Plasma One, GoPay, ShopeePay, Pintu, ...) was forwarded from the phone the
 moment it landed. meta: notif_id, app, kind (payment | incoming |
-transfer_out | trade | unknown), amount, currency, merchant?,
-balance_after? + balance_currency?, parser. The content carries the parsed
+transfer_out | trade | refund | topup | declined | bill | unknown), amount,
+currency, merchant?, balance_after? + balance_currency?, parser, flag?.
+Spending is kind=payment only: refund = money back, topup = his own money
+moving into a wallet, declined = nothing moved (but say so: a dead card or
+low balance matters), bill = a paylater / statement coming due (a liability,
+not today's spending). flag=address_poisoning or unknown_token on a crypto
+incoming = NOT income: warn him once, plainly, never to copy that sender
+address from history and not to touch the token. The content carries the parsed
 read AND the raw text. THE CONTRACT: run the /budget alert flow for it.
 parser starting "generic" = a format not seen before: trust the raw text
 over the parsed fields. kind=trade is an exchange order (money changed

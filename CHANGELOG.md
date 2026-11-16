@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.17.0 - 2026-11-16
+
+### Added
+
+- **Every money app, not just banks.** Apps are classed by name.
+  Marketplaces and super-apps (Tokopedia, Shopee, ShopeePay, Gojek, GoPay,
+  Grab, OVO, ...) are ALLOWLISTED: a notification is kept only when it
+  describes a money event that actually happened (payment or paid order,
+  refund, top-up, transfer, decline, paylater bill). Marketing, even
+  marketing that names an amount ("Top up sekarang, cashback Rp5.000!"), is
+  dropped before storage with only a per-app count kept, so a misjudged
+  real payment still shows up as a number. Banks (SeaBank, Jago, Jenius,
+  myBCA, ...) keep the lenient rule.
+- New kinds: `refund`, `topup`, `declined` (nothing moved, but a dead card
+  or a low balance matters) and `bill` (a paylater or statement coming
+  due). Only `payment` is spending; the event says so for each kind.
+  Conditional clauses ("Jika transaksi gagal, dana dikembalikan") are
+  ignored when classifying, so a disclaimer never turns a payment into a
+  decline.
+- **Crypto wallets (Tangem and other self-custody apps).** Received / sent
+  transfers are parsed (amount, token, address prefix; signs, either
+  decimal notation, addresses and timestamps never mistaken for amounts).
+  An incoming zero or dust-sized transfer is flagged `address_poisoning`,
+  and an incoming token off the known list `unknown_token`: stored, but
+  never counted as income, and the event warns never to copy that sender
+  address or touch the token. New `flag` column, migrated in place.
+- `health__money` also lists the per-app counts of ignored marketing.
+
+### Changed
+
+- The weak "code word next to digits" OTP signal no longer applies to
+  crypto wallets (on the daemon and in the phone's outbox), where "received
+  5000 TOKEN" is a transfer; strong OTP language still drops everywhere.
+- Incoming bank transfers worded "transfer / dana masuk" are read as
+  incoming.
+- App version 0.17.0 (5).
+
 ## 0.16.0 - 2026-11-16
 
 ### Added

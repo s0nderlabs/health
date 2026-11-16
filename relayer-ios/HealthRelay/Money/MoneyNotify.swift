@@ -75,7 +75,7 @@ final class MoneyOutbox {
         let a = app.trimmingCharacters(in: .whitespacesAndNewlines)
         let b = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !a.isEmpty, !b.isEmpty else { return false }
-        if Self.looksLikeOtp(title + "\n" + b) {
+        if Self.looksLikeOtp(title + "\n" + b, app: a) {
             rlog("money: dropped a verification-code notification from \(a)")
             return false
         }
@@ -152,13 +152,17 @@ final class MoneyOutbox {
     /// half only: OTP language always drops; a code word next to a short
     /// number drops unless the text is clearly a transaction (the daemon
     /// then redacts those digits before storing). Errs toward dropping.
-    static func looksLikeOtp(_ text: String) -> Bool {
+    static func looksLikeOtp(_ text: String, app: String = "") -> Bool {
         let strong = #"\b(otp|one[- ]?time (password|code|pin)|verification|verifikasi|kode\s+(rahasia|aktivasi|masuk|keamanan|unik)|security code|passcode|login code|sign[- ]?in code|auth(entication)? code|jangan\s+(berikan|bagikan|sebarkan)|do not share|don'?t share|never share|rahasiakan)\b"#
         let weak = #"\b(kode|code|pin|token)\b[^\n]{0,40}\b\d{4,8}\b|\b\d{4,8}\b[^\n]{0,40}\b(kode|code|pin|token)\b"#
         let amount = #"(rp\.?|idr|\$|usd[ct]?)\s*\d|\d[\d.,]*\s*(idr|rupiah|usd[ct]?)\b"#
         let verb = #"\b(paid|pay(ment)?|received|purchase|bought|pembayaran|bayar|dibayar|membayar|pembelian|beli|transfer|diterima|masuk|terima|berhasil|order)\b"#
         func has(_ p: String) -> Bool { text.range(of: p, options: [.regularExpression, .caseInsensitive]) != nil }
         if has(strong) { return true }
+        // Crypto wallets: "received 5000 TOKEN" is a transfer, not a code
+        // (same exemption as the daemon's appClass 'crypto').
+        let wallet = #"tangem|metamask|trust ?wallet|phantom|rabby|ledger|trezor|okx wallet|bitget wallet|coinbase wallet"#
+        if app.range(of: wallet, options: [.regularExpression, .caseInsensitive]) != nil { return false }
         if has(weak) { return !(has(amount) && has(verb)) }
         return false
     }
