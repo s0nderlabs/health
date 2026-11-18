@@ -4,6 +4,7 @@ import { homedir } from 'os'
 import type { HealthConfig } from './types.js'
 import { DEFAULT_CONFIG } from './types.js'
 import { resolveResignConfig } from './resign/policy.js'
+import { resolveLiftVideoConfig } from './liftvideo.js'
 
 // HEALTH_CONFIG_PATH override exists for tests only; real installs use the default.
 const CONFIG_PATH =
@@ -55,6 +56,9 @@ export function loadConfig(): HealthConfig {
       },
       // Field-by-field tolerant: a malformed value falls back to the default.
       resign: resolveResignConfig(parsed.resign, DEFAULT_CONFIG.resign),
+      // Field by field: a hand-edited "false" string must not start the
+      // tailnet listener, a non-string root must not fail every upload.
+      lift_video: resolveLiftVideoConfig(parsed.lift_video, DEFAULT_CONFIG.lift_video),
       // Passed through as-is (src/scale.ts validates per field): dropping it
       // here would make every saveConfig() erase the block from disk.
       ...(parsed.scale && typeof parsed.scale === 'object' ? { scale: parsed.scale } : {}),

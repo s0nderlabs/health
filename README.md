@@ -95,6 +95,13 @@ WHOOP band ──(BLE Broadcast HR)──> health-relay ──(WS, raw frames)�
   someone else's and can be reclaimed.
   Photos are converted to plain JPEGs with GPS and all other metadata
   stripped; your originals are never touched.
+- **Lift clips**: pick lift videos on the phone, trim each to the lift (a
+  passthrough cut: full resolution, frame rate and HDR, never re-encoded),
+  and they upload in the background to `~/Pictures/lift/<date>/Video/` on
+  the Mac (token-gated, streamed to disk, deduped against Syncthing). Each
+  clip raises a `lift.video` event for your session; review stays yours. A
+  hidden Diagnostics test proves which route the phone's background
+  uploads can take.
 - **Money notifications** (optional): an iOS Shortcuts automation forwards
   notifications from every app that touches your money (banks, e-wallets,
   marketplaces, crypto wallets) to the daemon the moment they land. Amount,

@@ -11,7 +11,7 @@ import { DB_PATH } from './config.js'
 import { existsSync } from 'fs'
 import { readPhotoFiles } from './photos.js'
 
-const VERSION = '0.21.0'
+const VERSION = '0.22.0'
 
 const INSTRUCTIONS = `
 health: WHOOP recovery, sleep, and strain as a live channel. The daemon on this
@@ -43,6 +43,11 @@ event carries class + priority + ts, plus per class:
   Test" IS the PR session, coach it as such.
 - live.session / live.confirm / live.zone / live.rest: BLE-feed milestones,
   see below.
+- lift.video (info): a lift clip landed from the phone at meta.path (meta
+  also: trim window, resolution, fps, codec, bytes; a TRIMMED clip also has
+  syncthing_original = the untrimmed original Syncthing delivers, skip it). Not auto-reviewed: the
+  event asks for nothing beyond a one-line acknowledgement; review belongs to
+  the main session (one agent per clip).
 
 How to act on events (the behavioral contract):
 - Voice: professional coach. Number first, then state, then 2-3 drivers, then
@@ -527,6 +532,11 @@ export function createServer(ipc: IpcClient) {
             food: {
               type: 'object',
               description: 'Food log settings, e.g. {"protein_target_g": 165, "rollover_hour": 4, "deficit_kcal": 400}',
+            },
+            lift_video: {
+              type: 'object',
+              description:
+                'Lift clips from the phone, partial patch merged, e.g. {"tailnet_listener": false}. Fields: root ("" = ~/Pictures/lift; never under Desktop/Documents/Downloads), tailnet_listener (the plain-HTTP listener on the Mac\'s tailnet IP, port 8791; a change needs a daemon restart).',
             },
             resign: {
               type: 'object',

@@ -195,6 +195,7 @@ export type EventClass =
   | 'meal.amended' // the user sent a correction line for a logged meal from the phone
   | 'money.notif' // a bank / wallet notification was forwarded from the phone: run the budget flow
   | 'body.weighin' // a scale weigh-in reached Apple Health (mass + fat merged): informational
+  | 'lift.video' // a lift clip landed from the phone (POST /lift-video): informational, never auto-reviewed
 
 export type EventPriority = 'info' | 'notable' | 'alert'
 
@@ -298,6 +299,14 @@ export interface HealthConfig {
   // phone's hardware UDID and stays local. The team id is never configured:
   // it comes from the build snapshot's project.yml.
   resign: ResignConfig
+  // Lift clips from the phone (src/liftvideo.ts). root '' = ~/Pictures/lift
+  // (the tree Syncthing already fills; never under Desktop / Documents /
+  // Downloads). tailnet_listener: the optional plain-HTTP listener bound to
+  // the Mac's tailnet IPv4 only, serving /healthz + /lift-video[/probe].
+  lift_video: {
+    root: string
+    tailnet_listener: boolean
+  }
   // Xiaomi S400 body-composition scale over passive BLE (src/scale.ts +
   // relayer/scale-listen.swift). Absent = the leg is off. Not secret: the
   // bindkey lives in the Keychain, never here.
@@ -355,6 +364,7 @@ export const DEFAULT_CONFIG: HealthConfig = {
     'meal.amended': true,
     'money.notif': true,
     'body.weighin': true,
+    'lift.video': true,
   },
   thresholds: {
     strain_notable: 15,
@@ -392,6 +402,8 @@ export const DEFAULT_CONFIG: HealthConfig = {
     'money.notif': 0,
     // One per weigh-in, deduped by source + instant; never throttled.
     'body.weighin': 0,
+    // One per uploaded clip, deduped by client_id; never throttled.
+    'lift.video': 0,
   },
   poll_interval_minutes: 5,
   webhook: {
@@ -419,6 +431,10 @@ export const DEFAULT_CONFIG: HealthConfig = {
     weighins_from: null,
   },
   resign: { ...DEFAULT_RESIGN },
+  lift_video: {
+    root: '',
+    tailnet_listener: true,
+  },
 }
 
 // ── MCP tool helpers (inb0x convention) ───────────────────────────

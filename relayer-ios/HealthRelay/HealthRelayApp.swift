@@ -8,6 +8,8 @@ import UserNotifications
 
 @main
 struct HealthRelayApp: App {
+    /// Only for the lift-upload background session's relaunch callback.
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var relay = RelayController()
     @StateObject private var steps = StepsCourier()
     @StateObject private var plan = PlanStore()
@@ -50,6 +52,8 @@ struct HealthRelayApp: App {
     /// and on every socket reconnect, so a new outbound courier is wired once.
     private func resyncOutbound() {
         food.flush() // meals / fixes captured offline
+        LiftStore.shared.flush() // lift clips that failed or lost their task
+        LiftProbe.shared.reconcile()
         MoneyOutbox.shared.flush() // money notifications queued while offline
         steps.syncNow()
         weight.syncNow()

@@ -99,7 +99,7 @@ import {
   type MetricKey,
   type MetricView,
 } from './bodycomp.js'
-import { BadRequest, cleanText, jsonBody } from './http.js'
+import { BadRequest, cleanText, jsonBody, requireClientId, singleFlight } from './http.js'
 import { bodyPage } from './bodyview.js'
 export { BadRequest } from './http.js'
 import type { HealthConfig, ScaleConfig } from './types.js'
@@ -2553,34 +2553,6 @@ function labelOf(v: unknown, items: Array<{ name: string }>): string {
 
 const MAX_JSON_BYTES = 6 * 12 * 1024 * 1024 // six base64 photos at the phone's cap, plus slack
 
-
-/** The phone's idempotency key (one per capture or add action, reused on retry). */
-function requireClientId(body: Record<string, unknown>): string {
-  const id = typeof body.client_id === 'string' ? body.client_id.trim() : ''
-  if (!/^[A-Za-z0-9-]{8,64}$/.test(id)) throw new BadRequest('client_id (8-64 chars, UUID) is required')
-  return id
-}
-
-/** Idempotent on a client id: a retry racing the first run waits for it (and
- *  shares its failure) and reports duplicate; one that comes after it gets
- *  the stored result (`done`); otherwise `run` once. */
-async function singleFlight<T extends { duplicate: boolean }>(
-  inflight: Map<string, Promise<T>>,
-  id: string,
-  op: { done: (id: string) => T | null; run: (id: string) => Promise<T> },
-): Promise<T> {
-  const running = inflight.get(id)
-  if (running) return running.then((r) => ({ ...r, duplicate: true }))
-  const prior = op.done(id)
-  if (prior) return prior
-  const job = op.run(id)
-  inflight.set(id, job)
-  try {
-    return await job
-  } finally {
-    inflight.delete(id)
-  }
-}
 
 function decodePhotos(body: Record<string, unknown>): Uint8Array[] {
   const raw = Array.isArray(body.photos) ? body.photos : body.photo != null ? [body.photo] : []

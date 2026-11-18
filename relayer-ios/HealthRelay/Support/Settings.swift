@@ -9,6 +9,14 @@ enum Demo {
     static let active = ProcessInfo.processInfo.environment["HR_DEMO"] != nil
 }
 
+/// The two ways a lift clip can reach the Mac (see Settings.liftURL).
+enum LiftTransport: String, CaseIterable, Codable {
+    case host, tailnet
+
+    var title: String { self == .host ? "Tailscale host" : "Tailnet IP" }
+    var detail: String { self == .host ? "https :8443" : "http :\(Settings.liftTailnetPort)" }
+}
+
 final class Settings: ObservableObject {
     static let shared = Settings()
 
@@ -42,7 +50,33 @@ final class Settings: ObservableObject {
         didSet { UserDefaults.standard.set(tailnetIPSource, forKey: "daemon_ip_source") }
     }
 
+    /// The path lift clips take to the Mac, when chosen (the Diagnostics
+    /// picker, "Use this path", or the probe adopting the path that passed).
+    /// nil = not chosen: see liftTransport.
+    @Published var liftTransportChoice: LiftTransport? {
+        didSet {
+            guard !Demo.active else { return } // screenshots never leave a choice behind
+            UserDefaults.standard.set(liftTransportChoice?.rawValue, forKey: "lift_transport")
+        }
+    }
+
+    /// Which path lift clips take. Unchosen, it is the tailnet IP whenever
+    /// one is set: the ts.net name is resolved by the SYSTEM for a background
+    /// upload (the in-app tunnel cannot carry it), and iCloud Private Relay
+    /// breaks exactly that resolution (the Sep 2026 outage), where it would
+    /// wait silently for a day. The host path is the fallback with no IP.
+    var liftTransport: LiftTransport {
+        get {
+            liftTransportChoice ?? (TailnetTunnel.Route.isTailnetIP(tailnetIP.trimmingCharacters(in: .whitespaces)) ? .tailnet : .host)
+        }
+        set { liftTransportChoice = newValue }
+    }
+
+    /// The daemon's tailnet-only plain-HTTP listener (lift uploads only).
+    static let liftTailnetPort = 8791
+
     private init() {
+        liftTransportChoice = UserDefaults.standard.string(forKey: "lift_transport").flatMap(LiftTransport.init(rawValue:))
         host = UserDefaults.standard.string(forKey: "daemon_host") ?? ""
         token = Keychain.get("daemon_token") ?? ""
         deviceFilter = UserDefaults.standard.string(forKey: "device_filter") ?? "WHOOP"
@@ -107,6 +141,52 @@ final class Settings: ObservableObject {
     /// One daemon request with a body (POST /meal) on the current route.
     func send(_ request: URLRequest, completion: @escaping (Data?, URLResponse?, Error?) -> Void) {
         TailnetTunnel.send(request, configuration: sessionConfiguration(), completion: completion)
+    }
+
+    /// POST /lift-video and /lift-video/probe, token attached, on one
+    /// transport. These go through a BACKGROUND URLSession, which runs in a
+    /// system daemon outside this app: the in-app tunnel (TailnetTunnel)
+    /// cannot carry it. So `.host` is the plain hostname path (the system
+    /// resolves the ts.net name, which iCloud Private Relay can break) and
+    /// `.tailnet` dials the Mac's tailnet IP directly over plain HTTP (no
+    /// name to resolve; WireGuard encrypts the tailnet hop).
+    func liftURL(_ path: String, via transport: LiftTransport) -> URL? {
+        var token = self.token, host = self.host, ip = tailnetIP, port = Self.liftTailnetPort
+        #if DEBUG && targetEnvironment(simulator)
+        // Simulator transport tests against a throwaway sink on the Mac
+        // (never the live daemon): HR_LIFT_HOST / _IP / _PORT / _TOKEN.
+        // Simulator only: scripts/build-phone.sh builds the phone in Debug.
+        let env = ProcessInfo.processInfo.environment
+        token = env["HR_LIFT_TOKEN"] ?? token
+        host = env["HR_LIFT_HOST"] ?? host
+        ip = env["HR_LIFT_IP"] ?? ip
+        port = env["HR_LIFT_PORT"].flatMap(Int.init) ?? port
+        let transport = env["HR_LIFT_TRANSPORT"].flatMap(LiftTransport.init(rawValue:)) ?? transport
+        #endif
+        guard !token.isEmpty else { return nil }
+        let base: String
+        switch transport {
+        case .host:
+            guard !host.isEmpty else { return nil }
+            base = "https://\(host)"
+        case .tailnet:
+            ip = ip.trimmingCharacters(in: .whitespaces)
+            guard TailnetTunnel.Route.isTailnetIP(ip) else { return nil }
+            base = "http://\(ip):\(port)"
+        }
+        guard var comps = URLComponents(string: base + path) else { return nil }
+        comps.queryItems = [URLQueryItem(name: "token", value: token)]
+        return comps.url
+    }
+
+    /// Why liftURL(via:) has no URL, in the words a clip row or a probe row
+    /// shows.
+    func liftUnreachableReason(_ transport: LiftTransport) -> String {
+        if token.isEmpty { return "Daemon not configured" }
+        switch transport {
+        case .host: return host.isEmpty ? "Daemon host not set" : "Daemon host is not a valid address"
+        case .tailnet: return "No tailnet IP (Settings, Daemon, Find)"
+        }
     }
 
     var planURL: URL? {

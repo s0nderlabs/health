@@ -282,6 +282,8 @@ export class Engine {
       'money.notif': 24,
       // Yesterday's weigh-in is stale news once today's exists.
       'body.weighin': 20,
+      // The clip stays on disk either way; two days on, the ping is history.
+      'lift.video': 48,
     })
   }
 
@@ -327,13 +329,14 @@ export class Engine {
    *  loop-closer or a meal estimate. Quiet-hours piercing is declared per
    *  class in QUIET_PIERCING (types.ts). */
   actionEvent(
-    cls: 'ride.landed' | 'lift.landed' | 'meal.logged' | 'meal.amended' | 'money.notif' | 'body.weighin',
+    cls: 'ride.landed' | 'lift.landed' | 'meal.logged' | 'meal.amended' | 'money.notif' | 'body.weighin' | 'lift.video',
     dedupeKey: string,
     payload: { content: string; meta: Record<string, string> },
   ): boolean {
-    // A weigh-in is informational (it never asks the session to act and
-    // never pierces quiet hours: a 04:30 reading waits for the morning).
-    const priority = cls === 'body.weighin' ? 'info' : 'notable'
+    // A weigh-in and a landed lift clip are informational (neither asks the
+    // session to act, neither pierces quiet hours: a 04:30 reading waits for
+    // the morning; a clip is reviewed only when the main session decides).
+    const priority = cls === 'body.weighin' || cls === 'lift.video' ? 'info' : 'notable'
     return this.emit(cls, priority, dedupeKey, payload, { bypassCooldown: true })
   }
 

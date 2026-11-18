@@ -18,6 +18,13 @@ struct SettingsView: View {
     @State private var draftIPFor = Settings.shared.hostName
     @State private var finding = false
     @State private var findFailed = false
+    @ObservedObject private var probe = LiftProbe.shared
+    /// The Diagnostics section: hidden until five quick taps on Version, then
+    /// kept (the test's result must still be here after he locks the phone).
+    @State private var diagnostics = Demo.active
+        ? ProcessInfo.processInfo.environment["HR_DEMO_DIAG"] != nil // tests start hidden
+        : UserDefaults.standard.bool(forKey: "diagnostics_revealed")
+    @State private var versionTaps: [Date] = []
 
     /// Empty is fine (hostname path); anything else must be a tailnet address.
     private var draftIPValid: Bool {
@@ -37,6 +44,7 @@ struct SettingsView: View {
 
     var body: some View {
         NavigationStack {
+            ScrollViewReader { proxy in
             Form {
                 Section {
                     TextField("your-mac.your-tailnet.ts.net:8443", text: $draftHost)
@@ -83,6 +91,9 @@ struct SettingsView: View {
 
                 Section {
                     LabeledContent("Version", value: Signing.appVersion)
+                        .contentShape(Rectangle())
+                        .onTapGesture(perform: tapVersion)
+                        .accessibilityIdentifier("settings.version")
                     if let expires = Signing.expiresAt {
                         LabeledContent("Signed until") {
                             Text(expires.formatted(date: .abbreviated, time: .shortened))
@@ -105,6 +116,12 @@ struct SettingsView: View {
                     Text(Signing.expiresAt == nil
                         ? "Simulator or store builds carry no provisioning profile, so there is nothing to count down."
                         : "A free-team signature lives seven days, then iOS refuses to launch the app. Auto re-sign renews it when the phone is unlocked at home on Wi-Fi; if it has not by the last day, you get a phone and Mac notification. Manual fallback: scripts/build-phone.sh install.")
+                }
+
+                if diagnostics {
+                    diagnosticsSection
+                        .id("diagnostics")
+                        .onAppear { probe.prepare() }
                 }
 
                 Section {
@@ -136,6 +153,23 @@ struct SettingsView: View {
                     .disabled(draftHost.isEmpty || draftToken.isEmpty || !draftIPValid)
                 }
             }
+            .onAppear {
+                #if DEBUG && targetEnvironment(simulator)
+                // Simulator transport test against a throwaway sink (see
+                // Settings.liftURL's HR_LIFT_* overrides). Never on the phone.
+                if ProcessInfo.processInfo.environment["HR_LIFT_PROBE_AUTOSTART"] != nil {
+                    rlog("lift probe: autostart (running=\(probe.running))")
+                    probe.start()
+                }
+                #endif
+                // Screenshot hook: HR_DEMO_DIAG=scroll parks Diagnostics in view.
+                if Demo.active, ProcessInfo.processInfo.environment["HR_DEMO_DIAG"] == "scroll" {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                        proxy.scrollTo("diagnostics", anchor: .top)
+                    }
+                }
+            }
+            }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -145,6 +179,138 @@ struct SettingsView: View {
             }
         }
         .preferredColorScheme(.dark)
+    }
+
+    // ── Diagnostics ──────────────────────────────────────────────────
+
+    /// Five taps on Version inside three seconds.
+    private func tapVersion() {
+        let now = Date()
+        versionTaps = versionTaps.filter { now.timeIntervalSince($0) < 3 } + [now]
+        guard versionTaps.count >= 5, !diagnostics else { return }
+        versionTaps = []
+        if !Demo.active { UserDefaults.standard.set(true, forKey: "diagnostics_revealed") }
+        withAnimation { diagnostics = true }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
+    private var diagnosticsSection: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Background upload test")
+                Text(probeHint)
+                    .font(.footnote)
+                    .foregroundStyle(probe.running ? Color.primary : Color.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.vertical, 2)
+            ForEach(LiftTransport.allCases, id: \.self) { t in
+                probeRow(t)
+            }
+            if probe.running {
+                Button(probe.preparing ? "Writing the 50 MB test file…" : "Stop test", role: .destructive) {
+                    probe.reset()
+                }
+                .disabled(probe.preparing)
+                .accessibilityIdentifier("diag.probe.stop")
+            } else {
+                Button(probe.runs.isEmpty ? "Start test" : "Run again") { probe.start() }
+                    .accessibilityIdentifier("diag.probe.start")
+            }
+            Picker("Lift clips go via", selection: $settings.liftTransport) {
+                ForEach(LiftTransport.allCases, id: \.self) { t in
+                    Text(t.title).tag(t)
+                }
+            }
+            // A setting, not an action: the value stays neutral so it never
+            // reads like the accent buttons above it.
+            .tint(.secondary)
+            .accessibilityIdentifier("diag.transport")
+        } header: {
+            Text("Diagnostics")
+        } footer: {
+            Text("Lift clips upload through iOS's background transfer service, which runs outside this app, so they cannot use the in-app tunnel. Tailscale host resolves the ts.net name (iCloud Private Relay can break that); Tailnet IP dials the Mac directly over plain HTTP inside WireGuard. Pick the one that passed.")
+        }
+    }
+
+    /// "Lock now" only once both uploads exist: a task created after the
+    /// lock is one iOS may defer, which would make the test meaningless.
+    private var probeHint: String {
+        if probe.preparing { return "Getting ready. Keep the app open for a moment." }
+        if probe.running { return "Running. Lock the phone now and leave it: that is the test. The result waits here." }
+        return "Sends 50 MB to the Mac once per path through a background session. Start it, then lock the phone when this says so."
+    }
+
+    private func probeRow(_ t: LiftTransport) -> some View {
+        let r = probe.run(t)
+        let status: (text: String, color: Color) = {
+            switch r.state {
+            case .idle: return ("Not run", .secondary)
+            case .waiting: return ("Waiting", .secondary)
+            case .uploading: return ("\(Int((Double(r.sent) / Double(max(r.total, 1)) * 100).rounded(.down)))%", .primary)
+            case .ok: return ("OK", Theme.okDim)
+            // Not the accent: that colour is for actions (Run again).
+            case .failed: return ("Failed", .secondary)
+            }
+        }()
+        let detail: String = {
+            switch r.state {
+            case .idle, .waiting: return t.detail
+            case .uploading: return "\(t.detail) · \(LiftFormat.progress(r.sent, of: r.total))"
+            case .ok:
+                var parts = [t.detail, LiftFormat.size(r.serverBytes ?? r.total)]
+                if let s = r.seconds { parts[1] += String(format: " in %.1f s", s) }
+                if let ms = r.serverMs { parts.append("server \(FoodFormat.int(Double(ms))) ms") }
+                return parts.joined(separator: " · ")
+            case .failed: return "\(t.detail) · \(r.error ?? "unknown error")"
+            }
+        }() + (r.background ? " · started with the app in the background, so iOS may have deferred it: run again" : "")
+        let selected = settings.liftTransport == t
+        let info = VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(t.title)
+                Spacer()
+                if r.state == .waiting || r.state == .uploading {
+                    ProgressView().controlSize(.mini).padding(.trailing, 4)
+                }
+                if r.state == .ok {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Theme.okDim)
+                }
+                if r.state == .failed {
+                    Image(systemName: "xmark.circle")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+                Text(status.text)
+                    .monospacedDigit()
+                    .foregroundStyle(status.color)
+            }
+            Text(detail)
+                .font(.footnote)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("diag.probe.\(t.rawValue)")
+        return VStack(alignment: .leading, spacing: 3) {
+            info
+            if selected {
+                Text("Lift clips go this way")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else if r.state == .ok {
+                // The path that passed, one tap from being the one clips use.
+                Button("Use this path") { settings.liftTransport = t }
+                    .font(.footnote.weight(.semibold))
+                    .buttonStyle(.borderless)
+                    .padding(.top, 2)
+                    .accessibilityIdentifier("diag.probe.use.\(t.rawValue)")
+            }
+        }
+        .padding(.vertical, 2)
     }
 
     private var daemonFooter: String {

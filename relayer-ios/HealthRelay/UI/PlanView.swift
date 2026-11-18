@@ -160,6 +160,9 @@ struct PlanView: View {
                             if let reminders = plan.reminders, !reminders.isEmpty {
                                 quietSection("REMINDERS", items: reminders)
                             }
+                            // Yesterday's sets still go to the Mac on a rest day.
+                            LiftClipsCard()
+                                .id("clips")
                         } else {
                             // ONE card per face. The session (or the ride,
                             // with its route and clock inside it) is the only
@@ -184,6 +187,11 @@ struct PlanView: View {
                                         .id("ride")
                                 } else if let lifts = plan.lifts, !lifts.isEmpty {
                                     sessionCard(lifts, warmup: plan.warmup ?? [])
+                                    // Right under the session: the set he just
+                                    // filmed goes to the Mac from where he
+                                    // already is between sets.
+                                    LiftClipsCard()
+                                        .id("clips")
                                 }
                                 // Notes and reminders belong to the lift half
                                 // when there is one (chalk, creatine, bar
@@ -204,6 +212,9 @@ struct PlanView: View {
                         freshness(plan)
                     } else {
                         emptyState
+                        LiftClipsCard()
+                            .id("clips")
+                            .padding(.top, 40)
                     }
                 }
                 .padding(.horizontal, 20)
@@ -229,7 +240,9 @@ struct PlanView: View {
                    let first = raw.split(separator: ":").first {
                     let parts = raw.split(separator: ":").map(String.init)
                     let target = Int(first).map { "lift-\($0)" } ?? String(first)
-                    let anchor: UnitPoint = parts.count > 1 && parts[1] == "bottom" ? .bottom : .top
+                    let anchor: UnitPoint = parts.count > 1
+                        ? (parts[1] == "bottom" ? .bottom : parts[1] == "center" ? UnitPoint(x: 0.5, y: 0.6) : .top)
+                        : .top
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
                         proxy.scrollTo(target, anchor: anchor)
                     }

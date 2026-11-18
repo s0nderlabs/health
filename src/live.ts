@@ -56,6 +56,12 @@
 //   bank / wallet notification, served by MoneyService (src/money.ts).
 //   POST /scale-adv {frame_hex, rssi?, ts?} carries one raw MiBeacon frame
 //   from relayer/scale-listen.swift, served by ScaleService (src/scale.ts).
+//   POST /lift-video (raw clip body + X-Lift-Meta) and POST /lift-video/probe
+//   are the lift-clip upload, served by LiftVideoService (src/liftvideo.ts).
+//   They are also the ONLY routes (with /healthz) of the optional tailnet
+//   listener: plain HTTP bound to the Mac's 100.64.0.0/10 address only
+//   (WireGuard already encrypts the tailnet), so a background URLSession
+//   upload need not traverse the tailscale serve TLS proxy.
 //
 // DUAL-UP (deterministic-through-retries dual connection): at home, at rest,
 // phone on wifi + power-eligible, the daemon periodically forces the band
@@ -70,6 +76,20 @@ import { readFileSync, statSync, watch, type FSWatcher } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import type { LiveState, RejectReason } from './livestate.js'
 import { parseBase64Frame } from './hrparse.js'
+import { LIFT_VIDEO_MAX_BYTES, isTailnetIPv4 } from './liftvideo.js'
+
+/** Body cap for every route but the lift-video upload: Bun's own default,
+ *  which the raised maxRequestBodySize (for clips) would otherwise lift. */
+const NON_CLIP_MAX_BODY = 128 * 1024 * 1024
+
+const LIFT_PATHS = new Set(['/lift-video', '/lift-video/probe'])
+
+/** Idle timeout (s) for a lift-clip request. Bun's 10 s default would kill an
+ *  upload on any 10 s gap in incoming bytes (gym cell signal, a DERP relay),
+ *  and the phone would restart from byte 0. */
+export const LIFT_IDLE_TIMEOUT_S = 120
+
+type BunServer = ReturnType<typeof Bun.serve>
 
 function log(msg: string): void {
   process.stderr.write(`healthd live: ${msg}\n`)
@@ -118,6 +138,11 @@ export interface LiveListenerOpts {
   moneyHttp?: (req: Request, url: URL) => Promise<Response | null>
   /** S400 scale advertisements (POST /scale-adv). Null = not handled. */
   scaleHttp?: (req: Request, url: URL) => Promise<Response | null>
+  /** Lift-clip upload + transport probe (POST /lift-video[/probe]). Served
+   *  on the live listener AND the tailnet listener. Null = not handled. */
+  liftVideoHttp?: (req: Request, url: URL) => Promise<Response | null>
+  /** Tests shorten the lift-clip idle timeout; production uses LIFT_IDLE_TIMEOUT_S. */
+  liftIdleTimeoutS?: number
   /** HealthKit weigh-ins (body mass / body fat). Null = malformed batch. */
   onBodyMass?: (samples: unknown, deleted: unknown) => { received: number; added: number; deleted: number } | null
   /** Validated HealthKit steps: new/updated samples + UUIDs deleted upstream. */
@@ -250,6 +275,8 @@ export interface LiveFeedStatus {
 
 export class LiveListener {
   private server: ReturnType<typeof Bun.serve> | null = null
+  private tailnetServer: ReturnType<typeof Bun.serve> | null = null
+  private tailnetAddr: string | null = null
   private relayers = new Set<RelayerWs>()
   private bandConnected = false
   private bandDevice: string | null = null
@@ -318,10 +345,35 @@ export class LiveListener {
     this.server = Bun.serve<RelayerData, never>({
       port,
       hostname: bind,
+      // Raised for lift clips (Bun's default is 128 MiB); every other route
+      // keeps the old ceiling through the Content-Length gate below.
+      maxRequestBodySize: LIFT_VIDEO_MAX_BYTES,
       fetch(req, server) {
         const url = new URL(req.url)
+        // A token-gated route that reads a JSON body: the body is held to the
+        // non-clip cap even when chunked (the server-wide limit is the clip
+        // cap), so every such route goes through here, never around it.
+        const jsonRoute = (
+          r0: Request,
+          u: URL,
+          handler: (r: Request, u: URL) => Promise<Response | null>,
+          label: string,
+        ): Response | Promise<Response> => {
+          if (!self.authorized(r0, u)) return new Response('unauthorized', { status: 401 })
+          return boundedBody(r0)
+            .then((r) => (r instanceof Response ? r : handler(r, u)))
+            .then((res) => res ?? new Response('not found', { status: 404 }))
+            .catch((err) => {
+              log(`${label} route failed: ${err}`)
+              return new Response('internal error', { status: 500 })
+            })
+        }
         if (req.method === 'GET' && url.pathname === '/healthz') {
           return new Response('ok', { status: 200 })
+        }
+        if (LIFT_PATHS.has(url.pathname)) return self.liftRoute(req, url, server)
+        if (Number(req.headers.get('content-length') ?? 0) > NON_CLIP_MAX_BODY) {
+          return new Response('payload too large', { status: 413 })
         }
         if (req.method === 'GET' && url.pathname === '/plan') {
           if (!self.authorized(req, url)) return new Response('unauthorized', { status: 401 })
@@ -332,34 +384,13 @@ export class LiveListener {
           return self.serveRoute(url.searchParams.get('file') ?? '')
         }
         if (self.opts.moneyHttp && url.pathname === '/money-notif') {
-          if (!self.authorized(req, url)) return new Response('unauthorized', { status: 401 })
-          return self.opts
-            .moneyHttp(req, url)
-            .then((res) => res ?? new Response('not found', { status: 404 }))
-            .catch((err) => {
-              log(`money route failed: ${err}`)
-              return new Response('internal error', { status: 500 })
-            })
+          return jsonRoute(req, url, self.opts.moneyHttp, 'money')
         }
         if (self.opts.scaleHttp && url.pathname === '/scale-adv') {
-          if (!self.authorized(req, url)) return new Response('unauthorized', { status: 401 })
-          return self.opts
-            .scaleHttp(req, url)
-            .then((res) => res ?? new Response('not found', { status: 404 }))
-            .catch((err) => {
-              log(`scale route failed: ${err}`)
-              return new Response('internal error', { status: 500 })
-            })
+          return jsonRoute(req, url, self.opts.scaleHttp, 'scale')
         }
         if (self.opts.foodHttp && (url.pathname.startsWith('/meal') || url.pathname === '/body')) {
-          if (!self.authorized(req, url)) return new Response('unauthorized', { status: 401 })
-          return self.opts
-            .foodHttp(req, url)
-            .then((res) => res ?? new Response('not found', { status: 404 }))
-            .catch((err) => {
-              log(`food route failed: ${err}`)
-              return new Response('internal error', { status: 500 })
-            })
+          return jsonRoute(req, url, self.opts.foodHttp, 'food')
         }
         if (url.pathname !== '/stream') return new Response('not found', { status: 404 })
         if (!self.authorized(req, url)) {
@@ -435,6 +466,63 @@ export class LiveListener {
     }, this.timing.arbTickMs)
     this.startPlanWatch()
     log(`listening on ${bind}:${port}/stream`)
+  }
+
+  /** The lift-clip routes, identical on both listeners. */
+  private liftRoute(req: Request, url: URL, server: BunServer): Response | Promise<Response> {
+    if (!this.opts.liftVideoHttp) return new Response('not found', { status: 404 })
+    if (!this.authorized(req, url)) return new Response('unauthorized', { status: 401 })
+    // A long clip over a patchy link: allow real gaps between bytes.
+    server.timeout(req, this.opts.liftIdleTimeoutS ?? LIFT_IDLE_TIMEOUT_S)
+    return this.opts
+      .liftVideoHttp(req, url)
+      .then((res) => res ?? new Response('not found', { status: 404 }))
+      .catch((err) => {
+        log(`lift video route failed: ${err}`)
+        return new Response('internal error', { status: 500 })
+      })
+  }
+
+  /**
+   * The tailnet-only listener: plain HTTP on the Mac's tailnet IPv4, serving
+   * /healthz and the lift-clip routes and NOTHING else (no /stream, no food,
+   * no money). Refuses any address outside 100.64.0.0/10: never 0.0.0.0,
+   * never a LAN address. Throws on a bad address or a failed bind.
+   */
+  startTailnet(port: number, ip: string): void {
+    if (!isTailnetIPv4(ip)) throw new Error(`refusing to bind ${ip}: not a tailnet (100.64.0.0/10) address`)
+    this.serveTailnet(port, ip)
+  }
+
+  /** The bind itself (split out so tests can exercise the routing on loopback). */
+  private serveTailnet(port: number, hostname: string): void {
+    if (this.tailnetServer) return
+    const self = this
+    this.tailnetServer = Bun.serve({
+      port,
+      hostname,
+      maxRequestBodySize: LIFT_VIDEO_MAX_BYTES,
+      fetch(req, server) {
+        const url = new URL(req.url)
+        if (req.method === 'GET' && url.pathname === '/healthz') return new Response('ok', { status: 200 })
+        if (LIFT_PATHS.has(url.pathname)) return self.liftRoute(req, url, server)
+        return new Response('not found', { status: 404 })
+      },
+    })
+    this.tailnetAddr = `${hostname}:${this.tailnetServer.port}`
+    log(`tailnet listener on ${this.tailnetAddr} (lift-video only)`)
+  }
+
+  /** "100.x.y.z:8791" while the tailnet listener runs, else null. */
+  tailnetAddress(): string | null {
+    return this.tailnetAddr
+  }
+
+  /** Close the tailnet listener (a changed tailnet IP rebinds through this). */
+  stopTailnet(): void {
+    this.tailnetServer?.stop(true)
+    this.tailnetServer = null
+    this.tailnetAddr = null
   }
 
   private authorized(req: Request, url: URL): boolean {
@@ -1287,5 +1375,25 @@ export class LiveListener {
     if (this.planDebounce) clearTimeout(this.planDebounce)
     this.planWatcher?.close()
     this.server?.stop(true)
+    this.stopTailnet()
   }
+}
+
+/**
+ * A chunked (no Content-Length) body on a non-clip route, read with the old
+ * 128 MiB ceiling: the listener's maxRequestBodySize is raised to 4 GiB for
+ * clips, and the Content-Length gate cannot see a chunked body, so without
+ * this a JSON route would buffer up to 4 GiB. A declared length was already
+ * gated; a body-less request passes as is. Over the ceiling = 413.
+ */
+export async function boundedBody(req: Request, cap = NON_CLIP_MAX_BODY): Promise<Request | Response> {
+  if (req.headers.has('content-length') || !req.body) return req
+  const chunks: Uint8Array[] = []
+  let n = 0
+  for await (const chunk of req.body) {
+    n += chunk.byteLength
+    if (n > cap) return new Response('payload too large', { status: 413 })
+    chunks.push(chunk)
+  }
+  return new Request(req.url, { method: req.method, headers: req.headers, body: Buffer.concat(chunks) })
 }

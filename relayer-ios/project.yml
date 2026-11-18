@@ -20,8 +20,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.s0nderlabs.HealthRelay
         PRODUCT_NAME: HealthRelay
-        MARKETING_VERSION: "0.21.0"
-        CURRENT_PROJECT_VERSION: "12"
+        MARKETING_VERSION: "0.22.0"
+        CURRENT_PROJECT_VERSION: "13"
         SWIFT_VERSION: "5.9"
         TARGETED_DEVICE_FAMILY: "1"
         CODE_SIGN_STYLE: Automatic
@@ -54,8 +54,22 @@ targets:
           Not used. The app never writes health data.
         ITSAppUsesNonExemptEncryption: false
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        # Lift clips may go as plain HTTP to the Mac's tailnet IP (port 8791,
+        # inside WireGuard), through a BACKGROUND URLSession. Measured in the
+        # simulator (Nov 18 2026): with no key ATS refuses it (-1022);
+        # NSAllowsLocalNetworking alone does NOT cover 100.64.0.0/10 (still
+        # -1022); an IP-literal NSExceptionDomains entry works but would bake
+        # one Mac's address into the repo. So ATS is relaxed app-wide, and the
+        # code is the guard instead: every URL the app builds is https except
+        # Settings.liftURL(.tailnet), which only ever targets a validated
+        # 100.64.0.0/10 address. No web views, no third-party content.
+        # Do NOT add NSAllowsLocalNetworking next to it: iOS then ignores
+        # NSAllowsArbitraryLoads entirely.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
     scheme:
       testTargets:
+        - HealthRelayTests
         - HealthRelayUITests
     entitlements:
       path: HealthRelay/HealthRelay.entitlements
@@ -78,8 +92,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.s0nderlabs.HealthRelay.widgets
         PRODUCT_NAME: HealthRelayWidgets
-        MARKETING_VERSION: "0.21.0"
-        CURRENT_PROJECT_VERSION: "12"
+        MARKETING_VERSION: "0.22.0"
+        CURRENT_PROJECT_VERSION: "13"
         SWIFT_VERSION: "5.9"
         TARGETED_DEVICE_FAMILY: "1"
         CODE_SIGN_STYLE: Automatic
@@ -93,6 +107,24 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
+
+  # Unit tests, simulator only, hosted in the app (no network): the lift-video
+  # wire contract and the clip list's tolerant decode.
+  HealthRelayTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - HealthRelayTests
+    dependencies:
+      - target: HealthRelay
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.s0nderlabs.HealthRelayTests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "5.9"
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 4F2SRW2599
 
   # Layout regression tests, simulator only (demo mode, no network, no signing):
   # xcodebuild test -scheme HealthRelay -destination 'platform=iOS Simulator,name=iPhone 17 Pro'

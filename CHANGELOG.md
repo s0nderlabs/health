@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.22.0 - 2026-11-18
+
+### Added
+
+- **Lift clips: phone to Mac, trimmed, full quality.** A Lift clips card on
+  the Plan tab. The video picker asks Photos for the original file (never a
+  transcoded copy); each clip opens in our own trim view (filmstrip, start
+  and end handles, a preview that follows the handle, the selected length,
+  one-tap "Use full clip"); the cut is a passthrough export (no re-encode:
+  full resolution, frame rate and HDR; the original stays in Photos). Clips
+  upload through a background session that survives the phone locking, with
+  per-clip progress, retry, a stalled-route hint and a persisted queue.
+- **Daemon: `POST /lift-video`.** Token-gated, streamed to disk (never
+  buffered, 4 GiB cap, 120 s idle timeout) into
+  `~/Pictures/lift/<date>/Video/` beside the Syncthing copies: never
+  overwrites a file, a full clip Syncthing already delivered is not written
+  again, a retry is answered without a second file (the newest attempt
+  replaces a dying one), half-written files are swept at start. Each new clip
+  raises a `lift.video` event (trim window, original length, fps,
+  resolution, codec, size; a trimmed clip names the Syncthing original to
+  skip). Not wired to any review.
+- **Background upload test.** Settings > Diagnostics (five taps on the
+  version) sends 50 MB to the Mac by two routes, the Tailscale host and the
+  Mac's tailnet IP, and keeps each route's result after the phone locks;
+  clips use the route that passed. `POST /lift-video/probe` on both listeners,
+  and a plain-HTTP listener bound only to the Mac's tailnet address (port
+  8791, same token, the upload routes only; `lift_video.tailnet_listener`).
+
+### Changed
+
+- The live listener's body limit is raised for clips; every other route
+  keeps a 128 MiB cap, chunked bodies included.
+
 ## 0.21.0 - 2026-11-18
 
 ### Added

@@ -6,6 +6,7 @@ import { Database } from 'bun:sqlite'
 import { DB_PATH, ensureRuntimeDir } from './config.js'
 import { MealBook } from './meals.js'
 import { MoneyBook } from './money.js'
+import { LiftVideoService } from './liftvideo.js'
 import type {
   EventClass,
   HealthEvent,
@@ -130,6 +131,7 @@ export class Store {
       this.db.run(SCHEMA)
       MealBook.ensureSchema(this.db)
       MoneyBook.ensureSchema(this.db)
+      LiftVideoService.ensureSchema(this.db)
       this.migrate()
     }
   }

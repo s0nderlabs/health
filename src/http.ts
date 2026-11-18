@@ -1,6 +1,7 @@
 // Shared helpers for the phone-facing HTTP routes (food log, money
-// notifications): one request-body parser, one text cleaner, one 400 type,
-// so their limits and messages cannot drift apart.
+// notifications, lift videos): one request-body parser, one text cleaner,
+// one 400 type, one client-id idempotency gate, so their limits and messages
+// cannot drift apart.
 
 /** A client error: the route answers 400 with this message. */
 export class BadRequest extends Error {}
@@ -26,4 +27,32 @@ export function cleanText(v: unknown, max: number, keepNewlines = false): string
   if (typeof v !== 'string') return null
   const s = (keepNewlines ? v.replace(/[^\S\n]+/g, ' ').replace(/ *\n */g, '\n') : v.replace(/\s+/g, ' ')).trim().slice(0, max)
   return s || null
+}
+
+/** The phone's idempotency key (one per capture or add action, reused on retry). */
+export function requireClientId(body: Record<string, unknown>): string {
+  const id = typeof body.client_id === 'string' ? body.client_id.trim() : ''
+  if (!/^[A-Za-z0-9-]{8,64}$/.test(id)) throw new BadRequest('client_id (8-64 chars, UUID) is required')
+  return id
+}
+
+/** Idempotent on a client id: a retry racing the first run waits for it (and
+ *  shares its failure) and reports duplicate; one that comes after it gets
+ *  the stored result (`done`); otherwise `run` once. */
+export async function singleFlight<T extends { duplicate: boolean }>(
+  inflight: Map<string, Promise<T>>,
+  id: string,
+  op: { done: (id: string) => T | null; run: (id: string) => Promise<T> },
+): Promise<T> {
+  const running = inflight.get(id)
+  if (running) return running.then((r) => ({ ...r, duplicate: true }))
+  const prior = op.done(id)
+  if (prior) return prior
+  const job = op.run(id)
+  inflight.set(id, job)
+  try {
+    return await job
+  } finally {
+    inflight.delete(id)
+  }
 }

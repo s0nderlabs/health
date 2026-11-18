@@ -27,6 +27,7 @@ import { FoodService } from './food.js'
 import { KJ_PER_KCAL } from './energy.js'
 import { MoneyService } from './money.js'
 import { ScaleService } from './scale.js'
+import { LiftVideoService, TAILNET_PORT, discoverTailnetIPv4, resolveLiftRoot, tailnetPlan } from './liftvideo.js'
 import { piercesQuietHours } from './types.js'
 import { Store } from './store.js'
 import { Engine } from './engine.js'
@@ -282,6 +283,16 @@ const money = new MoneyService({
   ownNames: () => config().money?.own_names ?? [],
 })
 
+// Lift clips from the phone (POST /lift-video): streamed into ~/Pictures/lift
+// and announced as lift.video. Never wired to any auto-review: the main
+// session owns review, one agent per clip.
+const liftVideo = new LiftVideoService({
+  db: store.db,
+  getRoot: () => config().lift_video?.root ?? '',
+  emit: (key, payload) => engine.actionEvent('lift.video', key, payload),
+  log: (msg) => log(`lift video: ${msg}`),
+})
+
 // Loud signing pushes (phone + Mac notifications), on top of system.health.
 // pushPhone reaches the listener lazily: it is constructed below.
 const signingPush = new SigningPushDelivery({
@@ -304,6 +315,7 @@ const liveListener = new LiveListener(liveState, () => config().live.token, {
   foodHttp: (req, url) => food.handleHttp(req, url),
   onNotifyAck: (id, shown, reason) => signingPush.onAck(id, shown, reason),
   moneyHttp: (req, url) => money.handleHttp(req, url),
+  liftVideoHttp: (req, url) => liftVideo.handleHttp(req, url),
   // Lazy start: a scale block added after boot arms the leg on first frame.
   scaleHttp: (req, url) => {
     if (!config().scale) return Promise.resolve(null)
@@ -645,6 +657,7 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
         wake_release_active:
           inQuietHours(config()) && wakeReleaseActive(config(), store.getMeta('wake_detected_at')),
         live: liveListener.status(),
+        lift_video_tailnet: liveListener.tailnetAddress(),
         // Free-tier sideload certs die silently after 7 days; surface staleness
         // so an expired phone relayer can never cost a workout unnoticed.
         phone_relayer_last_seen: store.getMeta('phone_relayer_last_seen'),
@@ -824,6 +837,7 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
         // the generated live.token and lock every relayer out.
         live: { ...current.live, ...patch.live },
         food: { ...current.food, ...patch.food },
+        lift_video: { ...current.lift_video, ...patch.lift_video },
         // Partial resign patches merge field by field ({resign:{enabled:true}}
         // keeps device_udid and the bands).
         resign: patch.resign === undefined ? current.resign : resolveResignConfig(patch.resign, current.resign),
@@ -843,6 +857,11 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
       if (!(f.deficit_kcal >= 0 && f.deficit_kcal <= 1500)) throw new Error('food.deficit_kcal must be 0-1500')
       if (f.weighins_from != null && !(typeof f.weighins_from === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(f.weighins_from) && Number.isFinite(Date.parse(f.weighins_from))))
         throw new Error('food.weighins_from must be YYYY-MM-DD or null')
+      const lv = merged.lift_video
+      if (typeof lv.root !== 'string') throw new Error('lift_video.root must be a path string ("" = ~/Pictures/lift)')
+      const lvRoot = resolveLiftRoot(lv.root)
+      if ('error' in lvRoot) throw new Error(lvRoot.error)
+      if (typeof lv.tailnet_listener !== 'boolean') throw new Error('lift_video.tailnet_listener must be true or false')
       if (merged.quiet_hours && (!merged.quiet_hours.start || !merged.quiet_hours.end)) {
         throw new Error('quiet_hours needs both start and end (or null to disable)')
       }
@@ -871,10 +890,15 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
       // plan_path change keeps GET /plan working (it re-reads the path) but
       // stops live plan_updated pushes until the daemon is restarted.
       const planPathChanged = patch.plan_path != null && merged.plan_path !== current.plan_path
+      // The tailnet listener binds (or not) once at startup.
+      const tailnetChanged =
+        patch.lift_video != null &&
+        merged.lift_video.tailnet_listener !== current.lift_video.tailnet_listener
       const restartHint = 'requires a daemon restart: launchctl kickstart -k gui/$UID/com.s0nderlabs.health'
       const notes = [
         webhookChanged ? `Webhook port/path change ${restartHint}` : null,
         planPathChanged ? `plan_path change: live plan push ${restartHint}` : null,
+        tailnetChanged ? `lift_video tailnet listener change ${restartHint}` : null,
       ].filter(Boolean)
       return {
         config: redactConfig(merged),
@@ -1049,6 +1073,51 @@ try {
     `live-bind:${new Date().toISOString().slice(0, 10)}`,
   )
 }
+
+// The tailnet-only lift-video listener (plain HTTP on the Mac's 100.x
+// address, never 0.0.0.0). Optional: no tailnet IP (Tailscale not up yet at
+// login) = one log line, then a quiet re-check every 5 min. The same check
+// rebinds when the Mac's tailnet IP changes (node re-auth, account switch),
+// so the listener never sits on a dead address. A bind failure never touches
+// the main listener. Toggle / port changes in config need a restart.
+let tailnetTimer: ReturnType<typeof setInterval> | null = null
+let tailnetBoundIp: string | null = null
+let tailnetMissLogged = false
+async function reconcileTailnetListener(): Promise<void> {
+  const cfg = config().lift_video
+  if (!cfg?.tailnet_listener) return
+  const port = TAILNET_PORT
+  const ip = await discoverTailnetIPv4()
+  const plan = tailnetPlan(tailnetBoundIp, ip)
+  if (plan === 'keep') return
+  if (plan === 'wait') {
+    if (!tailnetMissLogged) log('tailnet listener not started: no tailnet IPv4 found (re-checking every 5 min)')
+    tailnetMissLogged = true
+    return
+  }
+  if (plan === 'rebind') {
+    log(`tailnet IPv4 changed ${tailnetBoundIp} -> ${ip}: rebinding the lift-video listener`)
+    liveListener.stopTailnet()
+    tailnetBoundIp = null
+  }
+  try {
+    liveListener.startTailnet(port, ip!)
+    tailnetBoundIp = ip
+    tailnetMissLogged = false
+  } catch (err) {
+    if (!tailnetMissLogged) log(`tailnet listener failed to bind ${ip}:${port}: ${err} (re-checking every 5 min)`)
+    tailnetMissLogged = true
+  }
+}
+if (config().lift_video?.tailnet_listener) {
+  void reconcileTailnetListener()
+  tailnetTimer = setInterval(() => void reconcileTailnetListener().catch((err) => log(`tailnet check failed: ${err}`)), 5 * 60_000)
+} else {
+  log('tailnet listener disabled (lift_video.tailnet_listener=false)')
+}
+
+// Partials orphaned by a daemon killed mid-upload (nothing is in flight yet).
+void liftVideo.sweepPartials().catch((err) => log(`lift video: partial sweep failed: ${err}`))
 
 // Live transitions that need wall-clock time (a dead feed ends a session).
 setInterval(() => {
@@ -1254,6 +1323,7 @@ function shutdown(reason: string): void {
   shuttingDown = true
   log(`shutting down (${reason})`)
   try { webhookServer.stop(true) } catch {}
+  try { if (tailnetTimer) clearInterval(tailnetTimer) } catch {}
   try { liveListener.stop() } catch {}
   try { scale.stop() } catch {}
   try { ipc.stop() } catch {}
