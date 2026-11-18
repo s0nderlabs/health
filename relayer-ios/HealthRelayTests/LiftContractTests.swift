@@ -134,3 +134,60 @@ final class LiftContractTests: XCTestCase {
         XCTAssertEqual(c.state, .failed, "an unknown state retries instead of failing the whole list")
     }
 }
+
+/// The probe's stored result (UserDefaults "lift_probe_v1") across the move
+/// to sequential runs (Nov 18 2026): a result saved by the parallel build
+/// still decodes (no order, not held), and the new fields round-trip.
+final class LiftProbeStoreTests: XCTestCase {
+    /// Review finding: 2 of 2 often runs with the app open after a held
+    /// start; an OK proves locked-phone sending only if the app left the
+    /// foreground during that upload.
+    func testLockedProofNeedsABackgroundTrip() {
+        var r = LiftProbe.Run(state: .ok, order: 2)
+        XCTAssertFalse(r.provedLocked, "sequential OK, app never left the foreground")
+        r.sawBackground = true
+        XCTAssertTrue(r.provedLocked)
+        r.background = true
+        XCTAssertFalse(r.provedLocked, "created in the background: iOS may have deferred it")
+        XCTAssertTrue(LiftProbe.Run(state: .ok).provedLocked, "parallel-era OK keeps its old meaning")
+        XCTAssertFalse(LiftProbe.Run(state: .failed, order: 1, sawBackground: true).provedLocked)
+    }
+
+    func testParallelEraResultStillDecodes() throws {
+        let old = #"{"host":{"state":"ok","sent":50000000,"total":50000000,"startedAt":785000000,"finishedAt":785000026.8,"serverMs":26310,"serverBytes":50000000,"taskId":7,"background":false},"tailnet":{"state":"failed","sent":0,"total":50000000,"error":"HTTP 502"}}"#
+        let runs = try JSONDecoder().decode([String: LiftProbe.Run].self, from: Data(old.utf8))
+        let host = try XCTUnwrap(runs["host"])
+        XCTAssertEqual(host.state, .ok)
+        XCTAssertNil(host.order)
+        XCTAssertFalse(host.held)
+        XCTAssertEqual(try XCTUnwrap(host.seconds), 26.8, accuracy: 0.001)
+        XCTAssertEqual(runs["tailnet"]?.state, .failed)
+        XCTAssertFalse(try XCTUnwrap(runs["tailnet"]).live)
+    }
+
+    func testSequentialFieldsRoundTrip() throws {
+        let runs: [String: LiftProbe.Run] = [
+            "host": LiftProbe.Run(state: .uploading, sent: 1, startedAt: Date(timeIntervalSince1970: 1), order: 1),
+            "tailnet": LiftProbe.Run(state: .queued, order: 2, held: true),
+        ]
+        let back = try JSONDecoder().decode([String: LiftProbe.Run].self, from: JSONEncoder().encode(runs))
+        XCTAssertEqual(back, runs)
+        XCTAssertTrue(try XCTUnwrap(back["tailnet"]).live, "a queued second keeps the test running")
+        XCTAssertFalse(try XCTUnwrap(back["tailnet"]).inFlight, "a queued second has no task to reconcile")
+    }
+
+    /// A state this build does not know (a newer build's) reads as idle
+    /// rather than failing the whole stored result.
+    func testUnknownStateReadsAsIdle() throws {
+        let json = #"{"host":{"state":"paused-by-a-future-build","order":1}}"#
+        let runs = try JSONDecoder().decode([String: LiftProbe.Run].self, from: Data(json.utf8))
+        XCTAssertEqual(runs["host"]?.state, .idle)
+        XCTAssertEqual(runs["host"]?.order, 1)
+    }
+
+    func testOrderIsHostThenTailnet() {
+        XCTAssertEqual(LiftProbe.order, [.host, .tailnet])
+        XCTAssertEqual(LiftProbe.position(.host), 1)
+        XCTAssertEqual(LiftProbe.position(.tailnet), 2)
+    }
+}

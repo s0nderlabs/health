@@ -140,6 +140,49 @@ final class LiftClipsTests: XCTestCase {
         XCTAssertFalse(app.staticTexts["ON THE MAC"].exists)
     }
 
+    // ── the card on a ride day ───────────────────────────────────────
+
+    /// A double day's ride face carries the card too (he looked for it on a
+    /// ride morning and it was not there), and switching faces never shows
+    /// two: one card, outside the face-keyed group.
+    func testCardOnTheRideFaceOfADoubleDay() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment = ["HR_DEMO": "1", "HR_DEMO_TAB": "plan", "HR_DEMO_RIDE": "easy", "HR_DEMO_FACE": "ride",
+                                 "HR_DEMO_LIFT": "card", "HR_DEMO_SCROLL": "clips:center"]
+        app.launch()
+        let ride = app.staticTexts["Easy 2 h, the first of the new weekday length"]
+        XCTAssertTrue(ride.waitForExistence(timeout: 10), "not on the ride face")
+        let headers = app.staticTexts.matching(identifier: "lift.header")
+        XCTAssertTrue(headers.firstMatch.waitForExistence(timeout: 5), "no lift clips card on the ride face")
+        XCTAssertEqual(headers.count, 1)
+        XCTAssertTrue(app.windows.firstMatch.frame.contains(headers.firstMatch.frame), "the card is not scrolled into view")
+        // The card sits below the ride card.
+        XCTAssertGreaterThan(headers.firstMatch.frame.minY, ride.frame.maxY)
+
+        let toLift = app.buttons["plan.face.lift"]
+        app.swipeDown() // back to the top, where the toggle is
+        XCTAssertTrue(toLift.waitForExistence(timeout: 5))
+        toLift.tap()
+        XCTAssertTrue(waitGone(ride), "still on the ride face after tapping Lift")
+        XCTAssertEqual(headers.count, 1, "lift face: exactly one card")
+        app.buttons["plan.face.ride"].tap()
+        XCTAssertTrue(ride.waitForExistence(timeout: 5), "back on the ride face")
+        XCTAssertEqual(headers.count, 1, "ride face again: exactly one card")
+    }
+
+    func testCardOnARideOnlyDay() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment = ["HR_DEMO": "1", "HR_DEMO_TAB": "plan", "HR_DEMO_RIDE": "long",
+                                 "HR_DEMO_LIFT": "uploaded", "HR_DEMO_SCROLL": "clips:center"]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["Long ride, build Saturday 1 of 3"].waitForExistence(timeout: 10), "not the ride-only demo day")
+        XCTAssertFalse(app.buttons["plan.face.lift"].exists, "a ride-only day has no toggle")
+        let headers = app.staticTexts.matching(identifier: "lift.header")
+        XCTAssertTrue(headers.firstMatch.waitForExistence(timeout: 5), "no lift clips card on a ride-only day")
+        XCTAssertEqual(headers.count, 1)
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "lift.row.done").count, 3)
+    }
+
     // ── Diagnostics ──────────────────────────────────────────────────
 
     func testProbeRevealAndBothTransports() throws {
@@ -160,7 +203,9 @@ final class LiftClipsTests: XCTestCase {
         let tailnet = element(app, "diag.probe.tailnet")
         XCTAssertTrue(tailnet.exists)
         XCTAssertTrue(host.label.contains("Failed"), host.label)
+        XCTAssertTrue(host.label.contains("1 of 2"), host.label)
         XCTAssertTrue(tailnet.label.contains("OK"), tailnet.label)
+        XCTAssertTrue(tailnet.label.contains("2 of 2"), tailnet.label)
         XCTAssertTrue(tailnet.label.contains("50 MB in 6.2 s"), tailnet.label)
         XCTAssertTrue(app.buttons["diag.probe.start"].exists, "Run again missing")
         XCTAssertTrue(app.staticTexts["Background upload test"].exists)
@@ -170,7 +215,76 @@ final class LiftClipsTests: XCTestCase {
         XCTAssertFalse(app.buttons["diag.probe.use.tailnet"].exists)
     }
 
+    // The paths go one after the other (Nov 18 2026): the rows say the order
+    // and what the second is waiting for.
+
+    func testProbeFirstSendingSecondNext() throws {
+        let app = launchProbe("running")
+        let host = element(app, "diag.probe.host"), tailnet = element(app, "diag.probe.tailnet")
+        XCTAssertTrue(host.waitForExistence(timeout: 10), "Diagnostics not shown")
+        XCTAssertTrue(host.label.contains("1 of 2"), host.label)
+        XCTAssertTrue(host.label.contains("62%"), host.label)
+        XCTAssertTrue(tailnet.label.contains("2 of 2"), tailnet.label)
+        XCTAssertTrue(tailnet.label.contains("Next"), tailnet.label)
+        XCTAssertTrue(tailnet.label.contains("starts when 1 of 2 finishes"), tailnet.label)
+        XCTAssertTrue(hint(app, "Sending 1 of 2. Lock the phone now").exists, "hint does not name 1 of 2")
+        XCTAssertTrue(app.buttons["diag.probe.stop"].exists, "a queued second still counts as running")
+        XCTAssertFalse(app.buttons["diag.probe.start"].exists)
+    }
+
+    func testProbeFirstDoneSecondSending() throws {
+        let app = launchProbe("sequential")
+        let host = element(app, "diag.probe.host"), tailnet = element(app, "diag.probe.tailnet")
+        XCTAssertTrue(host.waitForExistence(timeout: 10), "Diagnostics not shown")
+        XCTAssertTrue(host.label.contains("OK"), host.label)
+        XCTAssertTrue(host.label.contains("1 of 2"), host.label)
+        XCTAssertTrue(host.label.contains("50 MB in 11.4 s"), host.label)
+        XCTAssertTrue(tailnet.label.contains("2 of 2"), tailnet.label)
+        XCTAssertTrue(tailnet.label.contains("37%"), tailnet.label)
+        XCTAssertTrue(hint(app, "Sending 2 of 2. Lock the phone now").exists, "hint does not name 2 of 2")
+    }
+
+    func testProbeHeldSecondSaysOpenTheApp() throws {
+        let app = launchProbe("held")
+        let tailnet = element(app, "diag.probe.tailnet")
+        XCTAssertTrue(tailnet.waitForExistence(timeout: 10), "Diagnostics not shown")
+        XCTAssertTrue(tailnet.label.contains("2 of 2"), tailnet.label)
+        XCTAssertTrue(tailnet.label.contains("Waiting"), tailnet.label)
+        XCTAssertTrue(tailnet.label.contains("waiting to start, open the app"), tailnet.label)
+    }
+
+    /// A result stored before the probe went sequential still reads, with
+    /// no made-up order (both of those ran at once).
+    func testProbeLegacyResultHasNoOrder() throws {
+        let app = launchProbe("legacy")
+        let host = element(app, "diag.probe.host"), tailnet = element(app, "diag.probe.tailnet")
+        XCTAssertTrue(host.waitForExistence(timeout: 10), "Diagnostics not shown")
+        XCTAssertTrue(host.label.contains("50 MB in 26.8 s"), host.label)
+        XCTAssertTrue(tailnet.label.contains("50 MB in 56.5 s"), tailnet.label)
+        XCTAssertFalse(host.label.contains("of 2"), host.label)
+        XCTAssertFalse(tailnet.label.contains("of 2"), tailnet.label)
+        XCTAssertTrue(app.buttons["diag.probe.start"].exists, "Run again missing")
+    }
+
     // ── helpers ──────────────────────────────────────────────────────
+
+    private func launchProbe(_ mode: String) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchEnvironment = ["HR_DEMO": "1", "HR_DEMO_SETTINGS": "1", "HR_DEMO_DIAG": "scroll", "HR_DEMO_PROBE": mode]
+        app.launch()
+        return app
+    }
+
+    private func hint(_ app: XCUIApplication, _ prefix: String) -> XCUIElement {
+        let e = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", prefix)).firstMatch
+        _ = e.waitForExistence(timeout: 5)
+        return e
+    }
+
+    private func waitGone(_ e: XCUIElement, timeout: TimeInterval = 5) -> Bool {
+        let p = NSPredicate(format: "exists == false")
+        return XCTWaiter().wait(for: [expectation(for: p, evaluatedWith: e)], timeout: timeout) == .completed
+    }
 
     private func launchTrim(range: String?) -> XCUIApplication {
         let app = XCUIApplication()

@@ -430,12 +430,15 @@ export class LiftVideoService {
     return null
   }
 
-  /** POST /lift-video/probe: the body to nowhere, timed. */
+  /** POST /lift-video/probe: the body to nowhere, timed (and logged, so the
+   *  Mac can confirm a phone's transport test without its screen). */
   private async probe(req: Request): Promise<{ bytes: number; ms: number }> {
     const t0 = performance.now()
     declaredLength(req, this.maxBytes)
     const bytes = await pump(req, this.maxBytes, null)
-    return { bytes, ms: Math.round(performance.now() - t0) }
+    const ms = Math.round(performance.now() - t0)
+    this.log(`probe via ${routeOf(req)}: ${transferText(bytes, ms)}`)
+    return { bytes, ms }
   }
 
   /** POST /lift-video. Every check that needs no body bytes runs first. */
@@ -549,8 +552,16 @@ export class LiftVideoService {
     let bytes: number
     const fh = await open(partial, 'w', 0o644)
     let closed = false
+    // First byte and finish are logged with the route: "did it upload while
+    // the phone was locked?" is then answered from the Mac alone.
+    let firstAt: number | null = null
+    let lastAt: number | null = null
     try {
       bytes = await pump(req, this.maxBytes, async (chunk) => {
+        if (firstAt == null) {
+          firstAt = performance.now()
+          this.log(`receiving ${meta.original_name} via ${routeOf(req)}${declared != null ? ` (${declared} bytes)` : ''}`)
+        }
         // write() may land short of the whole chunk: loop until it is all down.
         let off = 0
         while (off < chunk.byteLength) {
@@ -559,6 +570,7 @@ export class LiftVideoService {
           off += bytesWritten
         }
       }, signal)
+      lastAt = performance.now()
       if (bytes === 0) throw new BadRequest('empty body')
       if (declared != null && bytes !== declared) throw new BadRequest(`upload incomplete (${bytes} of ${declared} bytes)`)
       await fh.sync()
@@ -568,6 +580,10 @@ export class LiftVideoService {
     } catch (err) {
       if (!closed) await fh.close().catch(() => {})
       await unlink(partial).catch(() => {})
+      // A start line always gets its end: an interrupted upload is logged too.
+      if (firstAt != null) {
+        this.log(`${meta.original_name} via ${routeOf(req)} failed after ${((performance.now() - firstAt) / 1000).toFixed(1)} s: ${(err as Error).message ?? err}`)
+      }
       // A client that hung up mid-send surfaces as a stream error: that is a
       // failed upload, not a daemon fault.
       if (err instanceof BadRequest || err instanceof TooLarge) throw err
@@ -606,8 +622,10 @@ export class LiftVideoService {
     } catch (err) {
       this.log(`lift.video emit failed: ${err}`)
     }
+    // Network time only (first to last byte), not the flush, link and DB write.
+    const took = firstAt == null || lastAt == null ? '' : `, ${transferText(bytes, Math.round(lastAt - firstAt))}`
     this.log(
-      `${placed.path} (${bytes} bytes${placed.dedupe ? `, dedupe ${placed.dedupe}` : ''}${placed.renamedFrom ? `, ${placed.renamedFrom} was taken` : ''})`,
+      `${placed.path} (${bytes} bytes${took}${placed.dedupe ? `, dedupe ${placed.dedupe}` : ''}${placed.renamedFrom ? `, ${placed.renamedFrom} was taken` : ''})`,
     )
     return { path: placed.path, bytes, duplicate: placed.dedupe != null, dedupe: placed.dedupe }
   }
@@ -717,4 +735,24 @@ export function liftVideoEvent(
       ...(placed.dedupe ? { dedupe: placed.dedupe } : {}),
     },
   }
+}
+
+/** Which listener a request came in on: the tailnet listener (100.x:8791, the
+ *  phone's "Tailnet IP" route) or the local one tailscale serve proxies to
+ *  (the "Tailscale host" route). */
+export function routeOf(req: Request): string {
+  let host = ''
+  try {
+    host = new URL(req.url).hostname
+  } catch {
+    return 'unknown'
+  }
+  return isTailnetIPv4(host) ? `tailnet ${host}` : 'tailscale host'
+}
+
+/** "50.0 MB in 26.8 s, 1.87 MB/s". */
+export function transferText(bytes: number, ms: number): string {
+  const mb = bytes / 1_000_000
+  const s = ms / 1000
+  return `${mb.toFixed(1)} MB in ${s.toFixed(1)} s${s > 0 ? `, ${(mb / s).toFixed(2)} MB/s` : ''}`
 }

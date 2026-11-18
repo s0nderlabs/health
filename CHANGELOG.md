@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.22.1 - 2026-11-18
+
+### Fixed
+
+- **Lift clips card on a ride day.** The Plan tab's ride face now shows the
+  Lift clips card under the ride card, so clips can be sent from every Plan
+  state (one card, kept across a double day's face switch).
+- **Background upload test runs one path at a time.** The Tailscale host
+  goes first, then the tailnet IP once it settles, so the timings compare
+  fairly (run together they shared the uplink). The second path only ever
+  starts with the app open (a background start is deferred by iOS); its row
+  says when it is waiting for the app. "Keeps sending with the phone locked"
+  now needs a run that actually went to the background mid-upload.
+
+### Added
+
+- **Mac-side upload log.** The daemon logs each clip's first byte and its end
+  (network time and rate, or the failure and after how long) and every test
+  upload, with the route it came in on (tailnet IP or Tailscale host).
+
 ## 0.22.0 - 2026-11-18
 
 ### Added

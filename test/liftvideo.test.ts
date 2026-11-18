@@ -12,6 +12,8 @@ import {
   appVariant,
   isTailnetIPv4,
   parseLiftMeta,
+  routeOf,
+  transferText,
   parseTailnetIPv4,
   resolveLiftRoot,
   resolveLiftVideoConfig,
@@ -60,8 +62,10 @@ function setup(
   if (!opts.root) cleanup.push(() => rmSync(root, { recursive: true, force: true }))
   const db = new Database(':memory:')
   const events: Ev[] = []
+  const logs: string[] = []
   const svc = new LiftVideoService({
     db,
+    log: (m) => logs.push(m),
     getRoot: () => root,
     emit: (key, payload) => {
       events.push({ key, ...payload })
@@ -80,7 +84,7 @@ function setup(
   cleanup.push(() => listener.stop())
   // @ts-expect-error private server, for the ephemeral port
   const port = listener.server.port as number
-  return { root, db, events, svc, listener, port }
+  return { root, db, events, svc, listener, port, logs }
 }
 
 const RECORDED = '2026-11-16T05:12:00+07:00' // local (Jakarta) date 2026-11-16
@@ -204,6 +208,21 @@ describe('lift video upload', () => {
     expect(res.status).toBe(200)
     expect(events[0].meta.fps).toBeUndefined()
     expect(events[0].meta.resolution).toBeUndefined()
+  })
+
+  test('uploads and probes are logged with the route, size, time and rate', async () => {
+    const { port, logs } = setup()
+    expect((await post(port, clip(400_000), meta({ full_clip: true }))).status).toBe(200)
+    expect(logs.some((l) => /^receiving IMG_8946\.MOV via tailscale host \(400000 bytes\)$/.test(l))).toBe(true)
+    expect(logs.some((l) => /IMG_8946\.MOV \(400000 bytes, 0\.4 MB in \d+\.\d s(, [\d.]+ MB\/s)?\)$/.test(l))).toBe(true)
+    expect((await post(port, clip(200_000), undefined, { path: '/lift-video/probe' })).status).toBe(200)
+    expect(logs.some((l) => /^probe via tailscale host: 0\.2 MB in \d+\.\d s/.test(l))).toBe(true)
+  })
+
+  test('routeOf names the tailnet listener by its 100.x address', () => {
+    expect(routeOf(new Request('http://100.124.102.104:8791/lift-video'))).toBe('tailnet 100.124.102.104')
+    expect(routeOf(new Request('http://127.0.0.1:8790/lift-video'))).toBe('tailscale host')
+    expect(transferText(50_000_000, 26_800)).toBe('50.0 MB in 26.8 s, 1.87 MB/s')
   })
 
   test('a trimmed clip is named <stem>_trim_<start>-<end>s.<ext> with one decimal', async () => {

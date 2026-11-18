@@ -91,9 +91,11 @@ struct PlanView: View {
             segmentHalf("Ride", icon: "bicycle", on: face == .ride) {
                 chosenFace = (planKey(plan), .ride)
             }
+            .accessibilityIdentifier("plan.face.ride")
             segmentHalf("Lift", icon: "dumbbell.fill", on: face == .lift) {
                 chosenFace = (planKey(plan), .lift)
             }
+            .accessibilityIdentifier("plan.face.lift")
         }
         .padding(3)
         .glassCapsule()
@@ -187,12 +189,20 @@ struct PlanView: View {
                                         .id("ride")
                                 } else if let lifts = plan.lifts, !lifts.isEmpty {
                                     sessionCard(lifts, warmup: plan.warmup ?? [])
-                                    // Right under the session: the set he just
-                                    // filmed goes to the Mac from where he
-                                    // already is between sets.
-                                    LiftClipsCard()
-                                        .id("clips")
                                 }
+                            }
+                            .id(face)
+                            .transition(.opacity)
+                            // Right under the session (or the ride): the set
+                            // he just filmed goes to the Mac from where he
+                            // already is, and on a ride day yesterday's sets
+                            // still do. ONE card for both faces, outside the
+                            // face-keyed group: a face switch never stacks the
+                            // outgoing face's copy on the incoming one, and an
+                            // open picker or trim sheet survives the switch.
+                            LiftClipsCard()
+                                .id("clips")
+                            Group {
                                 // Notes and reminders belong to the lift half
                                 // when there is one (chalk, creatine, bar
                                 // speed); on a ride-only day they are the
@@ -206,7 +216,7 @@ struct PlanView: View {
                                     }
                                 }
                             }
-                            .id(face)
+                            .id(face == .ride ? "notes-ride" : "notes-lift")
                             .transition(.opacity)
                         }
                         freshness(plan)

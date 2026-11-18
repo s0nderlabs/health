@@ -36,7 +36,7 @@ struct LiftClipsCard: View {
     /// The locked-phone claim only once the probe has proven the path clips
     /// use; until then it says what is known.
     private var lockedLine: String {
-        probe.run(settings.liftTransport).state == .ok && !probe.run(settings.liftTransport).background
+        probe.run(settings.liftTransport).provedLocked
             ? "Keeps sending with the phone locked."
             : "Locked-phone sending not yet tested."
     }

@@ -204,7 +204,7 @@ struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.vertical, 2)
-            ForEach(LiftTransport.allCases, id: \.self) { t in
+            ForEach(LiftProbe.order, id: \.self) { t in
                 probeRow(t)
             }
             if probe.running {
@@ -233,19 +233,36 @@ struct SettingsView: View {
         }
     }
 
-    /// "Lock now" only once both uploads exist: a task created after the
-    /// lock is one iOS may defer, which would make the test meaningless.
+    /// "Lock now" only once the running upload exists: a task created after
+    /// the lock is one iOS may defer, which would make the test meaningless.
+    /// The paths go one after the other, so the hint says which one is on.
     private var probeHint: String {
         if probe.preparing { return "Getting ready. Keep the app open for a moment." }
-        if probe.running { return "Running. Lock the phone now and leave it: that is the test. The result waits here." }
-        return "Sends 50 MB to the Mac once per path through a background session. Start it, then lock the phone when this says so."
+        let n = LiftProbe.order.count
+        if let t = LiftProbe.order.first(where: { probe.run($0).inFlight }) {
+            let at = probe.slot(t)
+            if at < n, LiftProbe.order.contains(where: { probe.run($0).state == .queued }) {
+                return "Sending \(at) of \(n). Lock the phone now and leave it. The next path starts when this one finishes, or, if the phone is still locked then, when you next open the app."
+            }
+            return "Sending \(at) of \(n). Lock the phone now and leave it: that is the test. The result waits here."
+        }
+        if let t = LiftProbe.order.first(where: { probe.run($0).state == .queued }) {
+            return "Starting \(probe.slot(t)) of \(n). Lock the phone again once it says Sending."
+        }
+        return "Sends 50 MB to the Mac over each path, one after the other so they never share the link, through a background session. Start it, then lock the phone when this says so."
     }
 
     private func probeRow(_ t: LiftTransport) -> some View {
         let r = probe.run(t)
+        // "1 of 2": where this path goes in the run. A result saved before the
+        // probe went sequential has no order (both ran at once): no prefix.
+        let n = LiftProbe.order.count
+        let pos = (r.order ?? (r.state == .idle ? LiftProbe.position(t) : nil)).map { "\($0) of \(n) · " } ?? ""
+        let ahead = LiftProbe.order.prefix(while: { $0 != t }).last
         let status: (text: String, color: Color) = {
             switch r.state {
             case .idle: return ("Not run", .secondary)
+            case .queued: return (r.held ? "Waiting" : "Next", .secondary)
             case .waiting: return ("Waiting", .secondary)
             case .uploading: return ("\(Int((Double(r.sent) / Double(max(r.total, 1)) * 100).rounded(.down)))%", .primary)
             case .ok: return ("OK", Theme.okDim)
@@ -253,9 +270,13 @@ struct SettingsView: View {
             case .failed: return ("Failed", .secondary)
             }
         }()
-        let detail: String = {
+        let detail: String = pos + {
             switch r.state {
             case .idle, .waiting: return t.detail
+            case .queued:
+                if r.held { return "\(t.detail) · waiting to start, open the app" }
+                let first = ahead.map { "\(probe.slot($0)) of \(n)" } ?? "the one before"
+                return "\(t.detail) · starts when \(first) finishes"
             case .uploading: return "\(t.detail) · \(LiftFormat.progress(r.sent, of: r.total))"
             case .ok:
                 var parts = [t.detail, LiftFormat.size(r.serverBytes ?? r.total)]
@@ -264,7 +285,9 @@ struct SettingsView: View {
                 return parts.joined(separator: " · ")
             case .failed: return "\(t.detail) · \(r.error ?? "unknown error")"
             }
-        }() + (r.background ? " · started with the app in the background, so iOS may have deferred it: run again" : "")
+        }()
+            + (r.held && r.state != .queued ? " · started once the app was open" : "")
+            + (r.background ? " · started with the app in the background, so iOS may have deferred it: run again" : "")
         let selected = settings.liftTransport == t
         let info = VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .firstTextBaseline) {
