@@ -1219,9 +1219,9 @@ describe('seal v0.20.0 review regressions', () => {
   })
 
   test('a re-measure rival the same pass excludes never takes the step-on with it', () => {
-    const h = s400Harness(local(2026, 11, 12, 10))
-    const t1 = local(2026, 11, 12, 8, 59) + 40_000 // 08:59:40
-    const t2 = t1 + 40_000 // 09:00:20: past the morning window
+    const h = s400Harness(local(2026, 11, 12, 15))
+    const t1 = local(2026, 11, 12, 13, 59) + 40_000 // 13:59:40: late fasted band, no meal
+    const t2 = t1 + 40_000 // 14:00:20: past the late fasted band
     bare(h, 's400-one', t1, 70.5)
     expect(verdict(h.store, 's400-one-m')).toBeNull()
     h.s400('s400-two', t2, 70.6, 500)
@@ -1255,5 +1255,73 @@ describe('seal v0.20.0 review regressions', () => {
     expect(verdict(store, 'hk-mass-d10')).toBe('test: before the first fasted weigh-in (by hand)')
     food.reclassifyWeighins({ dateRuleChanged: true })
     expect(verdict(store, 'hk-mass-d10')).toBe('test: before the first fasted weigh-in (by hand)')
+  })
+})
+
+describe('late fasted first reading (Nov 18: back to sleep after fajr)', () => {
+  // Synthetic weights and dates.
+  const iso = (ms: number) => new Date(ms).toISOString()
+  const mass = (uuid: string, at: number, kg: number) => ({ uuid, ts: iso(at), kind: 'mass' as const, value: kg, source: 'Synthetic Scale' })
+  const base = (food: FoodService, setNow: (ms: number) => void) => {
+    for (const [d, v] of [[15, 77.0], [16, 77.1], [17, 76.9]] as const) {
+      setNow(local(2026, 11, d, 6))
+      food.ingestBodySamples([mass(`hk-mass-l${d}`, local(2026, 11, d, 5, 30), v)], [])
+    }
+  }
+
+  test('a first reading at 11:37 with no meal before it counts, and says so', () => {
+    const { food, store, setNow, events } = harness(local(2026, 11, 18, 12))
+    const book = new MealBook(store.db)
+    base(food, setNow)
+    setNow(local(2026, 11, 18, 11, 40))
+    food.ingestBodySamples([mass('hk-mass-late', local(2026, 11, 18, 11, 37), 77.2)], [])
+    expect(book.bodyExcluded('hk-mass-late')).toBeNull()
+    expect(events.at(-1)!.content).toContain('late fasted reading')
+  })
+
+  test('a meal before it, even one logged afterwards, files it after a meal', async () => {
+    const { food, store, setNow } = harness(local(2026, 11, 18, 12))
+    const book = new MealBook(store.db)
+    base(food, setNow)
+    setNow(local(2026, 11, 18, 11, 40))
+    food.ingestBodySamples([mass('hk-mass-late2', local(2026, 11, 18, 11, 37), 77.2)], [])
+    expect(book.bodyExcluded('hk-mass-late2')).toBeNull()
+    await food.logFromChat({ items: [{ name: 'toast', kcal: 200, protein_g: 6 }], at: iso(local(2026, 11, 18, 8)) })
+    expect(book.bodyExcluded('hk-mass-late2')).toBe('after a meal')
+  })
+
+  test('past 14:00 it is still not a morning reading; after a counted morning one it is a repeat', () => {
+    const { food, store, setNow } = harness(local(2026, 11, 18, 15))
+    const book = new MealBook(store.db)
+    base(food, setNow)
+    setNow(local(2026, 11, 18, 15))
+    food.ingestBodySamples([mass('hk-mass-pm', local(2026, 11, 18, 14, 30), 77.2)], [])
+    expect(book.bodyExcluded('hk-mass-pm')).toBe('not a morning reading')
+    setNow(local(2026, 11, 19, 12))
+    food.ingestBodySamples([mass('hk-mass-am19', local(2026, 11, 19, 6), 77.0)], [])
+    food.ingestBodySamples([mass('hk-mass-late19', local(2026, 11, 19, 11), 77.1)], [])
+    expect(book.bodyExcluded('hk-mass-am19')).toBeNull()
+    expect(book.bodyExcluded('hk-mass-late19')).toBe('repeat: a morning reading already counts today')
+  })
+})
+
+describe('late fasted band: readings stored before the rule are re-judged (review finding)', () => {
+  const iso = (ms: number) => new Date(ms).toISOString()
+  const mass = (uuid: string, at: number, kg: number) => ({ uuid, ts: iso(at), kind: 'mass' as const, value: kg, source: 'Synthetic Scale' })
+  test('a stored "not a morning reading" in 09:00-14:00 on or after weighins_from counts again; older ones keep their verdict', () => {
+    const { food, store, setNow } = harness(local(2026, 11, 18, 12))
+    const book = new MealBook(store.db)
+    const cfg = { ...DEFAULT_CONFIG.food, weighins_from: '2026-11-17' }
+    ;(food as unknown as { deps: { getConfig: () => typeof cfg } }).deps.getConfig = () => cfg
+    for (const [d, v] of [[17, 77.0]] as const) {
+      setNow(local(2026, 11, d, 6))
+      food.ingestBodySamples([mass(`hk-mass-s${d}`, local(2026, 11, d, 5, 30), v)], [])
+    }
+    setNow(local(2026, 11, 18, 11, 40))
+    food.ingestBodySamples([mass('hk-mass-old18', local(2026, 11, 18, 11, 37), 77.2)], [])
+    // as the pre-rule daemon stored it
+    store.db.run("UPDATE body_samples SET excluded = 'not a morning reading' WHERE uuid = 'hk-mass-old18'")
+    food.reclassifyWeighins()
+    expect(book.bodyExcluded('hk-mass-old18')).toBeNull()
   })
 })

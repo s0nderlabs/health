@@ -61,7 +61,8 @@ WHOOP band ──(BLE Broadcast HR)──> health-relay ──(WS, raw frames)�
   writes there), and each one becomes a `body.weighin` event: weight, body
   fat and the change from your last counted reading. Readings that should
   not drive the trend (a test before your start date, outside the morning
-  window, a second reading that morning, or far enough off to be someone
+  window (a late first reading before 14:00 still counts when no meal came
+  before it), a second reading that morning, or far enough off to be someone
   else) are still shown, labelled and excluded; you can flip any of them.
   There is no calorie
   target until your own logs and weigh-in trend have measured maintenance
@@ -86,7 +87,8 @@ WHOOP band ──(BLE Broadcast HR)──> health-relay ──(WS, raw frames)�
   same weigh-in, and it adds formula estimates of visceral fat, muscle,
   water, protein, bone and BMR, each labelled with how far to trust it.
   The phone app's Body tab shows it all: the latest weigh-in and trend, a
-  body-composition figure, goal progress and the weigh-in history. Readings
+  body-composition figure (fat drawn as a shell around the lean body, true
+  by area), goal progress and the weigh-in history. Readings
   far from your recent weight (a housemate on the same scale) are filed as
   someone else's and can be reclaimed.
   Photos are converted to plain JPEGs with GPS and all other metadata

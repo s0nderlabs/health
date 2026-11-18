@@ -1,19 +1,23 @@
 // The Body tab's composition figure (Nov 16 2026, his ask; polished twice
-// the same evening to his locked direction): the latest S400 reading as a
-// 4-compartment body. An athletic front silhouette (ONE continuous Bezier
-// outline: head, neck, deltoids, arms just off the body, V-taper, two legs,
-// simple feet; his ask the same night: "the first one body silhouette is
-// better", crafted past Xiaomi's) filled BOTTOM-UP like liquid
-// levels, in bands whose AREAS are proportional to each compartment's mass:
-// mineral, protein, water, fat, split by light level lines (never dark
-// belts). Whatever the four do not account for stays UNFILLED at the top,
-// like headroom above a liquid (never stretched to fill 100%, never a
-// striped cap on the crown). A faint dashed ghost inside the body is the goal weight (the goal
-// card's own number), the rim between them dimmed. The legend stands beside
-// the figure; tap a band or its row for the detail: kg, % of weight, the
-// 7-day trend, basis. Visceral fat is never painted here: it stays a number
-// on the metrics card. Every number comes from GET /body; the phone only
-// draws. Method and basis notes live behind the card's (i) sheet.
+// the same evening; FAT AS THE OUTER LAYER on Nov 18, his decision): the
+// latest S400 reading as a 4-compartment body. An athletic front silhouette
+// (ONE continuous Bezier outline: head, neck, deltoids, arms just off the
+// body, V-taper, two legs, simple feet; crafted past Xiaomi's). Fat is a
+// SHELL around the whole figure, its area fat's share of the weight: the
+// inner edge is the same figure shrunk per part toward each part's own
+// medial line by ONE factor solved on area, so every limb keeps a
+// proportionate rim and the shell thins as the fat % drops (a 1.25 pt floor
+// keeps it visible, solved inside the area). Inside the shell, mineral,
+// protein and water fill the lean body BOTTOM-UP like liquid levels, in
+// bands whose AREAS are proportional to their mass, split by light level
+// lines (never dark belts); whatever the four do not account for is a thin
+// hatched band at the top. A dashed line inside the shell is the goal
+// weight (the goal card's own number): the same lean body with the goal's
+// thinner shell. The legend stands beside the figure; tap the shell, a band
+// or its row for the detail: kg, % of weight, the 7-day trend, basis.
+// Visceral fat is never painted here: it stays a number on the metrics
+// card. Every number comes from GET /body; the phone only draws. Method and
+// basis notes live behind the card's (i) sheet.
 
 import SwiftUI
 
@@ -44,7 +48,7 @@ enum BodyFont {
 /// water a cool teal, protein amber, mineral a muted bone. Lightness is held
 /// close across the three saturated hues, and each band's own gradient is
 /// gentle, so a boundary reads as a change of hue, not a light-dark step.
-/// The unassigned rest is no hue at all: unfilled headroom.
+/// The unassigned rest is no hue at all: a thin hatched band.
 enum BodyHue {
     /// Top and bottom of each band's soft vertical gradient.
     static func stops(_ key: String) -> (Color, Color) {
@@ -67,7 +71,7 @@ enum BodyHue {
 }
 
 /// The unassigned key's mark: an EMPTY swatch, the same whisper of ground
-/// the unfilled headroom of the figure shows.
+/// the hatched band of the figure sits on.
 struct EmptySwatch: View {
     var cornerRadius: CGFloat = 3
 
@@ -118,9 +122,8 @@ enum BodyOutline {
     /// The part of the box the figure occupies, mapped onto the view.
     static let viewBox = CGRect(x: 13.5, y: 0, width: 73, height: 240)
 
-    /// Which piece of the body a knot belongs to: the goal outline narrows
-    /// the torso about the centre line and each leg about its own, and keeps
-    /// the head, shoulders, arms and feet as they are.
+    /// Which piece of the body a knot belongs to: the shell's inner edge
+    /// shrinks each piece toward its own medial line.
     enum Part { case head, shoulder, arm, torso, leg, foot }
 
     /// A point on the outline, its tangent (degrees: 0 = +x, 90 = down,
@@ -199,33 +202,29 @@ enum BodyOutline {
         Knot(.leg, 50, 132.0, 180, 1.2, 0),
     ]
 
-    /// The fingertip's lowest point (unit y) and the hand's span (right
-    /// side), for the band cut's sliver rule.
-    static let fingertipY: CGFloat = right.filter { $0.part == .arm }.map(\.p.y).max() ?? 0
-    static let handX: ClosedRange<CGFloat> = {
-        let hand = right.filter { $0.part == .arm && $0.p.y > fingertipY - 22 }.map(\.p.x)
-        return (hand.min() ?? 0) - 1.5 ... (hand.max() ?? 0) + 1.5
-    }()
-    static let crownY: CGFloat = right.first?.p.y ?? 0
-    /// The leg's own centre line (right side), what the goal outline
-    /// narrows each leg about.
-    static let legCentre: CGFloat = 57.5
-
     /// One cubic: from `a` to `b` through two controls.
     struct Segment { let a, c1, c2, b: CGPoint }
 
-    /// The right half's segments, each knot moved by `map` (x' = s * x + t,
-    /// its handles scaled by s), so a moved knot keeps its tangent's sense.
-    private static func half(_ map: (Knot) -> (CGFloat, CGFloat)) -> [Segment] {
+    /// How a knot moves for a derived outline: toward `m` by `fx` across and
+    /// `fy` down (1 = kept), its handles scaled the same way, so a moved knot
+    /// keeps its tangent's sense.
+    struct Move {
+        let m: CGPoint, fx: CGFloat, fy: CGFloat
+        static let kept = Move(m: .zero, fx: 1, fy: 1)
+        func apply(_ p: CGPoint) -> CGPoint { CGPoint(x: m.x + (p.x - m.x) * fx, y: m.y + (p.y - m.y) * fy) }
+    }
+
+    /// The right half's segments, each knot moved by `map`.
+    private static func half(_ map: (Int, Knot) -> Move) -> [Segment] {
+        let moves = right.indices.map { map($0, right[$0]) }
         var out: [Segment] = []
-        for (k0, k1) in zip(right, right.dropFirst()) {
-            let (s0, t0) = map(k0), (s1, t1) = map(k1)
+        for i in 0..<(right.count - 1) {
+            let k0 = right[i], k1 = right[i + 1], v0 = moves[i], v1 = moves[i + 1]
             let d0 = Knot.unit(k0.outDeg), d1 = Knot.unit(k1.inDeg)
-            let a = CGPoint(x: k0.p.x * s0 + t0, y: k0.p.y)
-            let b = CGPoint(x: k1.p.x * s1 + t1, y: k1.p.y)
+            let a = v0.apply(k0.p), b = v1.apply(k1.p)
             out.append(Segment(a: a,
-                               c1: CGPoint(x: a.x + d0.x * k0.outLen * s0, y: a.y + d0.y * k0.outLen),
-                               c2: CGPoint(x: b.x - d1.x * k1.inLen * s1, y: b.y - d1.y * k1.inLen),
+                               c1: CGPoint(x: a.x + d0.x * k0.outLen * v0.fx, y: a.y + d0.y * k0.outLen * v0.fy),
+                               c2: CGPoint(x: b.x - d1.x * k1.inLen * v1.fx, y: b.y - d1.y * k1.inLen * v1.fy),
                                b: b))
         }
         return out
@@ -246,32 +245,10 @@ enum BodyOutline {
         return p
     }
 
-    private static let body: [Segment] = loop(half { _ in (1, 0) })
+    private static let body: [Segment] = loop(half { _, _ in .kept })
 
     /// The figure in unit space.
     static func path() -> Path { path(body) }
-
-    // ── the goal outline ──────────────────────────────────────────────
-
-    /// How the goal outline moves a knot at narrowing `a`: the torso about
-    /// the centre line, each leg about its own (blending in from the hip,
-    /// so the outline stays one smooth curve), head, shoulders, arms
-    /// and feet kept. A lighter body is the same frame, less around the middle.
-    private static func ghostMap(_ k: Knot, _ a: CGFloat) -> (CGFloat, CGFloat) {
-        switch k.part {
-        case .head, .shoulder, .arm, .foot:
-            return (1, 0)
-        case .torso:
-            return (a, 50 * (1 - a))
-        case .leg:
-            if k.p.x <= 50.001 { return (a, 50 * (1 - a)) }
-            let w = min(max((k.p.y - 124) / 26, 0), 1)
-            let c = 50 + (legCentre - 50) * w
-            return (a, c * (1 - a))
-        }
-    }
-
-    private static func ghostLoop(_ a: CGFloat) -> [Segment] { loop(half { ghostMap($0, a) }) }
 
     /// Polygon area of a closed run of cubics (each flattened to 12 steps).
     private static func area(_ segs: [Segment]) -> CGFloat {
@@ -291,36 +268,172 @@ enum BodyOutline {
 
     private static let bodyArea: CGFloat = area(body)
 
-    /// The narrowing that makes the goal outline's AREA `ratio` of the
-    /// figure's (the area-for-mass rule the bands are cut by). Only the
-    /// torso and legs give, so they give more than `ratio` itself.
-    static func ghostNarrowing(areaRatio ratio: CGFloat) -> CGFloat {
-        let goal = bodyArea * min(max(ratio, 0), 1)
+    // ── the fat shell ─────────────────────────────────────────────────
+    //
+    // Fat is the OUTER LAYER (Nov 18 2026, his decision): a shell around the
+    // whole body. Its inner edge is the same figure shrunk PER PART toward
+    // that part's own medial line, by ONE factor `s` solved so the inner
+    // AREA is the lean share of the weight. A uniform-width inset would eat
+    // a thin forearm whole at 15% while barely touching the torso; a per-part
+    // shrink takes the same fraction of every part's half-width, so each
+    // limb keeps a proportionate rim and the shell thins as the fat % drops.
+
+    /// The medial lines (right side, unit space): each arm's axis from the
+    /// shoulder joint to the mitten's centre, each leg's from the hip to the
+    /// foot, and the shoulder girdle (centre line to the shoulder joint),
+    /// so the trapezius gets a rim on TOP rather than a narrower shoulder.
+    private static let armAxis: [CGPoint] = [CGPoint(x: 77.6, y: 52), CGPoint(x: 79.0, y: 66), CGPoint(x: 78.8, y: 83),
+                                             CGPoint(x: 79.2, y: 97), CGPoint(x: 80.2, y: 107), CGPoint(x: 81.0, y: 130),
+                                             CGPoint(x: 81.2, y: 142.5)]
+    private static let legAxis: [CGPoint] = [CGPoint(x: 59.0, y: 128), CGPoint(x: 58.5, y: 148), CGPoint(x: 57.4, y: 172),
+                                             CGPoint(x: 57.4, y: 187), CGPoint(x: 57.6, y: 200), CGPoint(x: 56.0, y: 222),
+                                             CGPoint(x: 55.9, y: 229), CGPoint(x: 57.2, y: 233.8)]
+    private static let girdle: [CGPoint] = [CGPoint(x: 50, y: 49), CGPoint(x: 77.6, y: 52)]
+
+    private static func nearest(_ p: CGPoint, on line: [CGPoint]) -> CGPoint {
+        var best = line[0], bd = CGFloat.infinity
+        for (a, b) in zip(line, line.dropFirst()) {
+            let dx = b.x - a.x, dy = b.y - a.y
+            let t = max(0, min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / (dx * dx + dy * dy)))
+            let q = CGPoint(x: a.x + t * dx, y: a.y + t * dy)
+            let d = hypot(p.x - q.x, p.y - q.y)
+            if d < bd { bd = d; best = q }
+        }
+        return best
+    }
+
+    /// The armpit's arch: the last knot of the arm, where it meets the torso.
+    private static let armpit: Int = right.lastIndex { $0.part == .arm } ?? 0
+
+    /// Each right-half knot's medial point: the head about its centre (the
+    /// crown shrinks down onto it), the neck and torso about the centre
+    /// line, the trapezius down onto the girdle, the deltoid and each arm
+    /// about the arm's axis (the armpit's arch up into the shoulder), each
+    /// leg about its own axis (blending in from the hip, as the goal outline
+    /// does), the crotch up toward the pelvis on the centre line (so the
+    /// mirrored halves still meet), the feet onto the foot's end of the axis.
+    static let medial: [CGPoint] = right.indices.map { i in
+        let p = right[i].p
+        switch right[i].part {
+        case .head:
+            return CGPoint(x: 50, y: min(max(p.y, 15), 33))
+        case .shoulder:
+            if p.x < 60 { return CGPoint(x: 50, y: p.y) }
+            let g = nearest(p, on: girdle), a = nearest(p, on: armAxis)
+            return hypot(p.x - g.x, p.y - g.y) <= hypot(p.x - a.x, p.y - a.y) ? g : a
+        case .arm:
+            return i == armpit ? CGPoint(x: 72.8, y: 61) : nearest(p, on: armAxis)
+        case .torso:
+            return CGPoint(x: 50, y: p.y)
+        case .leg, .foot:
+            if p.x <= 50.001 { return CGPoint(x: 50, y: 121) }
+            let q = nearest(p, on: legAxis)
+            let w = min(max((p.y - 124) / 26, 0), 1)
+            return CGPoint(x: 50 + (q.x - 50) * w, y: p.y + (q.y - p.y) * w)
+        }
+    }
+
+    /// The legibility floor: no rim thinner than 1.25 pt at the hero size
+    /// (114 pt across 73 units), so a lean forearm still shows its layer.
+    /// The factor is solved WITH the floor in place, so the coral's total
+    /// area stays exactly the fat share; the floor only moves a little of it
+    /// from the torso to the limbs. Below `floorShare` (about 9% fat) the
+    /// floor alone is more than the share, and the shell is drawn at the
+    /// floor (said in the (i) sheet; the factor reports it as 1).
+    static let rimFloorPt: CGFloat = 1.25
+    static let rimFloor: CGFloat = rimFloorPt * viewBox.width / 114
+
+    /// The deepest a part's rim is measured from: a wide part (the torso,
+    /// the head) shrinks toward a medial line this far in from its edge, not
+    /// toward its exact centre, so the shell is one even layer around the
+    /// trunk instead of bulging at the flanks while the shoulders stay bare.
+    /// Limbs are thinner than this and shrink about their own axis.
+    static let depthCap: CGFloat = 12
+
+    /// A knot's depth: its distance to its medial point, capped.
+    private static let depth: [CGFloat] = right.indices.map { i in
+        let p = right[i].p, m = medial[i]
+        return min(hypot(p.x - m.x, p.y - m.y), depthCap)
+    }
+
+    /// The rim at depth `d` and shrink `s`: (1 - s) of the depth, never
+    /// under the floor, never over 70% of the part. The one formula the
+    /// shell's inner edge and the goal outline share.
+    private static func rim(depth d: CGFloat, _ s: CGFloat, floor: CGFloat) -> CGFloat {
+        min(max((1 - s) * d, floor), 0.7 * d)
+    }
+
+    /// A knot's move at shrink `s`: toward its (capped) medial point by its rim.
+    private static func shellMove(_ i: Int, _ s: CGFloat, floor: CGFloat) -> Move {
+        let p = right[i].p, m0 = medial[i]
+        let d0 = hypot(p.x - m0.x, p.y - m0.y)
+        guard d0 > 0.001 else { return .kept }
+        let d = depth[i]
+        let m = CGPoint(x: p.x + (m0.x - p.x) * d / d0, y: p.y + (m0.y - p.y) * d / d0)
+        let f = 1 - rim(depth: d, s, floor: floor) / d
+        return Move(m: m, fx: f, fy: f)
+    }
+
+    private static func shellLoop(_ s: CGFloat, floor: CGFloat) -> [Segment] { loop(half { i, _ in shellMove(i, s, floor: floor) }) }
+
+    /// The shrink whose inner outline has `ratio` of the figure's AREA
+    /// (ratio = 1 - fat's share of the weight). Bisection on the sampled
+    /// area, the floor in place throughout; 1 when the floor alone already
+    /// covers more than the share. Memoized per (ratio to 1e-6, floor): the
+    /// card and its sheet ask for the same reading's factor on every render.
+    static func shellFactor(areaRatio ratio: CGFloat, floor: CGFloat = rimFloor) -> CGFloat {
+        let key = FactorKey(ratio: Int((min(max(ratio, 0), 1) * 1_000_000).rounded()), floor: floor)
+        if let s = factors[key] { return s }
+        let s = solve(areaRatio: CGFloat(key.ratio) / 1_000_000, floor: floor)
+        if factors.count > 32 { factors.removeAll() }
+        factors[key] = s
+        return s
+    }
+
+    private struct FactorKey: Hashable { let ratio: Int; let floor: CGFloat }
+    private static var factors: [FactorKey: CGFloat] = [:]
+
+    private static func solve(areaRatio ratio: CGFloat, floor: CGFloat) -> CGFloat {
+        let goal = bodyArea * ratio
         var lo: CGFloat = 0.3, hi: CGFloat = 1
-        if area(ghostLoop(lo)) >= goal { return lo }
-        for _ in 0..<24 {
+        if area(shellLoop(hi, floor: floor)) <= goal { return hi }
+        if area(shellLoop(lo, floor: floor)) >= goal { return lo }
+        for _ in 0..<26 {
             let mid = (lo + hi) / 2
-            if area(ghostLoop(mid)) > goal { hi = mid } else { lo = mid }
+            if area(shellLoop(mid, floor: floor)) > goal { hi = mid } else { lo = mid }
         }
         return (lo + hi) / 2
     }
 
-    /// The goal outline, closed (for the dimmed rim).
-    static func ghost(narrowing a: CGFloat) -> Path { path(ghostLoop(a)) }
+    /// The fat share the floor alone already covers (about 9%): below it the
+    /// shell is drawn at the floor, a little more than the share.
+    static let floorShare: CGFloat = 1 - area(shellLoop(1, floor: rimFloor)) / bodyArea
 
-    /// The goal outline's dashed line: only where it leaves the figure's
-    /// own edge (torso and legs). Where it would sit on the edge (head,
-    /// shoulders, arms, feet) it is not drawn, so no dash doubles the outline.
-    static func ghostLine(narrowing a: CGFloat) -> Path {
-        let segs = ghostLoop(a)
+    /// The shell's inner edge (the lean body), closed, in unit space.
+    static func inner(_ s: CGFloat) -> Path { path(shellLoop(s, floor: rimFloor)) }
+
+    // ── the goal outline ──────────────────────────────────────────────
+
+    /// The goal outline: the SAME lean body with the goal's thinner shell,
+    /// i.e. the figure shrunk by the same per-part machinery (no floor: it
+    /// is a line, not a layer) until its area is the goal weight over
+    /// today's. It runs inside today's shell: the coral outside it is the
+    /// fat between today and the goal, the coral inside it the goal's shell.
+    static func ghostFactor(areaRatio ratio: CGFloat) -> CGFloat { shellFactor(areaRatio: ratio, floor: 0) }
+
+    /// The goal outline's dashed line: only where it stands at least
+    /// `minGap` units in from the figure's edge (the torso, the shoulders,
+    /// the hips), so on a thin limb no dash doubles the outline.
+    static func ghostLine(_ s: CGFloat, minGap: CGFloat) -> Path {
+        let segs = shellLoop(s, floor: 0)
         let n = right.count - 1
+        let gap = depth.map { rim(depth: $0, s, floor: 0) }
         var p = Path()
         var open = false
         for (i, g) in segs.enumerated() {
             // The knots this segment joins, on the right half's numbering.
             let j = i < n ? i : 2 * n - 1 - i
-            let kept = { (k: Knot) in k.part == .head || k.part == .shoulder || k.part == .arm || k.part == .foot }
-            if kept(right[j]) && kept(right[j + 1]) {
+            if gap[j] < minGap || gap[j + 1] < minGap {
                 open = false
                 continue
             }
@@ -330,70 +443,110 @@ enum BodyOutline {
         return p
     }
 
-    /// The fingertip sliver rule's reach (unit y, about 6 pt at the hero
-    /// size): a band cut this close above the fingertips gives the tips to
-    /// the band above, so no band leaves painted nails. The crown's reach
-    /// (about 2 pt): unfilled headroom thinner than this goes to the band
+    // ── area tables (the bands are cut by area) ───────────────────────
+
+    /// The hand rule's reach (unit y, the mitten from fingertip to wrist,
+    /// about 31 pt at the hero size): a band cut inside the hands gives the
+    /// whole hand to the band above, so no band leaves painted gloves or
+    /// nails, and the cut is placed on the rest. The crown's reach
+    /// (about 2 pt): an unassigned band thinner than this goes to the band
     /// below, so it never reads as a cap.
-    static let tipSliver: CGFloat = 3.9
+    static let tipSliver: CGFloat = 20
     static let crownSliver: CGFloat = 1.3
 
-    /// Area below each height, sampled once: rows[i] = the silhouette's
-    /// area from unit y = i * step down to the feet, as a fraction of the
-    /// whole. The bands are cut by AREA, so a band's painted size is its
-    /// share of the mass (cutting by height would let the narrow legs shrink
-    /// the bottom band and the wide shoulders inflate the top one).
-    /// `noTips` leaves out the hands' tips (the reach of the sliver rule):
-    /// a cut that gives them away is placed on the rest, so every band
-    /// still paints its own share.
-    private static let step: CGFloat = 0.5
-    private static func table(noTips: Bool) -> [CGFloat] {
-        let shape = path().cgPath
-        let rows = Int(box.height / step)
-        let cols = 240
-        let tipRows = fingertipY - tipSliver - 2
-        let mirrored = (box.width - handX.upperBound)...(box.width - handX.lowerBound)
-        var widths = [CGFloat](repeating: 0, count: rows)
-        var whole: CGFloat = 0
-        for r in 0..<rows {
-            let y = (CGFloat(r) + 0.5) * step
-            var inside = 0, all = 0
-            for c in 0..<cols {
-                let x = viewBox.minX + (CGFloat(c) + 0.5) * viewBox.width / CGFloat(cols)
-                guard shape.contains(CGPoint(x: x, y: y), using: .evenOdd) else { continue }
-                all += 1
-                if noTips && y >= tipRows && (handX.contains(x) || mirrored.contains(x)) { continue }
-                inside += 1
-            }
-            widths[r] = CGFloat(inside)
-            whole += CGFloat(all)
-        }
-        let total = max(whole, 1)
-        var out = [CGFloat](repeating: 0, count: rows + 1)
-        var acc: CGFloat = 0
-        for r in stride(from: rows - 1, through: 0, by: -1) {
-            acc += widths[r]
-            out[r] = acc / total
-        }
-        out[rows] = 0
-        return out
-    }
-    private static let areaBelow = table(noTips: false)
-    private static let areaBelowNoTips = table(noTips: true)
+    /// A fillable outline (the whole figure, or the lean body inside the
+    /// shell) with what the band cut needs: its fingertip (lowest arm point),
+    /// the hand's span (right side), its crown, and the area below each
+    /// height, sampled once: below[i] = the outline's area from unit y =
+    /// i * step down to the feet, as a fraction of the whole. The bands are
+    /// cut by AREA, so a band's painted size is its share of the mass
+    /// (cutting by height would let the narrow legs shrink the bottom band
+    /// and the wide shoulders inflate the top one). `belowNoTips` leaves out
+    /// the hands' tips (the reach of the sliver rule): a cut that gives them
+    /// away is placed on the rest, so every band still paints its own share.
+    struct Profile {
+        let shape: CGPath
+        let fingertipY: CGFloat
+        let handX: ClosedRange<CGFloat>
+        let crownY: CGFloat
+        let below: [CGFloat]
+        let belowNoTips: [CGFloat]
 
-    /// The unit y at which the area BELOW it is `fraction` of the whole
-    /// (`noTips`: of the figure without the hands' tips below it).
-    static func y(forAreaBelow fraction: CGFloat, noTips: Bool = false) -> CGFloat {
-        let f = min(max(fraction, 0), 1)
-        let table = noTips ? areaBelowNoTips : areaBelow
-        let rows = table.count - 1
-        // The table falls from 1 (top) to 0 (bottom): find the crossing.
-        for r in stride(from: rows, through: 1, by: -1) where table[r - 1] >= f {
-            let hi = table[r - 1], lo = table[r]
-            let t = hi > lo ? (f - lo) / (hi - lo) : 0
-            return (CGFloat(r) - t) * step
+        static let step: CGFloat = 0.5
+
+        init(_ map: (Int, Knot) -> Move) {
+            shape = BodyOutline.path(loop(half(map))).cgPath
+            let pts = right.indices.map { map($0, right[$0]).apply(right[$0].p) }
+            let arm = right.indices.filter { right[$0].part == .arm }.map { pts[$0] }
+            let tip = arm.map(\.y).max() ?? 0
+            fingertipY = tip
+            let hand = arm.filter { $0.y > tip - 22 }.map(\.x)
+            handX = (hand.min() ?? 0) - 1.5 ... (hand.max() ?? 0) + 1.5
+            crownY = pts.first?.y ?? 0
+            let rows = Int(box.height / Self.step)
+            let cols = 240
+            let tipRows = tip - tipSliver - 2
+            let mirrored = (box.width - handX.upperBound)...(box.width - handX.lowerBound)
+            var all = [CGFloat](repeating: 0, count: rows), noTips = all
+            var whole: CGFloat = 0
+            for r in 0..<rows {
+                let y = (CGFloat(r) + 0.5) * Self.step
+                var inside = 0, kept = 0
+                for c in 0..<cols {
+                    let x = viewBox.minX + (CGFloat(c) + 0.5) * viewBox.width / CGFloat(cols)
+                    guard shape.contains(CGPoint(x: x, y: y), using: .evenOdd) else { continue }
+                    inside += 1
+                    if y >= tipRows && (handX.contains(x) || mirrored.contains(x)) { continue }
+                    kept += 1
+                }
+                all[r] = CGFloat(inside)
+                noTips[r] = CGFloat(kept)
+                whole += CGFloat(inside)
+            }
+            let total = max(whole, 1)
+            func cumulative(_ w: [CGFloat]) -> [CGFloat] {
+                var out = [CGFloat](repeating: 0, count: rows + 1)
+                var acc: CGFloat = 0
+                for r in stride(from: rows - 1, through: 0, by: -1) {
+                    acc += w[r]
+                    out[r] = acc / total
+                }
+                return out
+            }
+            below = cumulative(all)
+            belowNoTips = cumulative(noTips)
         }
-        return 0
+
+        /// The unit y at which the area BELOW it is `fraction` of the whole
+        /// (`noTips`: of the outline without the hands' tips below it).
+        func y(forAreaBelow fraction: CGFloat, noTips: Bool = false) -> CGFloat {
+            let f = min(max(fraction, 0), 1)
+            let table = noTips ? belowNoTips : below
+            let rows = table.count - 1
+            // The table falls from 1 (top) to 0 (bottom): find the crossing.
+            for r in stride(from: rows, through: 1, by: -1) where table[r - 1] >= f {
+                let hi = table[r - 1], lo = table[r]
+                let t = hi > lo ? (f - lo) / (hi - lo) : 0
+                return (CGFloat(r) - t) * Self.step
+            }
+            return 0
+        }
+    }
+
+    /// The whole figure's profile.
+    static let whole = Profile { _, _ in .kept }
+
+    /// The lean body's profile at shrink `s`, built once per reading (the
+    /// shrink is rounded to 1e-4, far under a pixel).
+    private static var innerProfiles: [Int: Profile] = [:]
+    static func innerProfile(_ s: CGFloat) -> Profile {
+        let key = Int((s * 10000).rounded())
+        if let p = innerProfiles[key] { return p }
+        let q = CGFloat(key) / 10000
+        let p = Profile { i, _ in shellMove(i, q, floor: rimFloor) }
+        if innerProfiles.count > 8 { innerProfiles.removeAll() }
+        innerProfiles[key] = p
+        return p
     }
 
     /// Unit space to a view rect (the viewBox fills it).
@@ -410,33 +563,56 @@ struct BodySilhouette: Shape {
     }
 }
 
-/// The goal outline, closed (see BodyOutline.ghost).
-private struct GhostOutline: Shape {
-    let narrowing: CGFloat
+/// The lean body inside the fat shell at shrink `s` (see BodyOutline.inner).
+struct BodyInner: Shape {
+    let s: CGFloat
 
     func path(in rect: CGRect) -> Path {
-        BodyOutline.ghost(narrowing: narrowing).applying(BodyOutline.transform(into: rect))
+        BodyOutline.inner(s).applying(BodyOutline.transform(into: rect))
     }
+}
+
+/// The fat shell: the figure with the lean body cut out (fill even-odd).
+private struct BodyShell: Shape {
+    let s: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        var p = BodySilhouette().path(in: rect)
+        p.addPath(BodyInner(s: s).path(in: rect))
+        return p
+    }
+}
+
+/// The fat shell for one reading, the ONE derivation the card and its (i)
+/// sheet share: fat (when the reading has it), the mass the figure stands
+/// for (the weight, or the four's sum when they come to more), and the
+/// shrink whose inner area is the lean share (nil with no fat value).
+struct BodyShellFit {
+    let fat: BodyCompartment?
+    let total: Double
+    let s: CGFloat?
+
+    init(_ page: BodyPage, _ reading: FoodBody) {
+        fat = page.compartments.first { $0.key == "fat" && $0.kg > 0 }
+        total = max(reading.kg, page.compartments.reduce(0) { $0 + $1.kg } + (page.unassigned?.kg ?? 0))
+        if let f = fat, total > 0 {
+            s = BodyOutline.shellFactor(areaRatio: CGFloat(1 - f.kg / total))
+        } else {
+            s = nil
+        }
+    }
+
+    /// The floor alone covers more than the share: drawn a little thicker.
+    var atFloor: Bool { s == 1 }
 }
 
 /// The goal outline's dashed line, only where it leaves the figure's edge.
 private struct GhostLine: Shape {
-    let narrowing: CGFloat
+    let s: CGFloat
 
     func path(in rect: CGRect) -> Path {
-        BodyOutline.ghostLine(narrowing: narrowing).applying(BodyOutline.transform(into: rect))
-    }
-}
-
-/// Everything OUTSIDE the ghost (even-odd against the whole rect): clipped
-/// to the body, it is the rim between today's outline and the goal's.
-private struct GhostRim: Shape {
-    let narrowing: CGFloat
-
-    func path(in rect: CGRect) -> Path {
-        var p = Path(rect.insetBy(dx: -2, dy: -2))
-        p.addPath(GhostOutline(narrowing: narrowing).path(in: rect))
-        return p
+        // Drawn where it stands at least 1.2 pt in from the edge.
+        BodyOutline.ghostLine(s, minGap: 1.2 * BodyOutline.viewBox.width / rect.width).applying(BodyOutline.transform(into: rect))
     }
 }
 
@@ -459,27 +635,30 @@ struct BodyPatch: Equatable {
 }
 
 enum BodyBands {
-    /// Bottom-up bands by area share of the whole. The denominator is the
-    /// weight, or the four's sum when they come to MORE than the weight (the
-    /// over is then said in words, never hidden by clipping a band).
+    /// Bottom-up bands by area share of the outline they fill (`profile`:
+    /// the lean body inside the fat shell). The denominator is the mass that
+    /// outline stands for: the weight less fat, or the four's sum less fat
+    /// when they come to MORE than the weight (the over is then said in
+    /// words, never hidden by clipping a band).
     /// The sliver rule: a cut just above the fingertips gives the tips to
     /// the band above, and the cut is placed so every band still paints its
-    /// own share of the area; headroom thinner than the crown's reach goes
+    /// own share of the area; an unassigned band thinner than the crown's reach goes
     /// to the band below (at most about 0.1 kg).
-    static func of(_ parts: [BodyCompartment], unassignedKg: Double, total: Double) -> (bands: [BodyBand], patches: [BodyPatch]) {
+    static func of(_ parts: [BodyCompartment], unassignedKg: Double, total: Double,
+                   profile o: BodyOutline.Profile = BodyOutline.whole) -> (bands: [BodyBand], patches: [BodyPatch]) {
         guard total > 0 else { return ([], []) }
         let items = parts.map { ($0.key, $0.kg) } + (unassignedKg > 0 ? [("unassigned", unassignedKg)] : [])
         // cuts[i] is band i's bottom, cuts[i + 1] its top; tip marks a cut
         // placed by the sliver rule.
-        var cuts: [(y: CGFloat, tip: Bool)] = [(BodyOutline.y(forAreaBelow: 0), false)]
+        var cuts: [(y: CGFloat, tip: Bool)] = [(o.y(forAreaBelow: 0), false)]
         var below: Double = 0
         for (i, item) in items.enumerated() {
             below += item.1
             let f = CGFloat(min(below / total, 1))
-            let y = BodyOutline.y(forAreaBelow: f)
-            let gap = BodyOutline.fingertipY - y
+            let y = o.y(forAreaBelow: f)
+            let gap = o.fingertipY - y
             if i < items.count - 1, gap > 0, gap < BodyOutline.tipSliver {
-                cuts.append((BodyOutline.y(forAreaBelow: f, noTips: true), true))
+                cuts.append((o.y(forAreaBelow: f, noTips: true), true))
             } else {
                 cuts.append((y, false))
             }
@@ -488,12 +667,12 @@ enum BodyBands {
         var patches: [BodyPatch] = []
         for i in 0..<(items.count - 1) where cuts[i + 1].tip {
             let y = cuts[i + 1].y
-            let hand = BodyOutline.handX
+            let hand = o.handX
             let h = BodyOutline.box.height - y
             patches.append(BodyPatch(key: items[i + 1].0, rect: CGRect(x: hand.lowerBound, y: y, width: hand.upperBound - hand.lowerBound, height: h), low: true))
             patches.append(BodyPatch(key: items[i + 1].0, rect: CGRect(x: BodyOutline.box.width - hand.upperBound, y: y, width: hand.upperBound - hand.lowerBound, height: h), low: true))
         }
-        if let last = bands.last, last.key == "unassigned", bands.count >= 2, last.bottom - BodyOutline.crownY < BodyOutline.crownSliver {
+        if let last = bands.last, last.key == "unassigned", bands.count >= 2, last.bottom - o.crownY < BodyOutline.crownSliver {
             patches.append(BodyPatch(key: bands[bands.count - 2].key, rect: CGRect(x: 0, y: 0, width: BodyOutline.box.width, height: last.bottom), low: false))
         }
         return (bands, patches)
@@ -510,6 +689,8 @@ struct BodyFigureCard: View {
     @Environment(\.dynamicTypeSize) private var dts
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var fill: CGFloat = 0
+    /// The shell's arrival: it fades in once the lean body has risen.
+    @State private var shellIn: Double = 0
     @State private var selected: String? = {
         #if DEBUG
         // Screenshot / UI-test hook: HR_DEMO_BODY_SELECT=fat opens that band.
@@ -527,20 +708,28 @@ struct BodyFigureCard: View {
     private var parts: [BodyCompartment] { page.compartments }
     private var unassignedKg: Double { page.unassigned?.kg ?? 0 }
     private var overKg: Double { page.unassigned?.over_kg ?? 0 }
-    private var total: Double { max(composition.kg, parts.reduce(0) { $0 + $1.kg } + unassignedKg) }
-    private var split: (bands: [BodyBand], patches: [BodyPatch]) { BodyBands.of(parts, unassignedKg: unassignedKg, total: total) }
+    /// Fat is the outer layer (his Nov 18 decision): a shell whose area is
+    /// fat's share of the weight. Everything else fills the lean body inside.
+    private var fit: BodyShellFit { BodyShellFit(page, composition) }
+    private var total: Double { fit.total }
+    private var fatPart: BodyCompartment? { fit.fat }
+    private var shellS: CGFloat? { fit.s }
+    private var profile: BodyOutline.Profile { shellS.map(BodyOutline.innerProfile) ?? BodyOutline.whole }
+    private var split: (bands: [BodyBand], patches: [BodyPatch]) {
+        BodyBands.of(parts.filter { $0.key != fatPart?.key }, unassignedKg: unassignedKg,
+                     total: total - (fatPart?.kg ?? 0), profile: profile)
+    }
     private var bands: [BodyBand] { split.bands }
     /// The legend reads top to bottom, like the figure: fat, water, protein,
     /// mineral (whichever the reading has).
     private var tileKeys: [String] { parts.map(\.key).reversed() }
 
-    /// The goal outline's narrowing: torso and legs narrowed side to side
-    /// (head, shoulders, arms and feet kept) until its AREA is the goal mass over
-    /// today's, the rule the bands are cut by; height is kept. A shape cue
-    /// for the gap, said so in the (i) sheet.
-    private var ghostNarrowing: CGFloat? {
+    /// The goal outline's shrink: the same lean body with the goal's
+    /// thinner shell, its AREA the goal mass over today's (the rule the
+    /// shell and the bands are cut by); see BodyOutline.ghostFactor.
+    private var ghostS: CGFloat? {
         guard let g = page.goal_ghost, composition.kg > 0, g.kg > 0, g.kg < composition.kg else { return nil }
-        return BodyOutline.ghostNarrowing(areaRatio: CGFloat(g.kg / composition.kg))
+        return BodyOutline.ghostFactor(areaRatio: CGFloat(g.kg / composition.kg))
     }
 
     var body: some View {
@@ -596,9 +785,12 @@ struct BodyFigureCard: View {
         .onAppear {
             if reduceMotion {
                 fill = 1
+                shellIn = 1
             } else if fill < 1 {
-                // Short and settling: the body fills from the feet up once.
+                // Short and settling: the lean body fills from the feet up
+                // once, then the shell (fat) settles over it.
                 withAnimation(.timingCurve(0.23, 1, 0.32, 1, duration: 0.7)) { fill = 1 }
+                withAnimation(.timingCurve(0.23, 1, 0.32, 1, duration: 0.4).delay(0.45)) { shellIn = 1 }
             }
         }
     }
@@ -614,6 +806,9 @@ struct BodyFigureCard: View {
     /// only colour and the rest stays clean (never composited toward mud).
     private func dimmed(_ key: String) -> Bool { selected != nil && selected != key }
 
+    /// The goal line recedes with the shell when another band is open.
+    private var dimmedGhost: Bool { selected != nil && selected != fatPart?.key }
+
     private var figure: some View {
         GeometryReader { geo in
             let sx = geo.size.width / BodyOutline.viewBox.width
@@ -621,57 +816,70 @@ struct BodyFigureCard: View {
             let sp = split
             let all = sp.bands, patches = sp.patches
             let painted = all.filter(paints)
+            let shell = shellS
             // Where the paint starts: the top band's top, or the crown when
             // thin headroom went to the band below.
             let paintTop = patches.contains { $0.rect.minY <= 0 } ? 0 : (painted.map(\.top).min() ?? 0)
+            let rest = all.first { $0.key == "unassigned" }
             ZStack(alignment: .topLeading) {
                 // The body before the fill arrives: a whisper of ground.
                 BodySilhouette().fill(Color.white.opacity(0.035), style: FillStyle(eoFill: true))
                 ZStack(alignment: .topLeading) {
-                    // Each band with the patches it carries; a band never
-                    // paints under another band's patch (a dimmed patch
-                    // would let it show through).
-                    ForEach(painted, id: \.key) { b in
-                        ZStack(alignment: .topLeading) {
-                            band(b, width: geo.size.width, sy: sy)
-                            ForEach(Array(patches.enumerated()).filter { $0.element.key == b.key }, id: \.offset) { _, p in
-                                Rectangle()
-                                    .fill(p.low ? BodyHue.stops(p.key).1 : BodyHue.stops(p.key).0)
-                                    .frame(width: p.rect.width * sx, height: p.rect.height * sy)
-                                    .offset(x: (p.rect.minX - BodyOutline.viewBox.minX) * sx, y: p.rect.minY * sy)
+                    // The lean body: each band with the patches it carries;
+                    // a band never paints under another band's patch (a
+                    // dimmed patch would let it show through).
+                    ZStack(alignment: .topLeading) {
+                        ForEach(painted, id: \.key) { b in
+                            ZStack(alignment: .topLeading) {
+                                band(b, width: geo.size.width, sy: sy)
+                                ForEach(Array(patches.enumerated()).filter { $0.element.key == b.key }, id: \.offset) { _, p in
+                                    Rectangle()
+                                        .fill(p.low ? BodyHue.stops(p.key).1 : BodyHue.stops(p.key).0)
+                                        .frame(width: p.rect.width * sx, height: p.rect.height * sy)
+                                        .offset(x: (p.rect.minX - BodyOutline.viewBox.minX) * sx, y: p.rect.minY * sy)
+                                }
                             }
-                        }
-                        .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
-                        .mask(alignment: .topLeading) {
-                            holes(patches.filter { $0.key != b.key }, size: geo.size, sx: sx, sy: sy)
-                                .fill(style: FillStyle(eoFill: true))
-                        }
-                        .grayscale(dimmed(b.key) ? 1 : 0)
-                        .opacity(dimmed(b.key) ? 0.36 : 1)
-                    }
-                    // Depth only where there is paint: the unfilled
-                    // headroom stays a clean, empty top, never a dark cap.
-                    volume
-                        .mask(alignment: .top) {
-                            VStack(spacing: 0) {
-                                Color.clear.frame(height: paintTop * sy)
-                                Rectangle()
+                            .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+                            .mask(alignment: .topLeading) {
+                                holes(patches.filter { $0.key != b.key }, size: geo.size, sx: sx, sy: sy)
+                                    .fill(style: FillStyle(eoFill: true))
                             }
+                            .grayscale(dimmed(b.key) ? 1 : 0)
+                            .opacity(dimmed(b.key) ? 0.36 : 1)
                         }
-                    // Level lines between bands: a light hairline, like the
-                    // surface of a liquid, never a dark belt (and never
-                    // across fingertips the band above has taken).
-                    levelLines(painted, patches: patches, sx: sx, sy: sy)
-                        .fill(Color.white.opacity(0.22))
-                    // The paint's own surface under unfilled headroom: the
-                    // same hairline, so the empty crown reads as a level,
-                    // not as hair.
-                    if paintTop > 0, all.contains(where: { $0.key == "unassigned" }) {
-                        Rectangle()
-                            .fill(Color.white.opacity(0.3))
-                            .frame(width: geo.size.width, height: 0.5)
-                            .offset(y: paintTop * sy - 0.25)
+                        // The unassigned rest: a thin hatched band at the
+                        // top of the fill, never a hue.
+                        if let r = rest, r.bottom - r.top > 0.05, !patches.contains(where: { $0.rect.minY <= 0 }) {
+                            hatch(r, width: geo.size.width, sy: sy)
+                                .opacity(dimmed("unassigned") ? 0.4 : 1)
+                        }
+                        // Level lines between bands: a light hairline, like
+                        // the surface of a liquid, never a dark belt (and
+                        // never across fingertips the band above has taken).
+                        levelLines(painted, patches: patches, sx: sx, sy: sy)
+                            .fill(Color.white.opacity(0.22))
+                        // The paint's own surface under the unassigned rest.
+                        if paintTop > 0, rest != nil {
+                            Rectangle()
+                                .fill(Color.white.opacity(0.3))
+                                .frame(width: geo.size.width, height: 0.5)
+                                .offset(y: paintTop * sy - 0.25)
+                        }
                     }
+                    .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+                    .clipShape(fillShape(shell), style: FillStyle(eoFill: true))
+                    if let s = shell {
+                        // The shell: fat, the outer layer, over the whole body.
+                        BodyShell(s: s)
+                            .fill(BodyHue.gradient("fat"), style: FillStyle(eoFill: true))
+                            .grayscale(dimmed("fat") ? 1 : 0)
+                            .opacity(dimmed("fat") ? 0.36 : 1)
+                            .opacity(shellIn)
+                    }
+                    // Depth over the shell and the lean body together, so
+                    // the figure reads as one rounded form under one light.
+                    volume(shell)
+                        .opacity(shell == nil ? 1 : shellIn)
                 }
                 .compositingGroup()
                 .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
@@ -679,35 +887,84 @@ struct BodyFigureCard: View {
                     Rectangle().frame(height: geo.size.height * fill)
                 }
                 .clipShape(BodySilhouette(), style: FillStyle(eoFill: true))
-                if let a = ghostNarrowing {
-                    ZStack {
-                        GhostRim(narrowing: a)
-                            .fill(Theme.ground.opacity(0.38), style: FillStyle(eoFill: true))
-                        GhostLine(narrowing: a)
-                            .stroke(Color.white.opacity(0.55), style: StrokeStyle(lineWidth: 0.8, lineCap: .round, dash: [2.5, 2.2]))
-                    }
-                    // Never a dash on the card: only inside the body.
-                    .clipShape(BodySilhouette(), style: FillStyle(eoFill: true))
-                    .opacity(Double(fill))
-                    .accessibilityIdentifier("body.figure.ghost")
+                if let s = shell {
+                    // The shell's inner edge: a crisp light hairline, kept
+                    // INSIDE the lean body so it never eats a thin rim.
+                    BodyInner(s: s)
+                        .stroke(Color.white.opacity(0.42), lineWidth: 1.2)
+                        .clipShape(BodyInner(s: s), style: FillStyle(eoFill: true))
+                        .opacity(shellIn)
                 }
-                BodySilhouette()
-                    .stroke(Color.white.opacity(0.16), lineWidth: 0.75)
+                if let a = ghostS {
+                    // Quiet at rest (a faint guide in the coral), crisp when
+                    // the shell is open: then it is the point.
+                    let open = selected == fatPart?.key
+                    GhostLine(s: a)
+                        .stroke(Color.white.opacity(open ? 0.8 : 0.3),
+                                style: StrokeStyle(lineWidth: open ? 0.9 : 0.6, lineCap: .round, dash: open ? [2.5, 2.2] : [3.5, 3.5]))
+                        // Never a dash on the card: only inside the body.
+                        .clipShape(BodySilhouette(), style: FillStyle(eoFill: true))
+                        .opacity(Double(fill) * (dimmedGhost ? 0.5 : 1))
+                        .accessibilityIdentifier("body.figure.ghost")
+                }
+                if shell == nil {
+                    BodySilhouette()
+                        .stroke(Color.white.opacity(0.16), lineWidth: 0.75)
+                }
             }
             .contentShape(Rectangle())
             .onTapGesture { loc in
-                let x = BodyOutline.viewBox.minX + loc.x / sx
-                let y = loc.y / sy
-                if let p = patches.first(where: { $0.rect.contains(CGPoint(x: x, y: y)) }) {
-                    toggle(p.key)
-                } else if let hit = all.first(where: { y >= $0.top && y <= $0.bottom }) {
-                    toggle(hit.key)
-                }
+                let u = CGPoint(x: BodyOutline.viewBox.minX + loc.x / sx, y: loc.y / sy)
+                if let key = hitKey(u, bands: all, patches: patches, shell: shell) { toggle(key) }
             }
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(figureAccessibility)
         .accessibilityIdentifier("body.figure.body")
+    }
+
+    /// The outline the bands fill: the lean body inside the shell, or the
+    /// whole figure when the reading has no fat value.
+    private func fillShape(_ s: CGFloat?) -> AnyShape {
+        if let s { return AnyShape(BodyInner(s: s)) }
+        return AnyShape(BodySilhouette())
+    }
+
+    /// What a tap at unit point `u` opens: a band inside the lean body (a
+    /// patch first), the shell anywhere else on the body or within about
+    /// 6 pt of its edge (a 2 pt rim is too thin to aim at); with no shell,
+    /// the band at that height.
+    private func hitKey(_ u: CGPoint, bands: [BodyBand], patches: [BodyPatch], shell: CGFloat?) -> String? {
+        let byBand = { () -> String? in
+            if let p = patches.first(where: { $0.rect.contains(u) }) { return p.key }
+            return bands.first(where: { u.y >= $0.top && u.y <= $0.bottom })?.key
+        }
+        guard let s = shell else { return byBand() }
+        if BodyOutline.inner(s).contains(u, eoFill: true) { return byBand() ?? fatPart?.key }
+        let reach = BodyOutline.path().cgPath.copy(strokingWithWidth: 8, lineCap: .round, lineJoin: .round, miterLimit: 1)
+        if BodyOutline.path().contains(u, eoFill: true) || reach.contains(u) { return fatPart?.key }
+        return nil
+    }
+
+    /// The unassigned band's hatch: fine diagonal lines on a whisper of
+    /// ground, so the rest reads as "not one of the four", never as a hue.
+    private func hatch(_ b: BodyBand, width: CGFloat, sy: CGFloat) -> some View {
+        let top = b.top * sy, bottom = b.bottom * sy, h = max(bottom - top, 0.5)
+        return ZStack(alignment: .topLeading) {
+            Rectangle().fill(Color.white.opacity(0.03))
+                .frame(width: width, height: h)
+                .offset(y: top)
+            Path { p in
+                var x = -h
+                while x < width + h {
+                    p.move(to: CGPoint(x: x, y: top + h))
+                    p.addLine(to: CGPoint(x: x + h, y: top))
+                    x += 2.6
+                }
+            }
+            .stroke(Color.white.opacity(0.22), lineWidth: 0.5)
+            .clipShape(Rectangle().offset(y: top).size(width: width, height: h))
+        }
     }
 
     /// The whole figure rect with `patches` cut out (fill even-odd).
@@ -746,14 +1003,24 @@ struct BodyFigureCard: View {
     /// band's own hue a step lower, never a black wash): on a limb about
     /// 15 pt wide the two edges never meet, so an arm keeps the colour of
     /// the torso it belongs to.
-    private var volume: some View {
+    private func volume(_ shell: CGFloat?) -> some View {
         ZStack {
             // Edge shade: a narrow blurred stroke of the outline, multiplied
             // in (a lightness step at the band's own hue).
             BodySilhouette()
-                .stroke(Color(white: 0.8), lineWidth: 5)
-                .blur(radius: 2.2)
+                .stroke(Color(white: shell == nil ? 0.8 : 0.9), lineWidth: shell == nil ? 5 : 3)
+                .blur(radius: shell == nil ? 2.2 : 1.2)
                 .blendMode(.multiply)
+            // Under the shell, the lean body sinks a step: a soft shade
+            // along the shell's inner edge, inside it, so the layer reads as
+            // ON TOP of what it covers.
+            if let s = shell {
+                BodyInner(s: s)
+                    .stroke(Color(white: 0.84), lineWidth: 3)
+                    .blur(radius: 1.2)
+                    .blendMode(.multiply)
+                    .clipShape(BodyInner(s: s), style: FillStyle(eoFill: true))
+            }
             // The sheen: a soft highlight down the middle of each part
             // (the sternum, each arm, then each leg below the hips), so
             // the limbs carry the same light as the torso and every part
@@ -797,7 +1064,7 @@ struct BodyFigureCard: View {
 
     private var figureAccessibility: String {
         let parts = self.parts.reversed().map { "\($0.label) \(BodyText.kg($0)) kg" }.joined(separator: ", ")
-        let ghost = ghostNarrowing == nil ? "" : page.goal_ghost.map { ", goal outline \(FoodFormat.kg($0.kg)) kg" } ?? ""
+        let ghost = ghostS == nil ? "" : page.goal_ghost.map { ", goal outline \(FoodFormat.kg($0.kg)) kg" } ?? ""
         return "Body composition, \(FoodFormat.kg(composition.kg)) kg: \(parts)\(ghost)"
     }
 
@@ -957,7 +1224,7 @@ struct BodyFigureCard: View {
 
     @ViewBuilder
     private var ghostKey: some View {
-        if let g = page.goal_ghost, ghostNarrowing != nil {
+        if let g = page.goal_ghost, ghostS != nil {
             keyLine("Goal outline", "~\(FoodFormat.kg(g.kg)) kg") {
                 RoundedRectangle(cornerRadius: 2.5, style: .continuous)
                     .stroke(Color.white.opacity(0.6), style: StrokeStyle(lineWidth: 1, dash: [2.5, 2]))

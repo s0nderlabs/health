@@ -2,7 +2,8 @@
 // exists and opens; the order is latest, figure, metrics, goal, confounders,
 // history; every section renders and sits fully on screen (inside the
 // window, clear of the floating tab bar, nothing past either edge); the
-// composition figure (hero) carries its legend, ghost and tap-to-detail;
+// composition figure (hero) carries its legend, ghost and tap-to-detail
+// (fat is the outer shell since Nov 18: a tap on it opens fat);
 // every card's (i) opens a sheet holding the notes the card no longer prints;
 // the legend stands BESIDE the figure; the ghost names the goal card's main
 // number (the target fat % at today's S400 lean mass), the scan's weight
@@ -96,7 +97,9 @@ final class BodyTabTests: XCTestCase {
             ("latest", "latest", "Latest weigh-in", ["trend only", "3 or more counted readings"]),
             ("figure", "figure", "Composition", [
                 "15% fat at today's 56.0 kg lean mass (S400, calibrated) = ~65.9 kg, the goal card's main number",
-                "its area is 65.9 / 71.2 of today's", "left unfilled at the top",
+                "its area is 65.9 / 71.2 of today's", "the thin hatched band at the top",
+                "Fat is the outer layer", "shrunk toward its own centre line by ONE factor", "No rim is drawn thinner than 1.25 pt",
+                "The coral outside it is the fat between today and the goal",
                 "(06:40, 71.2 kg). The trend counts the 06:05 weigh-in", "Fat: cal. to Xiaomi, 5 pairs, +/-0.3 pt",
                 "Protein is the formulas' remainder",
             ]),
@@ -168,6 +171,25 @@ final class BodyTabTests: XCTestCase {
         detail.buttons["Close detail"].tap()
         XCTAssertTrue(element(app, "body.figure.legend.protein").waitForExistence(timeout: 2))
         XCTAssertFalse(element(app, "body.figure.detail").exists)
+        // Fat is the outer layer: a tap on the shell (the torso's flank, or
+        // just off the edge) opens fat, never the band at that height.
+        figure.coordinate(withNormalizedOffset: CGVector(dx: 0.725, dy: 0.46)).tap()
+        XCTAssertTrue(detail.staticTexts["15.2"].waitForExistence(timeout: 3), "shell tap did not open fat")
+        figure.coordinate(withNormalizedOffset: CGVector(dx: 0.725, dy: 0.46)).tap()
+        XCTAssertFalse(element(app, "body.figure.detail").waitForExistence(timeout: 1.5))
+        figure.coordinate(withNormalizedOffset: CGVector(dx: 0.765, dy: 0.46)).tap()
+        XCTAssertTrue(detail.staticTexts["15.2"].waitForExistence(timeout: 3), "a tap just off the edge did not open fat")
+    }
+
+    /// The same lean body at the goal's 15%: fat's own share, no goal
+    /// outline (the body IS the goal).
+    func testShellGoalDemo() throws {
+        let app = launch("shell-goal", scroll: "figure")
+        XCTAssertTrue(element(app, "body.figure").waitForExistence(timeout: 10))
+        XCTAssertEqual(element(app, "body.figure.legend.fat").label, "Fat 9.9 kg, 15.0 percent of weight, calibrated to Xiaomi Home")
+        XCTAssertEqual(element(app, "body.figure.legend.water").label.hasPrefix("Water 38.2 kg, 58.0 percent of weight"), true)
+        XCTAssertFalse(element(app, "body.figure.ghost.note").exists)
+        XCTAssertTrue(element(app, "body.figure.body").label.hasPrefix("Body composition, 65.9 kg: Fat 9.9 kg"))
     }
 
     func testFormulaFigureHasNoGap() throws {

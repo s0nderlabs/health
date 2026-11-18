@@ -199,18 +199,25 @@ const HAPPENED =
   /\b(?:berhasil|sukses|successful|paid|dibayar|lunas|diterima|received|masuk|refund(?:ed)?|dikembalikan|ditolak|declined|gagal|failed|completed|selesai|confirmed|didebit|dipotong|dikirim|terkirim|ditambahkan|dicairkan|filled|executed|bought|purchased|sold|membeli|dibeli|terbeli|menjual|dijual|terjual)\b|\b(?:telah|sudah)\s+(?:di\w+|cair|masuk|terkirim)\b/i
 
 // Pure ads with NO amount that still name a transaction word ("GRATIS tarik
-// tunai di ATM terdekat!: Pakai Kartu Jago, bebas tarik tunai di ATM mana aja").
-const AD_CUES = /\bgratis\b|\bpakai kartu\b|\bbebas\s+\w+(?:\s+\w+)?\s+di\b|\bterdekat\b|\bmana aja\b/i
+// tunai di ATM terdekat!: Pakai Kartu Jago, bebas tarik tunai di ATM mana aja"),
+// and strong marketing words ("Nikmati cashback setara bunga hingga 8,25% p.a.
+// ... tanpa tunggu jatuh tempo", "Top up OVO min. 100K & get up to 10K
+// cashback!"): a pitch even when it names a bill or top-up word. Softer cues
+// ("yuk", "ayo") stay out: a real bill reminder may use them.
+const AD_CUES =
+  /\b(?:gratis|pakai kartu|terdekat|mana aja|promo|diskon|discount|voucher|cashback|bonus|flash sale|special|spesial|nikmati|nikmatin)\b|\bbebas\s+\w+(?:\s+\w+)?\s+di\b|\bp\.a\.?(?!\w)|\bhingga \d/i
 
+// Price headlines and alerts ("📉 ETH Drops to Rp32.500.000: Check prices &
+// trade on Pintu now!"): a quote crossing a level is never money that moved.
 const MARKET_NEWS =
-  /\b(?:read on \w+ news|\w+ news\b|read more|baca selengkapnya|fell below|dropped below|surged|rallied|plunged|soared|(?:lowest|highest) since|all[- ]time high|ATH\b|turun ke bawah|naik ke atas)/i
+  /\b(?:read on \w+ news|\w+ news\b|read more|baca selengkapnya|fell below|dropped below|surged|rallied|plunged|soared|(?:lowest|highest) since|all[- ]time high|ATH\b|turun ke bawah|naik ke atas|(?:rises|drops|falls|climbs|jumps|dips|tumbles) (?:to|above|below|past)\b|check prices?\b)/i
 
 /** A price quote list: "per unit" prices, a "Prices"/"Harga" headline, or
  *  several % changes with trend arrows. Two of those signals = a digest. */
 function isPriceDigest(t: string): boolean {
   const perUnit = (t.match(/(?:rp\.?|idr|\$)\s*\d[\d.,]*\s*\/\s*(?:gram|gr|g|oz|unit|coin|lembar)\b/gi) ?? []).length
   const pctMoves = (t.match(/[+-]?\d+(?:[.,]\d+)?\s*%\s*(?:📉|📈|🔻|🔺|▲|▼)?/g) ?? []).length
-  const headline = /\b(?:prices?|harga|kurs|market update|update harga)\b/i.test(t)
+  const headline = /\b(?:prices?|harga|kurs|market update|update harga|top (?:gainers|losers)|gainers|losers)\b/i.test(t)
   const signals = (perUnit >= 1 ? 1 : 0) + (pctMoves >= 2 ? 1 : 0) + (headline ? 1 : 0)
   return signals >= 2
 }
@@ -230,7 +237,10 @@ export function amountlessGuess(p: MoneyParse, text: string): boolean {
 const LOAN_PROMO = new RegExp(
   String.raw`\b(?:cicilan|(?:lgsg|langsung) cair|pinjaman|dana cepat|kredit tanpa|limit (?:kredit|pinjaman)|ajukan sekarang|cek\b.{0,40}\bsekarang` +
     String.raw`|win (?:your|a|up to)\b|prize pool|giveaway|lucky draw|contest|competition|\bgame\b|t&c apply|see how|join (?:the|now)` +
-    String.raw`|menangkan|hadiah|undian|promo)`,
+    String.raw`|menangkan|hadiah|undian|promo` +
+    // Referral pitches ("Ajak Teman ..., cashback Rp25 rb/referral"); the
+    // slash form sits outside the leading \b ("Rp25.000 / referral").
+    String.raw`|ajak teman|per referral)|\/\s*referral\b`,
   'i',
 )
 
@@ -248,6 +258,7 @@ export function isNoise(title: string | null, body: string, cls: AppClass = 'ban
   // bill reminder ("tagihan cicilan ... jatuh tempo") names a bill event and
   // survives; this only drops texts that describe nothing that happened.
   if (LOAN_PROMO.test(t) && moneyEvent(t) == null && !HAPPENED.test(t)) return true
+  // A real payment, top-up or bill always carries an amount or a completed verb.
   if (!hasAmount(t) && AD_CUES.test(t) && !HAPPENED.test(t)) return true
   // Market price digests ("Today's Gold & Silver Prices: PAXG Rp2,246,012/gram
   // | -0.57% 📉 XAUT ..."): quotes, not money that moved.

@@ -340,7 +340,7 @@ describe('FoodService: raw storage, pairing, recalibration', () => {
   test('excluded (test, non-morning) readings still pair: they are calibration data', () => {
     const h = harness()
     cleanup.push(h.cleanup)
-    const t = local(2026, 11, 16, 11, 30) // outside the morning window: excluded from the trend
+    const t = local(2026, 11, 16, 15, 30) // outside the morning window and the late fasted band: excluded
     h.s400('s400-tX', t, 66.4, 21.0)
     h.xiaomi('x', t + 5_000, 66.4, 22.6)
     expect(h.food.weighins(2).every((w) => w.excluded === 'not a morning reading')).toBe(true)

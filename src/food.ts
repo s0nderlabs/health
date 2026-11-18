@@ -421,6 +421,17 @@ export function inMorningWindow(ms: number): boolean {
   const min = d.getHours() * 60 + d.getMinutes()
   return min >= MORNING_FROM_MIN && min < MORNING_TO_MIN
 }
+/** Past the morning window but before 14:00 local: a late first reading
+ *  still counts when no meal was eaten before it (he went back to sleep
+ *  after fajr). The fasted check then decides it: a meal before it, even one
+ *  logged later, files it "after a meal" (re-decided on every pass, so a
+ *  voided or re-timed meal lifts it again). */
+const LATE_FASTED_TO_MIN = 14 * 60
+export function inLateFastedBand(ms: number): boolean {
+  const d = new Date(ms)
+  const min = d.getHours() * 60 + d.getMinutes()
+  return min >= MORNING_TO_MIN && min < LATE_FASTED_TO_MIN
+}
 
 const WEIGHIN_RECENT_MS = 36 * 3_600_000
 const WEIGHIN_MAX_PER_BATCH = 3
@@ -479,6 +490,9 @@ export function weighinEvent(
     content += ` Previous: ${prev.value.toFixed(1)} kg on ${when} (${d >= 0 ? '+' : '-'}${Math.abs(d).toFixed(1)} kg).`
   } else {
     content += ' First reading on record.'
+  }
+  if (!excluded && inLateFastedBand(Date.parse(m.ts))) {
+    content += ' Counted as a late fasted reading (no meal logged before it); log an earlier meal and it drops out.'
   }
   const a = excluded ? null : extras.avg7
   if (a) {
@@ -1558,7 +1572,9 @@ export class FoodService {
    *  below (after a meal, possible replay) and the date rule on a
    *  weighins_from change. In order:
    *  1. date rule: before food.weighins_from = a TEST reading;
-   *  2. window: measured outside 03:30-09:00 local = not a morning reading;
+   *  2. window: measured outside 03:30-14:00 local = not a morning reading
+   *     (09:00-14:00 is the late fasted band: it counts only when no meal
+   *     came before it, which the after-a-meal rule below decides);
    *  3. outlier: far from the last counted reading = possible other person
    *     (from 3 earlier counted readings; two agreeing days = a real shift);
    *  3b. re-measured: the S400's second take of one step-on (another S400
@@ -1598,6 +1614,18 @@ export class FoodService {
     this.book.liftExactExclusions(REDECIDED_EXCLUSIONS, sinceIso)
     const from = this.deps.getConfig().weighins_from ?? null
     const validFrom = isDayKey(from) ? from : null
+    // The late fasted band (09:00-14:00) came after some readings in it were
+    // stored "not a morning reading": re-judge those (the meal check decides
+    // them now). Only on or after weighins_from: before it every reading is a
+    // test anyway, and with no date rule set, older rows predate meal logging
+    // ("no meal logged" would mean nothing), so their verdicts stay.
+    if (validFrom) {
+      const stale = this.book
+        .bodySamplesAll(sinceIso)
+        .filter((r) => r.excluded === EXCL_NOT_MORNING && foodDay(Date.parse(r.ts), 0) >= validFrom && inLateFastedBand(Date.parse(r.ts)))
+        .map((r) => r.uuid)
+      if (stale.length) this.book.setBodyExcluded(stale, null)
+    }
     const manual = this.manualIncludes()
     let outlierFiled = false
     // Normally one walk. A take filed re-measured against a rival that this
@@ -1622,7 +1650,7 @@ export class FoodService {
         if (validFrom && day < validFrom) {
           const label = new Date(`${validFrom}T12:00:00`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })
           reason = `${EXCL_DATE_RULE} on ${label}`
-        } else if (!inMorningWindow(ms)) {
+        } else if (!inMorningWindow(ms) && !inLateFastedBand(ms)) {
           reason = EXCL_NOT_MORNING
         } else if (this.isReplay(m)) {
           // A re-synced copy of the previous reading must never count twice.

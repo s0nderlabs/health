@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.20.1 - 2026-11-18
+
+### Changed
+
+- **Body figure: fat is the outer layer.** Fat is now a coral shell around
+  the whole silhouette (head, arms, legs, feet), with mineral, protein and
+  water filling the lean body inside. The shell is drawn true by area: the
+  inner outline is the same body shrunk toward each part's own axis by one
+  factor, solved so the coral's share of the silhouette equals fat's share
+  of the weight. Thin limbs keep a proportionate rim instead of turning
+  coral. A 1.25 pt minimum keeps a low reading visible (the total stays
+  exact; below about 9% fat the sheet says the shell is drawn slightly
+  thick). Tap the shell for Fat. The dashed goal outline is now the lean
+  body wearing the goal's thinner shell: coral outside the dashes is the fat
+  to lose.
+
+### Fixed
+
+- **Weigh-ins: a late fasted first reading counts.** A reading between
+  09:00 and 14:00 counts as the day's weigh-in when no meal came before it
+  (back to sleep after fajr); a meal logged before it, even later, files it
+  "after a meal". Readings in that band stored earlier as "not a morning
+  reading" (on or after the date rule) are re-judged.
+- **Money: more marketing kept out.** No amount plus strong promo words
+  (cashback, bonus, p.a., special, nikmati) is a pitch even when it names a
+  bill or top-up word; referral pitches, price alerts ("ETH Drops to Rp...",
+  "Check prices") and "Top Gainers" lists are noise.
+
 ## 0.20.0 - 2026-11-16
 
 ### Added

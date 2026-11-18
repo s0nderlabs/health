@@ -433,8 +433,9 @@ enum DemoBody {
     /// HR_DEMO_BODY=error: no cached page and the daemon answered 404.
     static let errorText = "This daemon has no Body view yet (update the health plugin)."
 
-    /// HR_DEMO_BODY=full|formula|stale|empty|malformed. Every payload goes
-    /// through the real wire decoder, so the demo renders what a daemon would.
+    /// HR_DEMO_BODY=full|formula|stale|empty|malformed|shell-goal|shell-<pct>.
+    /// Every payload goes through the real wire decoder, so the demo renders
+    /// what a daemon would.
     static func page(_ mode: String) -> BodyPage? {
         let obj: [String: Any]
         switch mode {
@@ -478,6 +479,13 @@ enum DemoBody {
             h.insert(["measured_at": at(0, 5, 50), "kg": "heavy"], at: 0)
             o["history"] = h
             obj = o
+        case let m where m.hasPrefix("shell-"):
+            // The same body at another fat %: the same lean mass (56.0 kg,
+            // the same water, protein and mineral), only the fat and so the
+            // weight moved. shell-goal is the goal's 15%; shell-30, shell-10
+            // the figure's extremes.
+            let pct = m == "shell-goal" ? 15 : Double(m.dropFirst(6)) ?? 15
+            obj = atFat(full(formula: false), pct: pct)
         default:
             obj = full(formula: false)
         }
@@ -573,6 +581,51 @@ enum DemoBody {
         }
         let rest = kg - sum
         return (parts, ["kg": r2(max(0, rest)), "pct": r1(max(0, rest) / kg * 100), "over_kg": r2(max(0, -rest))])
+    }
+
+    /// `o` rewritten for the same lean mass at `pct` fat: the weight is the
+    /// lean mass / (1 - pct), fat its share, the other three keep their kg
+    /// (their % follow), the 06:40 reading and its history row move with it.
+    private static func atFat(_ o: [String: Any], pct: Double) -> [String: Any] {
+        var o = o
+        let leanKg = 56.0
+        let kg = r1(leanKg / (1 - pct / 100))
+        var parts = o["compartments"] as! [[String: Any]]
+        var sum = 0.0
+        for i in parts.indices {
+            let key = parts[i]["key"] as! String
+            var v = parts[i]["kg"] as! Double
+            if key == "fat" {
+                let nv = r1(kg * pct / 100)
+                let dv = nv - v
+                parts[i]["series"] = (parts[i]["series"] as! [[String: Any]]).map { var q = $0; q["kg"] = r1((q["kg"] as! Double) + dv); return q }
+                v = nv
+                parts[i]["kg"] = v
+            }
+            parts[i]["pct"] = r1(v / kg * 100)
+            sum += v
+        }
+        o["compartments"] = parts
+        let rest = kg - sum
+        o["unassigned"] = ["kg": r2(max(0, rest)), "pct": r1(max(0, rest) / kg * 100), "over_kg": r2(max(0, -rest))]
+        var met = o["metrics"] as! [String: Any]
+        met["kg"] = kg
+        met["metrics"] = (met["metrics"] as! [[String: Any]]).map { m -> [String: Any] in
+            var m = m
+            switch m["key"] as! String {
+            case "fat_pct": m["value"] = pct
+            case "water_pct": m["value"] = r1((parts.first { ($0["key"] as! String) == "water" }!["kg"] as! Double) / kg * 100)
+            case "protein_pct": m["value"] = r1((parts.first { ($0["key"] as! String) == "protein" }!["kg"] as! Double) / kg * 100)
+            default: break
+            }
+            return m
+        }
+        o["metrics"] = met
+        var h = o["history"] as! [[String: Any]]
+        h[0]["kg"] = kg
+        h[0]["fat_pct"] = pct
+        o["history"] = h
+        return o
     }
 
     private static func row(_ daysAgo: Int, _ h: Int, _ m: Int, _ kg: Double?, _ fat: Double?, _ source: String,

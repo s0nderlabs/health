@@ -538,3 +538,39 @@ describe('market news headlines (Pintu News)', () => {
     expect(isNoise('Order filled', 'Your sell order for 0.01 BTC at $64,000 has been filled', 'bank')).toBe(false)
   })
 })
+
+// Nov 17 2026 rows his app logged as money that were marketing (texts as sent).
+describe('Nov 17 marketing leaks (SeaBank deposito, Jago 11.11, Jenius referral, Pintu alerts)', () => {
+  test('SeaBank deposito pitch: no amount, "jatuh tempo" inside a promo, never a bill', () => {
+    expect(isNoise('Semakin Untung🤑', 'Nikmati cashback setara bunga hingga 8,25% p.a. langsung cair setelah buka Deposito, tanpa tunggu jatuh tempo👉🏻', 'bank')).toBe(true)
+  })
+  test('Jago 11.11 top-up promo with no amount is noise', () => {
+    expect(isNoise('✨ Special 11.11 bonus', 'Top up OVO min. 100K with Jago & get up to 10K cashback!', 'bank')).toBe(true)
+  })
+  test('Jenius referral pitch is noise even with a per-referral amount', () => {
+    expect(isNoise('Udah Lindungi Circle Terdekatmu? ☂️', 'Ajak Teman Mengenal Asuransi, share $Cashtag-mu, cashback Rp25 rb/referral. Makin banyak ajak teman, makin banyak cashback💰', 'bank')).toBe(true)
+  })
+  test('Pintu top gainers and price alerts are noise', () => {
+    expect(isNoise("🚀 Today's Top Gainers", 'BLESS Rp347.2 | +107.04% 📈\nRAIN Rp109.9 | +72.28% 📈\nHUMA Rp185.3 | +58.11% 📈', 'bank')).toBe(true)
+    expect(isNoise("🚀 Today's Top Gainers", 'BREV Rp2.1K | +101.96% 📈\nMMT Rp2.5K | +25.21% 📈\nFIS Rp28.11 | +19.72% 📈', 'bank')).toBe(true)
+    expect(isNoise('📉 ETH Drops to Rp32.500.000', 'Check prices & trade on Pintu now!', 'bank')).toBe(true)
+    expect(isNoise('📈 ETH Rises to Rp32.500.000', 'Check prices & trade on Pintu now!', 'bank')).toBe(true)
+  })
+  test('the real money of the same day is still kept', () => {
+    expect(isNoise('Topup e-wallet', 'Kamu berhasil melakukan Top Up e-Wallet senilai Rp220.000 ke GOPAY Mxxxxxxx. Jika kamu tidak melakukan ini, segera hubungi 1500 130.', 'bank')).toBe(false)
+    expect(isNoise('Pembayaran Berhasil', 'SeaBank Bayar Instan: Pembayaran Shopee kamu sebesar Rp 90.800 pada 16 Nov 2026 23:22 WIB berhasil.', 'bank')).toBe(false)
+    expect(isNoise('Gojek', 'Paid 74,600 IDR ($4.16) at Gojek\nBalance: $0.79', 'bank')).toBe(false)
+    // an amountless bill reminder with no promo words survives
+    expect(isNoise('Tagihan kartu kredit', 'Tagihan kartu kredit kamu akan jatuh tempo besok, yuk bayar sebelum terlambat', 'bank')).toBe(false)
+    // a credited cashback happened: keep it
+    expect(isNoise('Cashback masuk', 'Cashback Rp10.000 sudah masuk ke saldo kamu', 'bank')).toBe(false)
+    // a filled order that "drops to" nothing is still a trade
+    expect(isNoise('Order filled', 'Your sell order for 0.01 ETH at Rp32.500.000 has been filled', 'bank')).toBe(false)
+  })
+})
+
+describe('referral cue with a spaced slash (review finding)', () => {
+  test('"Rp25.000 / referral" is noise like "Rp25 rb/referral"', () => {
+    expect(isNoise('Ajak Kawan', 'Dapatkan cashback Rp25.000 / referral untuk setiap teman', 'bank')).toBe(true)
+  })
+})

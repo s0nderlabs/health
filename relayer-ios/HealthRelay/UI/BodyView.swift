@@ -937,12 +937,22 @@ struct BodyInfo: Identifiable, Equatable {
         var s: [Section] = []
         s.append(Section(title: "This reading", lines: [
             BodyText.readingNote(m, p.latest) ?? "The newest S400 reading, \(FoodFormat.weighIn(m.measured_at)).",
-            "Tap a band or its row for its 7-day trend: your counted S400 mornings and this reading.",
+            "Tap the shell, a band or its row for its 7-day trend: your counted S400 mornings and this reading.",
         ]))
-        s.append(Section(title: "Four compartments", lines: [
-            "Water, fat and protein are their % times the weight; mineral is the bone mass. They fill the body from the feet up like levels of a liquid, cut by area, so each band's painted size is its share of the weight; what they do not account for is left unfilled at the top.",
-            BodyText.unassignedExplainer(p, overKg: p.unassigned?.over_kg ?? 0),
-        ]))
+        let fit = BodyShellFit(p, m)
+        let fat = fit.fat, shell = fit.s
+        var layers: [String] = []
+        if let f = fat {
+            layers.append("Fat is the outer layer: a shell around the whole body, its area fat's share of the weight (\(BodyText.percent(f.pct))%). Inside it, the other compartments fill the lean body from the feet up like levels of a liquid, cut by area, so each band's painted size is its share of the weight; what they do not account for is the thin hatched band at the top.")
+            layers.append("The shell's inner edge is the body drawn again with every part (head, torso, each arm, each leg) shrunk toward its own centre line by ONE factor, solved so the coral is exactly fat's share: the shell is drawn true by area. A forearm keeps a rim in proportion to its width, never swallowed; the torso and head are measured from a set depth in, so the trunk wears one even layer.")
+            var floor = "No rim is drawn thinner than \(String(format: "%g", BodyOutline.rimFloorPt)) pt, so the layer stays visible on a lean limb. The factor is solved with that floor in place, so the coral's total area is still exact; it only moves a little from the torso to the limbs."
+            if fit.atFloor { floor += " This reading is under about \(Int((BodyOutline.floorShare * 100).rounded()))% fat: the floor alone is more than the share, so the shell is drawn a little thicker than its share." }
+            layers.append(floor)
+        } else {
+            layers.append("Water, fat and protein are their % times the weight; mineral is the bone mass. They fill the body from the feet up like levels of a liquid, cut by area, so each band's painted size is its share of the weight; what they do not account for is the thin hatched band at the top.")
+        }
+        layers.append(BodyText.unassignedExplainer(p, overKg: p.unassigned?.over_kg ?? 0))
+        s.append(Section(title: fat == nil ? "Four compartments" : "Fat is the outer layer", lines: layers))
         let basis = p.compartments.reversed().map { c -> String in
             let note = (c.note ?? "").trimmingCharacters(in: .whitespaces)
             return "\(c.label): \(FoodFormat.basisTag(c.basis))\(note.isEmpty ? "" : ", \(note)")"
@@ -953,10 +963,16 @@ struct BodyInfo: Identifiable, Equatable {
             let lean = g.lean_basis == "scan"
                 ? "the goal's \(FoodFormat.kg(g.lean_kg)) kg lean mass (\(g.lean_source ?? "scan"))"
                 : "today's \(FoodFormat.kg(g.lean_kg)) kg lean mass (\(g.lean_source ?? "scale"))"
-            s.append(Section(title: "Goal outline", lines: [
+            var lines = [
                 "\(target)% fat at \(lean) = ~\(FoodFormat.kg(g.kg)) kg, the goal card's main number.",
-                "A shape cue: narrowed side to side so its area is \(FoodFormat.kg(g.kg)) / \(FoodFormat.kg(m.kg)) of today's, the same area-for-mass rule as the bands (a lighter body is not a shorter one). The dimmed rim is the gap.",
-            ]))
+                "The dashed line is the same lean body with the goal's thinner shell: its area is \(FoodFormat.kg(g.kg)) / \(FoodFormat.kg(m.kg)) of today's, the same area-for-mass rule. The coral outside it is the fat between today and the goal. It is drawn where it stands clear of the edge; on a thin limb it would sit on the outline.",
+            ]
+            if let s0 = shell, s0 < 1 {
+                let sg = BodyOutline.ghostFactor(areaRatio: CGFloat(g.kg / m.kg))
+                let ratio = Int((((sg - s0) / (1 - s0)) * 20).rounded()) * 5
+                if ratio > 0, ratio < 100 { lines.append("At \(target)% the shell would be the coral inside the line: on the torso about \(ratio)% as thick as today's.") }
+            }
+            s.append(Section(title: "Goal outline", lines: lines))
         }
         return BodyInfo(id: "figure", title: "Composition", sections: s)
     }
