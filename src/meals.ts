@@ -563,6 +563,60 @@ export class MealBook {
     return (this.db.query('SELECT COUNT(*) AS n FROM meal_photos WHERE meal_id = ?').get(mealId) as { n: number }).n
   }
 
+  /** Next free photo index for a meal (indexes are never reused). */
+  nextPhotoIdx(mealId: number): number {
+    const r = this.db.query('SELECT MAX(idx) AS m FROM meal_photos WHERE meal_id = ?').get(mealId) as { m: number | null }
+    return r.m == null ? 0 : r.m + 1
+  }
+
+  /** Drop a meal's photo rows from `fromIdx` up (undo a half-added batch). */
+  deletePhotosFrom(mealId: number, fromIdx: number): void {
+    this.db.run('DELETE FROM meal_photos WHERE meal_id = ? AND idx >= ?', [mealId, fromIdx])
+  }
+
+  /** One row per food day with at least one live meal in [fromDate,
+   *  beforeDate), newest first: intake over ESTIMATED meals (null when none is), meal and
+   *  photo counts, the day's first photo (earliest meal, lowest index) and
+   *  the day's completeness (explicit flag, else no pending meal). */
+  historyDays(fromDate: string, beforeDate: string): Array<{
+    date: string
+    kcal: number | null
+    protein_g: number | null
+    meals: number
+    photos: number
+    cover: { meal_id: number; idx: number } | null
+    complete: boolean
+  }> {
+    const rows = this.db
+      .query(
+        `SELECT m.date AS date,
+                SUM(CASE WHEN m.status = 'estimated' THEN m.kcal END) AS kcal,
+                SUM(CASE WHEN m.status = 'estimated' THEN m.protein_g END) AS protein_g,
+                COUNT(*) AS meals,
+                SUM(CASE WHEN m.status = 'pending' THEN 1 ELSE 0 END) AS pending,
+                (SELECT COUNT(*) FROM meal_photos p JOIN meals mm ON mm.id = p.meal_id
+                  WHERE mm.date = m.date AND mm.status != 'void') AS photos,
+                f.complete AS flag
+         FROM meals m LEFT JOIN food_days f ON f.date = m.date
+         WHERE m.date >= ? AND m.date < ? AND m.status != 'void'
+         GROUP BY m.date ORDER BY m.date DESC`,
+      )
+      .all(fromDate, beforeDate) as Array<{ date: string; kcal: number | null; protein_g: number | null; meals: number; pending: number; photos: number; flag: number | null }>
+    const coverQ = this.db.query(
+      `SELECT p.meal_id AS meal_id, p.idx AS idx FROM meal_photos p JOIN meals m ON m.id = p.meal_id
+       WHERE m.date = ? AND m.status != 'void' ORDER BY m.eaten_at ASC, m.id ASC, p.idx ASC LIMIT 1`,
+    )
+    return rows.map((r) => ({
+      date: r.date,
+      kcal: r.kcal,
+      protein_g: r.protein_g,
+      meals: r.meals,
+      photos: r.photos,
+      cover: (coverQ.get(r.date) as { meal_id: number; idx: number } | null) ?? null,
+      complete: r.flag == null ? r.pending === 0 : r.flag === 1,
+    }))
+  }
+
   /**
    * Full replace of a meal's items. Throws on a revision conflict (another
    * writer got there first) or a void meal. Returns the new revision.

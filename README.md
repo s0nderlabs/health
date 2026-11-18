@@ -52,12 +52,14 @@ WHOOP band ──(BLE Broadcast HR)──> health-relay ──(WS, raw frames)�
   restarts, and a relayer that misses its disarm is re-pushed and surfaced
   loudly. Live coaching is dark while yielded, by contract; WHOOP's own
   recording and scoring are unaffected.
-- **Food log** (calorie + protein tracker, baseline first): snap a meal or
-  type it ("americano") on the phone, or log it in chat with text or photo
-  paths. Your Claude session estimates each meal per item (grams, kcal with
-  a range, protein) and the number lands back on the phone and in chat.
-  Corrections are a full re-estimate with the history kept; repeat meals
-  become presets. Weigh-ins flow in from Apple Health (any scale app that
+- **Food log** (calorie + protein tracker, baseline first): snap a meal,
+  pick up to six photos from the gallery, or type it ("americano") on the
+  phone, or log it in chat with text or photo paths. Your Claude session
+  estimates each meal per item (grams, kcal with a range, protein) and the
+  number lands back on the phone and in chat. Photos can be added to a
+  logged meal later, and past days are browsable with their totals and
+  meals. Corrections are a full re-estimate with the history kept; repeat
+  meals become presets. Weigh-ins flow in from Apple Health (any scale app that
   writes there), and each one becomes a `body.weighin` event: weight, body
   fat and the change from your last counted reading. Readings that should
   not drive the trend (a test before your start date, outside the morning

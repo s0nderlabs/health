@@ -105,6 +105,10 @@ export { BadRequest } from './http.js'
 import type { HealthConfig, ScaleConfig } from './types.js'
 
 export const MAX_PHOTOS_PER_MEAL = PHOTO_MAX_PER_MEAL
+/** Meta key prefix that makes POST /meal/photos idempotent per client_id. */
+const PHOTO_ADD_META = 'meal_photo_add:'
+const HISTORY_DEFAULT_DAYS = 60
+const HISTORY_MAX_DAYS = 400
 const MAX_BODY_SAMPLES = 5000
 
 type FoodConfig = HealthConfig['food']
@@ -654,7 +658,7 @@ export class FoodService {
   }
 
   private async attachPhotos(meal: { id: number; date: string }, srcs: Array<string | Uint8Array>): Promise<void> {
-    const start = this.book.photoCount(meal.id)
+    const start = this.book.nextPhotoIdx(meal.id)
     for (let k = 0; k < srcs.length; k++) {
       const { path, thumb } = this.photoPaths(meal, start + k)
       await ingestPhoto(srcs[k], path, thumb)
@@ -681,19 +685,13 @@ export class FoodService {
    *  it (and shares its failure) instead of reporting a meal that may yet be
    *  discarded. */
   async logFromApp(body: Record<string, unknown>): Promise<{ meal_id: number; duplicate: boolean; date: string }> {
-    const clientId = typeof body.client_id === 'string' ? body.client_id.trim() : ''
-    if (!/^[A-Za-z0-9-]{8,64}$/.test(clientId)) throw new BadRequest('client_id (8-64 chars, UUID) is required')
-    const running = this.inflight.get(clientId)
-    if (running) return running.then((r) => ({ ...r, duplicate: true }))
-    const existing = this.book.getByClientId(clientId)
-    if (existing) return { meal_id: existing.id, duplicate: true, date: existing.date }
-    const job = this.ingestAppMeal(clientId, body)
-    this.inflight.set(clientId, job)
-    try {
-      return await job
-    } finally {
-      this.inflight.delete(clientId)
-    }
+    return singleFlight(this.inflight, requireClientId(body), {
+      done: (id) => {
+        const existing = this.book.getByClientId(id)
+        return existing ? { meal_id: existing.id, duplicate: true, date: existing.date } : null
+      },
+      run: (id) => this.ingestAppMeal(id, body),
+    })
   }
 
   private async ingestAppMeal(
@@ -751,6 +749,86 @@ export class FoodService {
     this.deps.emit('meal.amended', `meal.amended:${id}:${at}`, this.amendedEvent(updated, text))
     this.changed(meal.date)
     return { ok: true }
+  }
+
+  private photoAdds = new Map<string, Promise<{ meal_id: number; added: number; total: number; duplicate: boolean }>>()
+
+  /** POST /meal/photos: more photos for a meal already logged (from the
+   *  phone's meal detail). Idempotent on client_id (one per add action, the
+   *  outbox reuses it on retry); at most MAX_PHOTOS_PER_MEAL photos per meal
+   *  in total; a half-ingested batch is undone. Claude gets a meal.amended
+   *  event with the new photos to re-estimate from. */
+  async addPhotosFromApp(body: Record<string, unknown>): Promise<{ meal_id: number; added: number; total: number; duplicate: boolean }> {
+    return singleFlight(this.photoAdds, requireClientId(body), {
+      done: (id) => {
+        const raw = this.deps.getMeta(`${PHOTO_ADD_META}${id}`)
+        if (!raw) return null
+        const d = JSON.parse(raw) as { meal_id: number; added: number }
+        return { meal_id: d.meal_id, added: d.added, total: this.book.photoCount(d.meal_id), duplicate: true }
+      },
+      run: (id) => this.ingestPhotoAdd(id, body),
+    })
+  }
+
+  private async ingestPhotoAdd(
+    clientId: string,
+    body: Record<string, unknown>,
+  ): Promise<{ meal_id: number; added: number; total: number; duplicate: boolean }> {
+    const id = Number(body.meal_id)
+    if (!Number.isInteger(id) || id <= 0) throw new BadRequest('meal_id is required')
+    const meal = this.book.getMeal(id)
+    if (!meal) throw new BadRequest(`no meal #${id}`)
+    if (meal.status === 'void') throw new BadRequest(`meal #${id} was removed`)
+    const photos = decodePhotos(body)
+    if (photos.length === 0) throw new BadRequest('photos are required')
+    const have = this.book.photoCount(id)
+    if (have + photos.length > MAX_PHOTOS_PER_MEAL) {
+      throw new BadRequest(`meal #${id} has ${have} photo(s); at most ${MAX_PHOTOS_PER_MEAL} per meal`)
+    }
+    const start = this.book.nextPhotoIdx(id)
+    try {
+      await this.attachPhotos(meal, photos)
+    } catch (err) {
+      for (let n = start; n < start + photos.length; n++) {
+        const { path, thumb } = this.photoPaths(meal, n)
+        rmSync(path, { force: true })
+        rmSync(thumb, { force: true })
+      }
+      this.book.deletePhotosFrom(id, start)
+      throw err
+    }
+    this.deps.setMeta(`${PHOTO_ADD_META}${clientId}`, JSON.stringify({ meal_id: id, added: photos.length }))
+    const updated = this.book.getMeal(id)!
+    this.deps.emit('meal.amended', `meal.amended:${id}:photos:${clientId}`, this.photosAddedEvent(updated, photos.length))
+    this.changed(updated.date)
+    this.log(`meal #${id}: ${photos.length} photo(s) added from the app (${updated.photos.length} total)`)
+    return { meal_id: id, added: photos.length, total: updated.photos.length, duplicate: false }
+  }
+
+  /** GET /meals/history?days=N: the PAST food days (today excluded: the Food
+   *  tab is today) of the last N that have a meal, newest first, each with its intake (estimated meals only), today's targets
+   *  (targets are not versioned, so a past day is read against the current
+   *  ones), counts, a cover thumbnail and completeness. */
+  history(rawDays: unknown) {
+    const n = Number(rawDays ?? HISTORY_DEFAULT_DAYS)
+    const days = Number.isInteger(n) && n >= 1 ? Math.min(n, HISTORY_MAX_DAYS) : HISTORY_DEFAULT_DAYS
+    const today = this.today()
+    const cfg = this.deps.getConfig()
+    const kcalTarget = this.targetKcal()
+    return {
+      today,
+      days: this.book.historyDays(addDays(today, -days), today).map((d) => ({
+        date: d.date,
+        kcal: d.kcal,
+        kcal_target: kcalTarget,
+        protein_g: d.protein_g,
+        protein_target_g: cfg.protein_target_g,
+        meals: d.meals,
+        photos: d.photos,
+        cover_thumb_url: d.cover ? `/meal-photo?meal=${d.cover.meal_id}&n=${d.cover.idx}&thumb=1` : null,
+        complete: d.complete,
+      })),
+    }
   }
 
   // ── front door 2: chat (health__meal) ───────────────────────────
@@ -2337,8 +2415,14 @@ export class FoodService {
       if (req.method === 'POST' && path === '/meal/fix') {
         return Response.json(this.fixFromApp(await jsonBody(req, MAX_JSON_BYTES)))
       }
+      if (req.method === 'POST' && path === '/meal/photos') {
+        return Response.json(await this.addPhotosFromApp(await jsonBody(req, MAX_JSON_BYTES)))
+      }
       if (req.method === 'GET' && path === '/meals') {
         return Response.json(this.day(url.searchParams.get('date'), { forPhone: true }))
+      }
+      if (req.method === 'GET' && path === '/meals/history') {
+        return Response.json(this.history(url.searchParams.get('days')))
       }
       if (req.method === 'GET' && path === '/meal-photo') {
         return this.servePhoto(url)
@@ -2422,6 +2506,26 @@ export class FoodService {
     }
   }
 
+  photosAddedEvent(meal: Meal, added: number): { content: string; meta: Record<string, string> } {
+    const fresh = meal.photos.slice(-added)
+    const current =
+      meal.status === 'estimated'
+        ? ` Current estimate (rev ${meal.revision}): "${meal.label}" ${kcalText(meal.kcal, meal.kcal_lo, meal.kcal_hi)}, ${fmtG(meal.protein_g)} protein.`
+        : ' It has not been estimated yet.'
+    return {
+      content:
+        `${added} more photo${added > 1 ? 's' : ''} added from the phone to meal #${meal.id}: ${fresh.map((p) => p.path).join(', ')} (Read to view; all photos: ${meal.photos.map((p) => p.path).join(', ')}).${current}` +
+        ` Re-estimate with health__meal action=estimate meal_id=${meal.id} expected_revision=${meal.revision} (full item list) if the new photos change it, and say so in chat; if they change nothing, one line.`,
+      meta: {
+        class: 'meal.amended',
+        meal_id: String(meal.id),
+        date: meal.date,
+        revision: String(meal.revision),
+        photos_added: String(added),
+      },
+    }
+  }
+
   amendedEvent(meal: Meal, text: string): { content: string; meta: Record<string, string> } {
     const current =
       meal.status === 'estimated'
@@ -2449,6 +2553,34 @@ function labelOf(v: unknown, items: Array<{ name: string }>): string {
 
 const MAX_JSON_BYTES = 6 * 12 * 1024 * 1024 // six base64 photos at the phone's cap, plus slack
 
+
+/** The phone's idempotency key (one per capture or add action, reused on retry). */
+function requireClientId(body: Record<string, unknown>): string {
+  const id = typeof body.client_id === 'string' ? body.client_id.trim() : ''
+  if (!/^[A-Za-z0-9-]{8,64}$/.test(id)) throw new BadRequest('client_id (8-64 chars, UUID) is required')
+  return id
+}
+
+/** Idempotent on a client id: a retry racing the first run waits for it (and
+ *  shares its failure) and reports duplicate; one that comes after it gets
+ *  the stored result (`done`); otherwise `run` once. */
+async function singleFlight<T extends { duplicate: boolean }>(
+  inflight: Map<string, Promise<T>>,
+  id: string,
+  op: { done: (id: string) => T | null; run: (id: string) => Promise<T> },
+): Promise<T> {
+  const running = inflight.get(id)
+  if (running) return running.then((r) => ({ ...r, duplicate: true }))
+  const prior = op.done(id)
+  if (prior) return prior
+  const job = op.run(id)
+  inflight.set(id, job)
+  try {
+    return await job
+  } finally {
+    inflight.delete(id)
+  }
+}
 
 function decodePhotos(body: Record<string, unknown>): Uint8Array[] {
   const raw = Array.isArray(body.photos) ? body.photos : body.photo != null ? [body.photo] : []

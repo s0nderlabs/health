@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.21.0 - 2026-11-18
+
+### Added
+
+- **Food: photos from the gallery, several per meal.** The capture row has
+  a camera button and a gallery button, both one tap (the system picker,
+  out of process: no photo-library permission). The new meal sheet holds up
+  to 6 photos: a strip with the first marked as the cover, remove on each,
+  an add tile (camera or library) and a large preview of the selected one.
+  Each photo is redrawn on the phone before upload (no metadata) and sent in
+  order; meals queued by an older build still send.
+- **Add photos to a logged meal.** Meal detail pages through every photo,
+  opens a full-screen viewer, and adds more (camera or library) up to 6 in
+  total. New `POST /meal/photos` (idempotent on the phone's client id, the
+  cap counts the photos already there, a half-ingested batch is undone);
+  Claude gets a `meal.amended` event with the new photos to re-estimate.
+- **Meal history.** A calendar button on the Food tab lists past days
+  (today excluded) with kcal and protein against today's targets, meal and
+  photo counts, the day's first photo and a mark when the day was logged in
+  full; a day opens its meals read-only. New `GET /meals/history?days=N`.
+
 ## 0.20.1 - 2026-11-18
 
 ### Changed

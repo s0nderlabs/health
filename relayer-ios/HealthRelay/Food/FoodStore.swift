@@ -12,6 +12,7 @@
 // device, no timestamp), and the daemon strips again on its side anyway.
 
 import Foundation
+import ImageIO
 import SwiftUI
 import UIKit
 import UserNotifications
@@ -142,18 +143,49 @@ struct FoodEnergy: Codable, Equatable {
     var provisional: Bool? = nil
 }
 
+/// One past day in GET /meals/history (newest first, only days with a meal).
+struct FoodHistoryDay: Codable, Equatable, Identifiable {
+    let date: String
+    let kcal: Double?
+    let kcal_target: Double?
+    let protein_g: Double?
+    let protein_target_g: Double?
+    let meals: Int
+    let photos: Int
+    let cover_thumb_url: String?
+    let complete: Bool
+
+    var id: String { date }
+}
+
+struct FoodHistory: Codable { let days: [FoodHistoryDay] }
+
 // ── outbox ────────────────────────────────────────────────────────
 
 struct OutboxEntry: Codable, Identifiable, Equatable {
-    enum Kind: String, Codable { case meal, fix }
+    /// meal: a new capture; fix: a correction line; photos: more photos for
+    /// an already-logged meal (POST /meal/photos, idempotent on the id).
+    enum Kind: String, Codable { case meal, fix, photos }
     let id: String // = client_id: the daemon dedupes retries on it
     let kind: Kind
     let createdAt: Date
     var note: String?
-    var photoFile: String? // file name under the outbox dir
-    var mealId: Int? // fix only
+    /// 0.20.1 and older: ONE photo. Still decoded and sent, so an entry
+    /// queued before the update goes out after it; new entries never set it.
+    var photoFile: String?
+    /// File names under the outbox dir, in the order he picked them (the
+    /// first is the meal's cover). Up to FoodStore.maxPhotos.
+    var photoFiles: [String]?
+    var mealId: Int? // fix and photos only
     var attempts = 0
     var lastError: String?
+    /// A capture whose photos are still being written (this many): its slot
+    /// in the outbox is taken at the tap, so captures keep their order and
+    /// their tap time, but flush() skips it until the files are on disk.
+    var staging: Int? = nil
+
+    /// Every staged photo, an old single-photo entry included.
+    var files: [String] { photoFiles ?? photoFile.map { [$0] } ?? [] }
 }
 
 final class FoodStore: ObservableObject {
@@ -162,6 +194,9 @@ final class FoodStore: ObservableObject {
     @Published var error: String?
     @Published var loading = false
     @Published var fetchedAt: Date?
+    /// Past days, newest first (GET /meals/history); nil until loaded.
+    @Published var history: [FoodHistoryDay]?
+    @Published var historyError: String?
 
     private var flushing = false
     private var retry: DispatchWorkItem?
@@ -179,6 +214,8 @@ final class FoodStore: ObservableObject {
 
     private static let cacheKey = "food_day_cache_v1"
     private static let maxEdge: CGFloat = 1568
+    /// The daemon's cap (src/photos.ts PHOTO_MAX_PER_MEAL).
+    static let maxPhotos = 6
 
     static var dir: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -192,7 +229,7 @@ final class FoodStore: ObservableObject {
         try? FileManager.default.createDirectory(at: Self.dir, withIntermediateDirectories: true)
         if let data = try? Data(contentsOf: Self.outboxFile),
            let saved = try? JSONDecoder().decode([OutboxEntry].self, from: data) {
-            outbox = saved
+            outbox = saved.compactMap(Self.recovered)
         }
         // Cached day only if it is still today: yesterday's ring at 08:00 is a lie.
         if let data = UserDefaults.standard.data(forKey: Self.cacheKey),
@@ -206,10 +243,23 @@ final class FoodStore: ObservableObject {
     /// The phone's guess at the food day (04:00 rollover), only for the cache
     /// check; the daemon's `today` is authoritative once fetched.
     static func localFoodDay(_ date: Date = Date()) -> String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        f.locale = Locale(identifier: "en_US_POSIX")
-        return f.string(from: date.addingTimeInterval(-4 * 3600))
+        FoodFormat.dayParser.string(from: date.addingTimeInterval(-4 * 3600))
+    }
+
+    /// Today's food day: the daemon's once fetched, else the phone's guess.
+    var today: String { day?.today ?? Self.localFoodDay() }
+
+    /// An entry the app was killed while staging: whatever photos made it to
+    /// disk (each write is atomic, so a file is whole or absent) go with it;
+    /// nothing at all (no note, no photo) drops it.
+    private static func recovered(_ saved: OutboxEntry) -> OutboxEntry? {
+        guard let n = saved.staging else { return saved }
+        var e = saved
+        let names = (0..<n).map { stagedName(e.id, $0) }
+            .filter { FileManager.default.fileExists(atPath: photoURL($0).path) }
+        e.staging = nil
+        e.photoFiles = names.isEmpty ? nil : names
+        return e.note != nil || !names.isEmpty ? e : nil
     }
 
     // ── reads ───────────────────────────────────────────────────────
@@ -297,29 +347,155 @@ final class FoodStore: ObservableObject {
 
     // ── writes (via the outbox) ─────────────────────────────────────
 
-    /// A capture: photo and/or one-line note. Lands in the outbox first.
-    func log(photo: UIImage?, note: String?) {
-        let id = UUID().uuidString
-        var entry = OutboxEntry(id: id, kind: .meal, createdAt: Date())
+    /// A capture: up to six photos (in order, the first is the cover) and/or
+    /// one-line note. The entry takes its outbox slot AT THE TAP (its id and
+    /// createdAt are the tap's, so captures keep their order however long
+    /// their photos take); the photos are redrawn and written off the main
+    /// thread (six at once would stall Send), then the entry is flushed.
+    func log(photos: [UIImage], note: String?) {
         let trimmed = note?.trimmingCharacters(in: .whitespacesAndNewlines)
-        entry.note = (trimmed?.isEmpty ?? true) ? nil : trimmed
-        if let photo = photo {
-            let name = "\(id).jpg"
-            do {
-                guard let jpeg = Self.prepare(photo) else { throw CocoaError(.fileWriteUnknown) }
-                try jpeg.write(to: Self.photoURL(name), options: .atomic)
-                entry.photoFile = name
-            } catch {
-                // Never lose a capture silently: say so (a note, if any, still goes).
-                rlog("food: could not stage photo: \(error.localizedDescription)")
-                self.error = "Couldn't save that photo on the phone (\(error.localizedDescription)). Try again, or type what you had."
-            }
-        }
-        guard entry.note != nil || entry.photoFile != nil else { return }
+        let note = (trimmed?.isEmpty ?? true) ? nil : trimmed
+        let shots = Array(photos.prefix(Self.maxPhotos))
+        guard note != nil || !shots.isEmpty else { return }
+        var entry = OutboxEntry(id: UUID().uuidString, kind: .meal, createdAt: Date())
+        entry.note = note
+        entry.staging = shots.isEmpty ? nil : shots.count
         outbox.append(entry)
         persistOutbox()
         Self.askNotificationsOnce()
+        guard !shots.isEmpty else { return flush() }
+        let id = entry.id
+        DispatchQueue.global(qos: .userInitiated).async {
+            let staged = Self.stage(photos: shots, id: id)
+            DispatchQueue.main.async { self.staged(id, staged, of: shots.count) }
+        }
+    }
+
+    /// A capture's photos are on disk (or some failed): fill its slot and send.
+    private func staged(_ id: String, _ s: Staged, of total: Int) {
+        guard let i = outbox.firstIndex(where: { $0.id == id }) else {
+            // Discarded while its photos were being written: drop them too.
+            for f in s.names { try? FileManager.default.removeItem(at: Self.photoURL(f)) }
+            return
+        }
+        let hasNote = outbox[i].note != nil
+        if s.failed > 0 {
+            // Never lose a capture silently: say so (the rest still goes).
+            rlog("food: could not stage \(s.failed) of \(total) photos: \(s.reason)")
+            let these = total == 1 ? "that photo" : "those photos"
+            if s.failed < total {
+                error = "Couldn't save \(s.failed) of \(total) photos on the phone; the rest went."
+            } else if hasNote {
+                error = "Couldn't save \(these) on the phone (\(s.reason)); your note was sent without \(total == 1 ? "it" : "them")."
+            } else {
+                error = "Couldn't save \(these) on the phone (\(s.reason)). Try again, or type what you had."
+            }
+        }
+        outbox[i].staging = nil
+        outbox[i].photoFiles = s.names.isEmpty ? nil : s.names
+        if !hasNote && s.names.isEmpty { outbox.remove(at: i) }
+        persistOutbox()
         flush()
+    }
+
+    /// Photos for a meal already logged (from its detail): staged like a
+    /// capture, queued as ONE entry whose id is the client_id the daemon
+    /// dedupes on (a retry reuses it), sent as POST /meal/photos.
+    func addPhotos(mealId: Int, photos: [UIImage]) {
+        let id = UUID().uuidString
+        let shots = Array(photos.prefix(Self.maxPhotos))
+        guard !shots.isEmpty else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let s = Self.stage(photos: shots, id: id)
+            DispatchQueue.main.async {
+                if s.failed > 0 {
+                    rlog("food: could not stage \(s.failed) of \(shots.count) added photos: \(s.reason)")
+                    self.error = "Couldn't save \(s.failed) of \(shots.count) photos on the phone"
+                        + (s.names.isEmpty ? " (\(s.reason))." : "; the rest went.")
+                }
+                guard !s.names.isEmpty else { return }
+                var entry = OutboxEntry(id: id, kind: .photos, createdAt: Date())
+                entry.mealId = mealId
+                entry.photoFiles = s.names
+                self.outbox.append(entry)
+                self.persistOutbox()
+                self.flush()
+            }
+        }
+    }
+
+    private typealias Staged = (names: [String], failed: Int, reason: String)
+
+    private static func stagedName(_ id: String, _ i: Int) -> String { "\(id)-\(i).jpg" }
+
+    /// Every photo prepared and written under the outbox dir as <id>-<i>.jpg,
+    /// in order. Off the main thread. Returns what landed and what did not.
+    private static func stage(photos: [UIImage], id: String) -> Staged {
+        var names: [String] = []
+        var failed = 0
+        var reason = ""
+        for (i, photo) in photos.enumerated() {
+            let name = stagedName(id, i)
+            do {
+                guard let jpeg = prepare(photo) else { throw CocoaError(.fileWriteUnknown) }
+                try jpeg.write(to: photoURL(name), options: .atomic)
+                names.append(name)
+            } catch {
+                failed += 1
+                reason = error.localizedDescription
+            }
+        }
+        return (names, failed, reason)
+    }
+
+    /// Photos still on their way to a logged meal (the outbox's adds).
+    func sendingPhotos(for mealId: Int) -> Int {
+        outbox.filter { $0.kind == .photos && $0.mealId == mealId }.reduce(0) { $0 + $1.files.count }
+    }
+
+    /// Past days with at least one meal, newest first.
+    /// Past days only (the daemon sends days before today; an older daemon
+    /// also sent today, which must never open read-only).
+    func loadHistory(days: Int = 60) {
+        if Demo.active {
+            history = DemoFood.history().filter { $0.date != today }
+            return
+        }
+        guard let url = Settings.shared.foodURL(path: "/meals/history?days=\(days)") else {
+            historyError = "Not configured."
+            return
+        }
+        Settings.shared.fetch(url) { [weak self] data, response, err in
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let decoded = status == 200 ? data.flatMap { try? JSONDecoder().decode(FoodHistory.self, from: $0) } : nil
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if let d = decoded {
+                    self.history = d.days.filter { $0.date != self.today }
+                    self.historyError = nil
+                } else {
+                    self.historyError = err != nil ? "History unreachable: \(err!.localizedDescription)"
+                        : status == 404 ? "This daemon has no meal history yet (update the health plugin)."
+                        : "History read failed (\(status))."
+                }
+            }
+        }
+    }
+
+    /// One past day's meals (GET /meals?date=), read-only.
+    func loadDay(_ date: String, done: @escaping (FoodDay?, String?) -> Void) {
+        if Demo.active {
+            done(DemoFood.pastDay(date), nil)
+            return
+        }
+        guard let url = Settings.shared.foodURL(path: "/meals?date=\(date)") else { return done(nil, "Not configured.") }
+        Settings.shared.fetch(url) { data, response, err in
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let day = status == 200 ? data.flatMap { try? JSONDecoder().decode(FoodDay.self, from: $0) } : nil
+            DispatchQueue.main.async {
+                done(day, day != nil ? nil : err.map { "Unreachable: \($0.localizedDescription)" } ?? "Read failed (\(status)).")
+            }
+        }
     }
 
     /// A correction line for an existing meal (raises meal.amended daemon-side).
@@ -336,17 +512,19 @@ final class FoodStore: ObservableObject {
 
     /// Drop a stuck entry by hand (swipe in the list).
     func discard(_ id: String) {
-        if let e = outbox.first(where: { $0.id == id }), let f = e.photoFile {
-            try? FileManager.default.removeItem(at: Self.photoURL(f))
+        if let e = outbox.first(where: { $0.id == id }) {
+            for f in e.files { try? FileManager.default.removeItem(at: Self.photoURL(f)) }
         }
         outbox.removeAll { $0.id == id }
         persistOutbox()
     }
 
-    /// Send everything queued, oldest first, one at a time. Safe to call
-    /// from any trigger (capture, socket connect, foreground, timer).
+    /// Send everything queued, oldest first, one at a time, skipping a capture
+    /// whose photos are still being written (its staging calls flush again).
+    /// Safe to call from any trigger (capture, socket connect, foreground, timer).
     func flush() {
-        guard !Demo.active, !flushing, let next = outbox.first, Settings.shared.configured else { return }
+        guard !Demo.active, !flushing, let next = outbox.first(where: { $0.staging == nil }),
+              Settings.shared.configured else { return }
         flushing = true
         retry?.cancel()
         // Finish the upload even if he pockets the phone right after the shot.
@@ -367,7 +545,7 @@ final class FoodStore: ObservableObject {
                 case .rejected(let why):
                     // The daemon refused the entry itself (400): retrying can
                     // never succeed, so drop it and say why.
-                    self.error = "A queued \(next.kind == .fix ? "fix" : "meal") was refused: \(why)"
+                    self.error = "A queued \(next.kind == .fix ? "fix" : next.kind == .photos ? "photo add" : "meal") was refused: \(why)"
                     self.discard(next.id)
                     self.flush()
                 case .failed(let why):
@@ -396,7 +574,7 @@ final class FoodStore: ObservableObject {
     private enum Outcome { case sent, rejected(String), failed(String) }
 
     private func send(_ e: OutboxEntry, done: @escaping (Outcome) -> Void) {
-        let path = e.kind == .fix ? "/meal/fix" : "/meal"
+        let path = e.kind == .fix ? "/meal/fix" : e.kind == .photos ? "/meal/photos" : "/meal"
         guard let url = Settings.shared.foodURL(path: path) else {
             done(.failed("not configured"))
             return
@@ -407,16 +585,18 @@ final class FoodStore: ObservableObject {
             body["client_id"] = e.id
             body["captured_at"] = ISO8601DateFormatter().string(from: e.createdAt)
             if let note = e.note { body["note"] = note }
-            if let f = e.photoFile {
-                guard let data = try? Data(contentsOf: Self.photoURL(f)) else {
-                    done(.rejected("photo file missing"))
-                    return
-                }
-                body["photo"] = data.base64EncodedString()
-            }
+            // Always the array form, in his order (the daemon takes body.photos
+            // or the old body.photo; an old single-photo entry goes as [one]).
+            guard let photos = Self.encodedPhotos(e) else { return done(.rejected("photo file missing")) }
+            if !photos.isEmpty { body["photos"] = photos }
         case .fix:
             body["meal_id"] = e.mealId ?? 0
             body["text"] = e.note ?? ""
+        case .photos:
+            body["meal_id"] = e.mealId ?? 0
+            body["client_id"] = e.id
+            guard let photos = Self.encodedPhotos(e) else { return done(.rejected("photo file missing")) }
+            body["photos"] = photos
         }
         var req = URLRequest(url: url, timeoutInterval: 60)
         req.httpMethod = "POST"
@@ -438,14 +618,30 @@ final class FoodStore: ObservableObject {
         }
     }
 
+    /// An entry's staged photos as base64, in order; nil if a file is gone.
+    private static func encodedPhotos(_ e: OutboxEntry) -> [String]? {
+        var out: [String] = []
+        for f in e.files {
+            guard let data = try? Data(contentsOf: photoURL(f)) else { return nil }
+            out.append(data.base64EncodedString())
+        }
+        return out
+    }
+
     private func persistOutbox() {
         if let data = try? JSONEncoder().encode(outbox) {
             try? data.write(to: Self.outboxFile, options: .atomic)
         }
     }
 
-    /// Long edge capped at the daemon's 1568, orientation baked, zero metadata.
-    static func prepare(_ image: UIImage) -> Data? {
+    /// Marks a UIImage that came out of render(_:), so staging can skip a
+    /// second redraw (the mark lives only on that object, never in a file).
+    private static var renderedKey: UInt8 = 0
+
+    /// Long edge capped at the daemon's 1568, orientation baked into the
+    /// pixels, ZERO metadata: a fresh bitmap carries no GPS, device or
+    /// timestamp, so jpegData of it is clean.
+    static func render(_ image: UIImage) -> UIImage {
         let size = image.size
         let scale = min(1, maxEdge / max(size.width, size.height))
         let target = CGSize(width: (size.width * scale).rounded(), height: (size.height * scale).rounded())
@@ -455,8 +651,35 @@ final class FoodStore: ObservableObject {
         let rendered = UIGraphicsImageRenderer(size: target, format: format).image { _ in
             image.draw(in: CGRect(origin: .zero, size: target))
         }
-        return rendered.jpegData(compressionQuality: 0.72)
+        objc_setAssociatedObject(rendered, &renderedKey, true, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        return rendered
     }
+
+    /// The upload's JPEG. An image render(_:) already produced at the upload
+    /// size is encoded as is (no second redraw); anything else is rendered.
+    static func prepare(_ image: UIImage) -> Data? {
+        let rendered = objc_getAssociatedObject(image, &renderedKey) as? Bool == true
+            && max(image.size.width, image.size.height) <= maxEdge && image.scale == 1
+        return (rendered ? image : render(image)).jpegData(compressionQuality: 0.72)
+    }
+
+    /// A picked photo, decoded straight to at most the upload's long edge
+    /// (ImageIO thumbnails never decode the full 12 MP frame), orientation
+    /// applied: six photos in the compose sheet stay a few MB, not hundreds.
+    static func downscaled(_ data: Data) -> UIImage? {
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return UIImage(data: data) }
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxEdge,
+        ]
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return UIImage(data: data) }
+        return UIImage(cgImage: cg)
+    }
+
+    /// A camera shot brought down to the upload's long edge (same reason),
+    /// through render(_:): staging then encodes it without drawing it again.
+    static func downscaled(_ image: UIImage) -> UIImage { render(image) }
 
     private static func askNotificationsOnce() {
         let key = "food_notif_asked_v1"

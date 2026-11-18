@@ -86,8 +86,26 @@ struct HealthRelayApp: App {
             }
             if let mode = ProcessInfo.processInfo.environment["HR_DEMO_FOOD"] {
                 food.day = DemoFood.day(mode)
-                if ProcessInfo.processInfo.environment["HR_DEMO_FOOD_QUEUED"] != nil {
-                    food.outbox = [OutboxEntry(id: "demo-q", kind: .meal, createdAt: Date(), note: "es teh manis", attempts: 2)]
+                if let q = ProcessInfo.processInfo.environment["HR_DEMO_FOOD_QUEUED"] {
+                    if q == "add" {
+                        // Two photos on their way to the 08:40 latte (meal 1).
+                        let names = (0..<2).map { "demo-a-\($0).jpg" }
+                        for (i, n) in names.enumerated() {
+                            try? FoodStore.prepare(DemoFood.plate(70 + i))?.write(to: FoodStore.photoURL(n), options: .atomic)
+                        }
+                        food.outbox = [OutboxEntry(id: "demo-a", kind: .photos, createdAt: Date(), photoFiles: names, mealId: 1, attempts: 1)]
+                    } else if q == "photos" {
+                        // A 3-photo meal still waiting for the Mac: synthetic
+                        // plates staged exactly as a capture stages them.
+                        let names = (0..<3).map { "demo-q-\($0).jpg" }
+                        for (i, n) in names.enumerated() {
+                            try? FoodStore.prepare(DemoFood.plate(60 + i))?.write(to: FoodStore.photoURL(n), options: .atomic)
+                        }
+                        food.outbox = [OutboxEntry(id: "demo-q", kind: .meal, createdAt: Date(), note: "gado-gado + kerupuk",
+                                                   photoFiles: names, attempts: 1)]
+                    } else {
+                        food.outbox = [OutboxEntry(id: "demo-q", kind: .meal, createdAt: Date(), note: "es teh manis", attempts: 2)]
+                    }
                 }
             }
             // HR_DEMO_BODY=full|formula|stale|empty|malformed|error: the Body

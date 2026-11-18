@@ -1325,3 +1325,107 @@ describe('late fasted band: readings stored before the rule are re-judged (revie
     expect(book.bodyExcluded('hk-mass-old18')).toBeNull()
   })
 })
+
+describe('POST /meal/photos: more photos for a logged meal', () => {
+  const b64 = (j: Uint8Array) => Buffer.from(j).toString('base64')
+
+  test('adds photos after the existing ones, raises one meal.amended, and is idempotent on client_id', async () => {
+    const { food, events, pushes } = harness()
+    const jpeg = await makeJpeg(dir, 300, 200)
+    const r = await food.logFromApp({ client_id: 'meal-add-0001', photo: b64(jpeg), note: 'nasi padang' })
+    const a = await food.addPhotosFromApp({ client_id: 'add-0001-aaaa', meal_id: r.meal_id, photos: [b64(jpeg), b64(jpeg)] })
+    expect(a).toEqual({ meal_id: r.meal_id, added: 2, total: 3, duplicate: false })
+    const again = await food.addPhotosFromApp({ client_id: 'add-0001-aaaa', meal_id: r.meal_id, photos: [b64(jpeg), b64(jpeg)] })
+    expect(again).toEqual({ ...a, duplicate: true })
+    const amended = events.filter((e) => e.cls === 'meal.amended')
+    expect(amended).toHaveLength(1)
+    expect(amended[0].meta).toMatchObject({ meal_id: String(r.meal_id), photos_added: '2' })
+    expect(amended[0].content).toContain(`-1.jpg`)
+    expect(amended[0].content).toContain(`-2.jpg`)
+    const day = food.day(undefined, { forPhone: true })
+    expect(day.meals[0].photos.map((p) => (p as { n: number }).n)).toEqual([0, 1, 2])
+    expect(pushes.filter((p) => p.type === 'meals_updated').length).toBeGreaterThanOrEqual(2)
+  })
+
+  test('concurrent retries share one ingest', async () => {
+    const { food } = harness()
+    const jpeg = await makeJpeg(dir, 300, 200)
+    const r = await food.logFromApp({ client_id: 'meal-add-0002', note: 'soto' })
+    const body = { client_id: 'add-0002-aaaa', meal_id: r.meal_id, photos: [b64(jpeg)] }
+    const [x, y] = await Promise.all([food.addPhotosFromApp(body), food.addPhotosFromApp(body)])
+    expect([x.duplicate, y.duplicate].sort()).toEqual([false, true])
+    expect(food.day(undefined, { forPhone: true }).meals[0].photos).toHaveLength(1)
+  })
+
+  test('the 6-photo cap counts the photos already there; void meals and bad input are refused', async () => {
+    const { food } = harness()
+    const jpeg = await makeJpeg(dir, 300, 200)
+    const r = await food.logFromApp({ client_id: 'meal-add-0003', photos: [b64(jpeg), b64(jpeg), b64(jpeg), b64(jpeg)] })
+    await expect(food.addPhotosFromApp({ client_id: 'add-0003-aaaa', meal_id: r.meal_id, photos: [b64(jpeg), b64(jpeg), b64(jpeg)] })).rejects.toThrow(/at most 6/)
+    expect((await food.addPhotosFromApp({ client_id: 'add-0003-bbbb', meal_id: r.meal_id, photos: [b64(jpeg), b64(jpeg)] })).total).toBe(6)
+    await expect(food.addPhotosFromApp({ client_id: 'add-0003-cccc', meal_id: r.meal_id, photos: [] })).rejects.toThrow(/photos are required/)
+    await expect(food.addPhotosFromApp({ client_id: 'add-0003-dddd', meal_id: 99999, photos: [b64(jpeg)] })).rejects.toThrow(/no meal/)
+    await expect(food.addPhotosFromApp({ client_id: 'x', meal_id: r.meal_id, photos: [b64(jpeg)] })).rejects.toThrow(/client_id/)
+    const t = await food.logFromApp({ client_id: 'meal-add-0004', note: 'teh' })
+    food.void({ meal_id: t.meal_id, reason: 'test' })
+    await expect(food.addPhotosFromApp({ client_id: 'add-0004-aaaa', meal_id: t.meal_id, photos: [b64(jpeg)] })).rejects.toThrow(/removed/)
+  })
+
+  test('a broken photo in the batch undoes the whole add', async () => {
+    const { food } = harness()
+    const jpeg = await makeJpeg(dir, 300, 200)
+    const r = await food.logFromApp({ client_id: 'meal-add-0005', photo: b64(jpeg) })
+    await expect(
+      food.addPhotosFromApp({ client_id: 'add-0005-aaaa', meal_id: r.meal_id, photos: [b64(jpeg), Buffer.from('x'.repeat(300)).toString('base64')] }),
+    ).rejects.toThrow()
+    expect(food.day(undefined, { forPhone: true }).meals[0].photos).toHaveLength(1)
+    // a clean retry under a NEW client_id works and takes the next index
+    expect((await food.addPhotosFromApp({ client_id: 'add-0005-bbbb', meal_id: r.meal_id, photos: [b64(jpeg)] })).total).toBe(2)
+  })
+})
+
+describe('GET /meals/history', () => {
+  test('past days newest first, intake over estimated meals only, cover = the day\'s first photo, void meals ignored', async () => {
+    const { food, setNow } = harness(local(2026, 11, 16, 12))
+    const jpeg = await makeJpeg(dir, 300, 200)
+    const b64 = Buffer.from(jpeg).toString('base64')
+    const lunch = await food.logFromApp({ client_id: 'hist-0001-aaaa', photo: b64, captured_at: new Date(local(2026, 11, 15, 12)).toISOString() })
+    await food.logFromApp({ client_id: 'hist-0002-aaaa', note: 'teh', captured_at: new Date(local(2026, 11, 15, 18)).toISOString() })
+    food.estimate({ meal_id: lunch.meal_id, expected_revision: 0, items: [{ name: 'rice', kcal: 400, protein_g: 8 }] })
+    const gone = await food.logFromApp({ client_id: 'hist-0003-aaaa', note: 'oops', captured_at: new Date(local(2026, 11, 14, 9)).toISOString() })
+    food.void({ meal_id: gone.meal_id, reason: 'test' })
+    setNow(local(2026, 11, 16, 13))
+    await food.logFromApp({ client_id: 'hist-0004-aaaa', note: 'kopi' })
+    const h = food.history('30')
+    // today (11-16) is the Food tab itself, never a history row
+    expect(h.days.map((d) => d.date)).toEqual(['2026-11-15'])
+    const d15 = h.days[0]
+    expect(d15).toMatchObject({ kcal: 400, protein_g: 8, meals: 2, photos: 1, complete: false })
+    expect(d15.cover_thumb_url).toBe(`/meal-photo?meal=${lunch.meal_id}&n=0&thumb=1`)
+    // days=1 = yesterday only; a past day with only a pending meal has kcal null
+    expect(food.history('1').days.map((d) => d.date)).toEqual(['2026-11-15'])
+    expect(food.history('nonsense').days).toHaveLength(1)
+    setNow(local(2026, 11, 17, 9))
+    expect(food.history('30').days[0]).toMatchObject({ date: '2026-11-16', kcal: null, meals: 1, photos: 0, cover_thumb_url: null })
+  })
+})
+
+describe('HTTP wiring for the new routes', () => {
+  test('POST /meal/photos and GET /meals/history answer through handleHttp; a bad add is a 400', async () => {
+    const { food } = harness()
+    const jpeg = await makeJpeg(dir, 300, 200)
+    const b64 = Buffer.from(jpeg).toString('base64')
+    const r = await food.logFromApp({ client_id: 'http-0001-aaaa', note: 'soto' })
+    const post = (body: unknown) =>
+      food.handleHttp(new Request('http://x/meal/photos', { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json' } }), new URL('http://x/meal/photos'))
+    const ok = await post({ client_id: 'http-add-0001', meal_id: r.meal_id, photos: [b64] })
+    expect(ok!.status).toBe(200)
+    expect(await ok!.json()).toMatchObject({ added: 1, total: 1 })
+    const bad = await post({ client_id: 'http-add-0002', meal_id: r.meal_id, photos: [] })
+    expect(bad!.status).toBe(400)
+    const h = await food.handleHttp(new Request('http://x/meals/history?days=7'), new URL('http://x/meals/history?days=7'))
+    expect(h!.status).toBe(200)
+    // the meal is today's: history holds past days only
+    expect(((await h!.json()) as { days: unknown[] }).days).toHaveLength(0)
+  })
+})
