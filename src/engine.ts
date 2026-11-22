@@ -332,10 +332,15 @@ export class Engine {
     cls: 'ride.landed' | 'lift.landed' | 'meal.logged' | 'meal.amended' | 'money.notif' | 'body.weighin' | 'lift.video',
     dedupeKey: string,
     payload: { content: string; meta: Record<string, string> },
+    opts?: { priority?: 'info' },
   ): boolean {
     // A weigh-in and a landed lift clip are informational (neither asks the
     // session to act, neither pierces quiet hours: a 04:30 reading waits for
     // the morning; a clip is reviewed only when the main session decides).
+    // A caller may downgrade any event to info (a money promo / ad): it
+    // then asks for nothing, so it pays the daily budget like any automated
+    // chatter instead of bypassing it.
+    if (opts?.priority === 'info') return this.emit(cls, 'info', dedupeKey, payload)
     const priority = cls === 'body.weighin' || cls === 'lift.video' ? 'info' : 'notable'
     return this.emit(cls, priority, dedupeKey, payload, { bypassCooldown: true })
   }

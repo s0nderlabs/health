@@ -17,6 +17,7 @@
 import type { Database } from 'bun:sqlite'
 import { createHash } from 'node:crypto'
 import { BadRequest, cleanText, jsonBody } from './http.js'
+import type { MoneyMuteRule } from './types.js'
 
 export const MONEY_SCHEMA = `
 CREATE TABLE IF NOT EXISTS money_notifs (
@@ -59,9 +60,11 @@ CREATE TABLE IF NOT EXISTS money_noise (
 // bill     = a paylater / statement reminder: a liability coming due, not spending today.
 export type MoneyKind =
   | 'payment' | 'incoming' | 'transfer_out' | 'trade' | 'refund' | 'topup' | 'declined' | 'bill'
-  | 'internal' | 'auth_request' | 'unknown'
+  | 'internal' | 'auth_request' | 'promo' | 'unknown'
 // internal     = a move between his OWN pockets or accounts: never spending, never income.
 // auth_request = a card authorization waiting for his confirm/reject: pending, not spending.
+// promo        = marketing / a price alert / an invite that slipped past the noise rules:
+//                stored for the record, raised at info priority, never a budget event.
 
 /** How strict the noise rule is for an app. Marketplaces and super-apps send
  *  far more marketing than money, so they are allowlisted: only a money event
@@ -224,6 +227,91 @@ function isPriceDigest(t: string): boolean {
 
 export function amountlessGuess(p: MoneyParse, text: string): boolean {
   return p.parser.startsWith('generic') && p.amount == null && p.kind !== 'declined' && moneyEvent(text) == null
+}
+
+// Something DEFINITELY happened to his money: the guard that keeps a real
+// event out of kind=promo. Stricter than HAPPENED on purpose: a loose
+// "diterima" / "masuk" is also the shape of marketing ("Promo 20RB diterima",
+// "Undangan belum diterima", "Pesan masuk dari ..."), so only completed
+// verbs, "telah / sudah + verb", and "you have received / kamu menerima"
+// count. Conditional clauses are removed first ("Jika transaksi gagal ...").
+const PROMO_DONE = new RegExp(
+  String.raw`\b(?:berhasil|sukses|successful(?:ly)?|completed|confirmed|selesai|lunas|dibayar\w*|paid|refund(?:ed)?|dikembalikan|ditolak|declined|gagal|failed` +
+    String.raw`|filled|executed|withdrawn|purchased|terjual|terbeli|dicairkan|didebit|dipotong|terkirim|transferred)\b` +
+    String.raw`|\b(?:telah|sudah)\s+(?:di\w+|cair|masuk|terkirim)\b` +
+    String.raw`|\b(?:you(?:'ve| have)|kamu|anda)\s+(?:telah\s+|sudah\s+|baru\s+)?(?:received|sent|paid|bought|sold|converted|menerima|membayar|mengirim|melakukan|membeli|menjual)\b` +
+    String.raw`|\bhas (?:sent|been)\b|\b(?:transfer|uang|dana|saldo) masuk\b`,
+  'i',
+)
+
+// Strong marketing tells (the leaks of Nov 19-22: bond and cashback pitches,
+// a stock listing, a demo-balance futures ad, BTC price alerts, a family
+// invite, a Shopee Video chat bait, a QRIS bonus). "yuk" / "ayo" stay out: a
+// real bill reminder uses them.
+const PROMO_CUES = new RegExp(
+  String.raw`\b(?:promo|diskon|discount|voucher|kupon|coupon|cashback|bonus|gratis|free|hemat|flash sale|potongan|nikmati|nikmatin|spesial|special` +
+    String.raw`|undangan|invite|invitation|klaim|claim|beli sekarang|buy now|start practicing|demo|try|learn|follow rates|lands on|stock target` +
+    String.raw`|pesan masuk dari|jangan di-?skip|jangan lewatkan|earn)\b` +
+    String.raw`|\bp\.a\.?(?!\w)|\bs\.d\.|\bhingga \d|\bup to \d|\b(?:below|above|under|over) \$\d|\d\s*%`,
+  'i',
+)
+
+/**
+ * A generic-rule parse that is marketing, not money: (a) no amount and no
+ * completed event (a bill reminder or a decline is never this), (b) a strong
+ * marketing tell and no completed event, or (c) a kind the generic rule could
+ * not name and no completed event. Specific parsers (SeaBank, Jago, Plasma, a
+ * crypto wallet's transfer) are trusted and never re-labelled.
+ */
+export function isPromo(p: MoneyParse, text: string): boolean {
+  // A bill reminder carries its own rates and urgency ("bunga 2,5%", "denda
+  // 4%", "bayar sekarang"): never a promo. Bill-shaped pitches are the noise
+  // rules' job (AD_CUES), before this runs.
+  if (!p.parser.startsWith('generic') || p.kind === 'declined' || p.kind === 'bill') return false
+  const t = text.replace(CONDITIONAL, ' ')
+  if (PROMO_DONE.test(t)) return false
+  if (p.amount == null) return true
+  return PROMO_CUES.test(t) || p.kind === 'unknown'
+}
+
+/** The first mute rule matching a notification, or null. */
+export function matchMute(rules: readonly MoneyMuteRule[] | undefined, app: string, title: string | null, body: string): MoneyMuteRule | null {
+  if (!rules?.length) return null
+  const a = app.trim().toLowerCase()
+  const t = `${title ?? ''}\n${body}`.toLowerCase()
+  for (const r of rules) {
+    const appOk = r.app == null || r.app.trim().toLowerCase() === a
+    const kwOk = r.keyword == null || t.includes(r.keyword.toLowerCase())
+    if ((r.app != null || r.keyword != null) && appOk && kwOk) return r
+  }
+  return null
+}
+
+/** The most mute rules the config keeps. */
+export const MAX_MUTE_RULES = 50
+
+/** The app / keyword a rule (or an unmute) targets, trimmed and capped the
+ *  one way both paths store and compare them. */
+export function muteTarget(p: Record<string, unknown>): { app?: string; keyword?: string } {
+  const app = typeof p.app === 'string' && p.app.trim() ? p.app.trim().slice(0, 60) : undefined
+  const keyword = typeof p.keyword === 'string' && p.keyword.trim() ? p.keyword.trim().slice(0, 80) : undefined
+  return { ...(app ? { app } : {}), ...(keyword ? { keyword } : {}) }
+}
+
+/** Validate and normalise one mute rule (a tool call, or a stored one). */
+export function muteRuleFrom(p: Record<string, unknown>): MoneyMuteRule {
+  const { app, keyword } = muteTarget(p)
+  if (!app && !keyword) throw new BadRequest('a mute rule needs app and/or keyword')
+  if (keyword && keyword.length < 3) throw new BadRequest('keyword must be at least 3 characters')
+  const mode = p.mode == null ? 'silent' : p.mode
+  if (mode !== 'drop' && mode !== 'silent') throw new BadRequest("mode must be 'drop' (store nothing) or 'silent' (store, no event)")
+  return { ...(app ? { app } : {}), ...(keyword ? { keyword } : {}), mode }
+}
+
+/** Same rule target (app + keyword, case-folded), whatever the mode. */
+export function sameMuteTarget(a: MoneyMuteRule, b: { app?: string; keyword?: string }): boolean {
+  const f = (s: string | undefined) => (s ?? '').trim().toLowerCase()
+  return f(a.app) === f(b.app) && f(a.keyword) === f(b.keyword)
 }
 
 /**
@@ -423,21 +511,35 @@ function withoutBalances(t: string): string {
   return t.replace(LABELLED_BALANCE, ' ')
 }
 
+/** The number before a jt / rb shorthand: a comma is the decimal ("1,5
+ *  jt"), dots in 3-digit groups are thousands ("1.500 rb" = 1,500,000), a
+ *  lone dot elsewhere is a decimal ("1.5 jt"). */
+export function shorthandIdr(raw: string, mult: number): number | null {
+  let s = raw
+  if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.')
+  else if (/^\d{1,3}(?:\.\d{3})+$/.test(s)) s = s.replace(/\./g, '')
+  const n = Number(s) * mult
+  return Number.isFinite(n) && n > 0 ? Math.round(n) : null
+}
+
 /** Best effort for apps whose formats we have not seen yet (GoPay, ShopeePay, Pintu). */
 function generic(app: string, title: string | null, body: string): MoneyParse {
   const full = `${title ?? ''}\n${body}`
   const t = withoutBalances(full) // amounts only; kind reads `full`
   const p = blank(`generic.${app.toLowerCase().replace(/[^a-z0-9]+/g, '') || 'app'}`)
-  const idr = /(?:rp\.?|idr)\s*(\d(?:[\d.,]*\d)?)|(\d[\d.,]{2,}\d)\s*(?:idr|rupiah)/i.exec(t)
+  const idr = /(?:rp\.?|idr)\s*(\d(?:[\d.,]*\d)?)(\s*(?:jt|juta|rb|ribu|k)\b)?|(\d[\d.,]{2,}\d)\s*(?:idr|rupiah)/i.exec(t)
   const usd = /\$\s*(\d(?:[\d.,]*\d)?)|(\d(?:[\d.,]*\d)?)\s*usd[ct]?\b/i.exec(t)
   if (idr) {
-    p.amount = parseIdr(idr[1] ?? idr[2])
+    // Indonesian shorthand: "Rp15 jt" is 15,000,000, "Rp25 rb" 25,000,
+    // "Rp1,5 jt" 1,500,000 (the separator is a decimal there).
+    const mult = idr[2] ? (/j/i.test(idr[2]) ? 1_000_000 : 1_000) : 1
+    p.amount = mult > 1 ? shorthandIdr(idr[1], mult) : parseIdr(idr[1] ?? idr[3])
     p.currency = 'IDR'
   } else if (usd) {
     p.amount = parseUsd(usd[1] ?? usd[2])
     p.currency = /usdt/i.test(t) ? 'USDT' : /usdc/i.test(t) ? 'USDC' : 'USD'
   }
-  if (/\b(buy|sell|beli|jual)\b.*\b(order|filled|terisi|berhasil)\b|\border\b.*\b(filled|terisi)\b/i.test(full)) p.kind = 'trade'
+  if (/\b(buy|sell|beli|jual)\b.*\b(order|filled|terisi|berhasil)\b|\border\b.*\b(filled|terisi)\b|\b(?:successfully|you(?:'ve| have)?)\s+(?:sold|converted|bought)\b/i.test(full)) p.kind = 'trade'
   else p.kind = moneyEvent(full) ?? (/\b(bayar|pembayaran|payment|beli|buy)\b/i.test(full) ? 'payment' : 'unknown')
   const merchant = /\b(?:di|ke|at|to|untuk|for)\s+([A-Z0-9][\w&'.\- ]{1,60}?)(?:\s+(?:sebesar|senilai|berhasil|was|has|is)\b|[.,\n]|$)/.exec(body)
   // An amount is never a merchant ("for Rp 1.500.000" is the price).
@@ -657,17 +759,20 @@ export class MoneyBook {
 
 export interface MoneyDeps {
   db: Database
-  emit: (key: string, payload: { content: string; meta: Record<string, string> }) => boolean
+  /** priority 'info' = a promo: no budget flow, never pierces quiet hours. */
+  emit: (key: string, payload: { content: string; meta: Record<string, string> }, priority?: 'info') => boolean
   now?: () => number
   log?: (msg: string) => void
   /** money.own_names from the local config: transfers from these are internal. */
   ownNames?: () => readonly string[]
+  /** money.mute from the local config (health__money mute / unmute). */
+  muteRules?: () => readonly MoneyMuteRule[]
 }
 
 export type IngestResult =
-  | { status: 'stored' | 'duplicate'; id: number; kind: MoneyKind; amount: number | null; currency: string | null }
+  | { status: 'stored' | 'duplicate'; id: number; kind: MoneyKind; amount: number | null; currency: string | null; silent?: true }
   | { status: 'dropped'; reason: 'otp' }
-  | { status: 'ignored'; reason: 'no transaction' | 'no amount' }
+  | { status: 'ignored'; reason: 'no transaction' | 'no amount' | 'muted' }
 
 const fmtAmount = (n: number | null, cur: string | null) => {
   if (n == null) return 'an unparsed amount'
@@ -708,6 +813,11 @@ export class MoneyService {
       this.log(`money notif from ${app} dropped (verification code)`)
       return { status: 'dropped', reason: 'otp' }
     }
+    const mute = matchMute(this.deps.muteRules?.(), app, title, text)
+    if (mute?.mode === 'drop') {
+      this.book.countNoise(app, new Date(now).toISOString())
+      return { status: 'ignored', reason: 'muted' }
+    }
     if (isNoise(title, text, cls)) {
       // Like an OTP drop: a count, never the text, so a real payment the
       // allowlist misjudged is at least visible as a number.
@@ -731,14 +841,20 @@ export class MoneyService {
       this.book.countNoise(app, new Date(now).toISOString())
       return { status: 'ignored', reason: 'no amount' }
     }
+    if (isPromo(parsed, `${title ?? ''}\n${text}`)) parsed.kind = 'promo'
     const { row, isNew } = this.book.insert({
       dedupe, app, title, body: text,
       posted_at: new Date(postedMs).toISOString(),
       received_at: new Date(now).toISOString(),
       via, ...parsed,
     })
-    if (isNew) this.deps.emit(`money.notif:${row.id}`, this.event(row))
-    return { status: isNew ? 'stored' : 'duplicate', id: row.id, kind: row.kind, amount: row.amount, currency: row.currency }
+    // A silent mute stores the record (health__money shows it) and raises
+    // nothing; a promo is raised at info priority, never as a budget event.
+    if (isNew && !mute) this.deps.emit(`money.notif:${row.id}`, this.event(row), row.kind === 'promo' ? 'info' : undefined)
+    return {
+      status: isNew ? 'stored' : 'duplicate', id: row.id, kind: row.kind, amount: row.amount, currency: row.currency,
+      ...(mute ? { silent: true as const } : {}),
+    }
   }
 
   event(r: MoneyRow): { content: string; meta: Record<string, string> } {
@@ -764,6 +880,8 @@ export class MoneyService {
                         ? `moved ${fmtAmount(r.amount, r.currency)} between his own accounts${r.counterparty ? ` (${r.counterparty})` : ''} (internal, not spending, not income)`
                         : r.kind === 'auth_request'
                           ? `card authorization request: ${r.merchant ?? 'a merchant'} is requesting ${fmtAmount(r.amount, r.currency)}, waiting for his confirm or reject (pending, not spending yet)`
+                          : r.kind === 'promo'
+                            ? `a promo / ad${r.amount != null ? ` mentioning ${fmtAmount(r.amount, r.currency)}` : ''} (marketing, no money moved)`
                       : `a money notification${r.amount != null ? ` mentioning ${fmtAmount(r.amount, r.currency)}` : ''}`
     const balance = r.balance_after != null ? ` Balance after: ${fmtAmount(r.balance_after, r.balance_currency)}.` : ''
     const trust = r.parser.startsWith('generic') ? ' Parsed by the generic rule (format not seen before): check the raw text.' : ''
@@ -773,9 +891,18 @@ export class MoneyService {
         : r.flag === 'unknown_token'
           ? ' SUSPECT: incoming token not on the known list (likely a spam / scam airdrop). Not income. Do not interact with it or visit links it carries.'
           : ''
+    const raw = `Raw: "${r.title ? `${r.title}: ` : ''}${r.body.replace(/\s+/g, ' ')}".`
+    if (r.kind === 'promo') {
+      return {
+        content:
+          `${r.app} at ${when}: ${what}. ${raw} No budget action (money notif #${r.id}, stored for the record). ` +
+          `If it was a real transaction, say so; to silence this sender or phrase, health__money action:'mute'.`,
+        meta: { class: 'money.notif', notif_id: String(r.id), app: r.app, kind: 'promo', parser: r.parser },
+      }
+    }
     return {
       content:
-        `${r.app} at ${when}: ${what}.${balance}${flag}${trust} Raw: "${r.title ? `${r.title}: ` : ''}${r.body.replace(/\s+/g, ' ')}". ` +
+        `${r.app} at ${when}: ${what}.${balance}${flag}${trust} ${raw} ` +
         `Run the /budget alert flow for this transaction (money notif #${r.id}).`,
       meta: {
         class: 'money.notif',
@@ -801,6 +928,7 @@ export class MoneyService {
       last_by_app: this.book.lastByApp(),
       withheld_codes: this.book.drops(),
       ignored_noise: this.book.noise(),
+      mute_rules: this.deps.muteRules?.() ?? [],
     }
   }
 

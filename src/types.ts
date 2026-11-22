@@ -199,6 +199,18 @@ export type EventClass =
 
 export type EventPriority = 'info' | 'notable' | 'alert'
 
+/** A money mute rule (health__money mute): matches a forwarded notification by
+ *  app name (case-insensitive, exact) and/or a keyword (case-insensitive
+ *  substring of title + body); both given = both must match. drop = store
+ *  nothing (counted under ignored_noise, like marketing); silent = stored
+ *  (visible in health__money) but no event is raised. The OTP gate always
+ *  runs first. */
+export interface MoneyMuteRule {
+  app?: string
+  keyword?: string
+  mode: 'drop' | 'silent'
+}
+
 /** Event classes delivered even inside quiet hours (besides priority=alert).
  *  live.*: the user is awake and active RIGHT NOW; holding them would flush a
  *  stale burst at the boundary. meal.*: the user is holding the phone waiting
@@ -209,6 +221,8 @@ export const QUIET_PIERCING_PREFIXES = ['live.', 'meal.', 'money.'] as const
 
 export function piercesQuietHours(e: { class: string; priority: string; dedupe_key: string }): boolean {
   if (e.priority === 'alert') return true
+  // An info-priority money event is a promo / ad: it waits for the morning.
+  if (e.class.startsWith('money.') && e.priority === 'info') return false
   if (QUIET_PIERCING_PREFIXES.some((p) => e.class.startsWith(p))) return true
   // Yield advisories are time-critical (a re-armed relayer can take the band
   // mid-recording).
@@ -283,7 +297,7 @@ export interface HealthConfig {
   // says what maintenance is; protein has a fixed target from day one.
   /** Money notifications. own_names = HIS names as banks print them (local
    *  only, never committed): a transfer from one of them is internal. */
-  money: { own_names: string[] }
+  money: { own_names: string[]; mute?: MoneyMuteRule[] }
   food: {
     protein_target_g: number
     rollover_hour: number

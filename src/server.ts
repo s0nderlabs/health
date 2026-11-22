@@ -11,7 +11,7 @@ import { DB_PATH } from './config.js'
 import { existsSync } from 'fs'
 import { readPhotoFiles } from './photos.js'
 
-const VERSION = '0.22.1'
+const VERSION = '0.23.0'
 
 const INSTRUCTIONS = `
 health: WHOOP recovery, sleep, and strain as a live channel. The daemon on this
@@ -315,17 +315,22 @@ once 3 readings count, and the active confounders line. Readings after a
 meal logged that food day ("after a meal") and exact repeats of the previous
 reading in both weight and fat ("possible replay") are excluded but still
 announced: mention it in one line, he can include one with weighin_set.
+Only the FIRST morning reading counts ("repeat: a morning reading already
+counts today"); when he says a later one is the right one (the first was in
+clothes, a botched step-on), health__meal {action:'weighin_replace',
+measured_at} makes it count instead and excludes the earlier one by hand.
 The S400 measuring one step-on twice (two S400 readings within 60 s and
 0.2 kg) is ONE weigh-in: the fuller take counts, the other is "same
 weigh-in, re-measured", and only one body.weighin is sent.
-NOT HIS: a reading more than 4 kg off his ANCHOR ("not his (weight outlier)", housemates use the scale; the anchor = his most recent trusted weigh-in before it within 30 days: counted, included by hand, or excluded only for timing/test, never one filed not his; within 4 kg it becomes the new anchor, and a lone first reading needs a second agreeing one before it judges anything) is filed as someone else's: never in his trend, pairs or body numbers; say so in one line, and if he says it was him, weighin_set include:true reclaims it AND makes it the anchor (a genuine change past 4 kg: include one reading and the later ones near it count again). A "possible other person" reading never pairs or calibrates either. A hand exclusion only files a reading as someone else's when its reason SAYS so up front ("not me", "my housemate", "a guest weighed"), and then it files every source's copy of that weigh-in (S400 BLE and Xiaomi Home); weighin_set include:false with no reason on a not-his reading keeps it not his.
+NOT HIS: a reading more than 4 kg off his ANCHOR ("not his (weight outlier)", housemates use the scale; the anchor = his most recent trusted weigh-in before it within 30 days: counted (or included by hand), never one filed not his, a test, or one outside the morning window: an evening "not a morning reading" is judged but never anchors, since housemates weigh in at night; within 4 kg it becomes the new anchor, and a lone first reading needs a second agreeing one before it judges anything) is filed as someone else's: never in his trend, pairs or body numbers; say so in one line, and if he says it was him, weighin_set include:true reclaims it AND makes it the anchor (a genuine change past 4 kg: include one reading and the later ones near it count again). A "possible other person" reading never pairs or calibrates either. A hand exclusion only files a reading as someone else's when its reason SAYS so up front ("not me", "my housemate", "a guest weighed"), and then it files every source's copy of that weigh-in (S400 BLE and Xiaomi Home); weighin_set include:false with no reason on a not-his reading keeps it not his.
 S400 BLE fat %: its open formula reads unlike Xiaomi's, so the stored value is calibrated to Xiaomi Home from paired weigh-ins (scale_calibration shows the fit and its out-of-sample error). The event says which: uncalibrated (open formula), provisional (offset from 1-2 pairs: say it is rough), or calibrated (3+ pairs, with a +/- band); weighins rows carry fat_basis (device / raw / provisional / calibrated) and the S400 raw value. Fat % is trend-only, never a goal check.
 S400 BODY COMPOSITION: every S400 weigh-in also carries Mi Scale FORMULA ESTIMATES from weight + 50 kHz impedance + scale.profile (height, birth date, sex); trend only, never a measurement, never a goal check. visceral = visceral fat index (Mi formula, whole number 1-50); visceral and bmr_kcal are functions of weight/height/age only (note "weight-derived, no impedance"): a change in either IS a weight change, never separate news about visceral fat or metabolism; muscle_kg = Xiaomi-style muscle: fat-free mass minus bone (what Xiaomi Home calls "muscle mass", NOT skeletal muscle); smm_kg = skeletal muscle (Janssen BIA equation), a different and smaller number: never compare the two; lean_kg = fat-free mass, always weight x (1 - the DISPLAYED fat), so it carries fat's label and fat mass + lean mass = weight; bone_kg = bone mineral estimate; water_pct, protein_pct (note "guessed formula": the reference itself flags it, the roughest); bmr_kcal = Mi Fit BMR estimate; bmi = plain BMI. muscle_kg, water_pct and protein_pct are built on the FORMULA fat: once fat is calibrated their note says which ("from formula fat 23.7%"), until their own pairs tie them to the report. A metric whose reference formula hits its cap or clamp (BMR 5000, muscle 120, bone 8, fat 75, visceral outside 1-50) is left out entirely: those are error markers, not values. There is NO body age and NO body score: Xiaomi publishes no method for either, so none is computed; never invent one. Labels per metric: formula (no pair yet), provisional (offset from 1-2 manual pairs: rough), calibrated (3+ pairs, with a +/- band in the metric's unit). Old readings stored before impedances were have the impedance inferred from their fat value (note "inferred impedance"): treat those as rougher still; they carry no smm_kg (Janssen leans on the impedance alone). body.weighin for an S400 reading adds ONE line, visceral then muscle (his waist / V-taper priority; the visceral number restates weight, read the muscle for composition); day.body carries the latest S400 weigh-in of the last 7 days with every metric; weighins rows carry metrics (value + formula raw + basis). To calibrate against the Xiaomi report: when he reads you Xiaomi Home numbers for a weigh-in, submit each one with health__meal {action:'weighin_pair', measured_at (the S400 weigh-in's time, from body.weighin meta measured_at; matched within 180 s), metric (fat_pct | muscle_kg | water_pct | protein_pct | bone_kg | visceral | bmr_kcal | bmi; lean_kg is never paired, it follows fat), value, source? (default "xiaomi report"), force?}: one call per metric, a re-submit for the same weigh-in + metric replaces it, and that metric is refitted at once. It REFUSES a weigh-in excluded as not his (someone else, a test, by hand) and a value more than 10 fit units off the formula (10 pt fat/water, 10 kg muscle, 1 kg bone, 150 kcal, 10 visceral: usually a lb-for-kg slip or the wrong metric); the reply says why; ask him, then re-send with force:true only if he confirms. A wrong pair is removed with health__meal {action:'weighin_unpair', measured_at, metric} (that metric refits, back to formula when none is left); the reply's reading.excluded shows the verdict of what was paired. Manual fat values join the automatic Apple Health pairs (the manual one wins for the same weigh-in). A bmi pair is a height check only (diff + implied height), never a calibration. scale_calibration lists every metric's model and per-pair residuals.
 
 MONEY NOTIFICATIONS. money.notif: a bank / wallet notification (SeaBank,
 Plasma One, GoPay, ShopeePay, Pintu, ...) was forwarded from the phone the
 moment it landed. meta: notif_id, app, kind (payment | incoming |
-transfer_out | trade | refund | topup | declined | bill | unknown), amount,
+transfer_out | trade | refund | topup | declined | bill | internal |
+auth_request | promo | unknown), amount,
 currency, merchant?, balance_after? + balance_currency?, parser, flag?.
 Spending is kind=payment only: refund = money back, topup = his own money
 moving into a wallet, declined = nothing moved (but say so: a dead card or
@@ -340,6 +345,12 @@ form), not spending. Verification codes never arrive (dropped before
 storage). FINANCE PRIVACY: same rule as health data, never to any external
 channel. health__money lists recent ones plus each app's last report (a
 quiet app may mean the phone could not reach the Mac: Shortcuts cannot retry).
+kind=promo arrives at priority=info: marketing, a price alert or an invite
+that slipped past the noise rules. No /budget flow; at most one line, or
+fold it in silently. If he says it was a real transaction, believe him. A
+sender or phrase that keeps leaking: health__money {action:'mute', app?,
+keyword?, mode?} (silent = stored, no event; drop = nothing stored), and
+{action:'unmute', app?, keyword?} removes it.
 
 Tools: health__read (today + plan_today), health__trend (multi-day),
 health__workout_intent (user says they are starting a workout NOW; WHOOP
@@ -419,7 +430,7 @@ export function createServer(ipc: IpcClient) {
       {
         name: 'health__meal',
         description:
-          'Food log (calorie + protein tracker), equal to the phone app. action: log (new meal from chat: items and/or photos), estimate (FULL REPLACE of an existing meal\'s items; corrections re-send the whole list), void, day (one day: meals, totals, targets), day_complete (mark a day fully logged or not; baseline uses complete days), preset_save / preset_list / preset_delete (repeat meals), baseline (maintenance from logged intake + weigh-in trend; accept:true sets the kcal target), weighins (recent scale readings with their verdict: counted, or excluded and why), weighin_set (include:true counts a reading, include:false excludes it with a reason; find it by uuid or measured_at), scale_calibration (the S400 fat calibration to Xiaomi Home: model with its leave-one-out error, status, and per-pair reference / raw / calibrated / residual; plus every body-composition metric\'s model, pairs, residuals, and BMI height checks), weighin_pair (one value from the Xiaomi report for an S400 weigh-in: measured_at + metric + value [+ source, force]; stored, then that metric is refitted; bmi only checks the height; refuses an excluded weigh-in or an implausible value unless force:true), weighin_unpair (remove a wrong pair: measured_at + metric; that metric refits), confounder_add / confounder_close (dated changes that bend the weight trend: creatine, an intake step-down, illness; the baseline stays provisional while one is open), goal_set / goal_clear (target fat %, milestone kg, lean-mass reference). day and baseline also return energy: WHOOP burn mapped to the food day, and once calibrated the balance (intake - burn x factor) with its band. The daemon computes all totals from items.',
+          'Food log (calorie + protein tracker), equal to the phone app. action: log (new meal from chat: items and/or photos), estimate (FULL REPLACE of an existing meal\'s items; corrections re-send the whole list), void, day (one day: meals, totals, targets), day_complete (mark a day fully logged or not; baseline uses complete days), preset_save / preset_list / preset_delete (repeat meals), baseline (maintenance from logged intake + weigh-in trend; accept:true sets the kcal target), weighins (recent scale readings with their verdict: counted, or excluded and why), weighin_set (include:true counts a reading, include:false excludes it with a reason; find it by uuid or measured_at), weighin_replace (count THIS reading instead of the one that already counts that day, e.g. a redo after a clothed first weigh-in, on his word: uuid or measured_at [+ reason]; the earlier one is excluded by hand as replaced), scale_calibration (the S400 fat calibration to Xiaomi Home: model with its leave-one-out error, status, and per-pair reference / raw / calibrated / residual; plus every body-composition metric\'s model, pairs, residuals, and BMI height checks), weighin_pair (one value from the Xiaomi report for an S400 weigh-in: measured_at + metric + value [+ source, force]; stored, then that metric is refitted; bmi only checks the height; refuses an excluded weigh-in or an implausible value unless force:true), weighin_unpair (remove a wrong pair: measured_at + metric; that metric refits), confounder_add / confounder_close (dated changes that bend the weight trend: creatine, an intake step-down, illness; the baseline stays provisional while one is open), goal_set / goal_clear (target fat %, milestone kg, lean-mass reference). day and baseline also return energy: WHOOP burn mapped to the food day, and once calibrated the balance (intake - burn x factor) with its band. The daemon computes all totals from items.',
         inputSchema: {
           type: 'object' as const,
           properties: {
@@ -427,7 +438,7 @@ export function createServer(ipc: IpcClient) {
               type: 'string',
               enum: [
                 'log', 'estimate', 'void', 'day', 'day_complete', 'preset_save', 'preset_list', 'preset_delete', 'baseline',
-                'weighins', 'weighin_set', 'weighin_pair', 'weighin_unpair', 'scale_calibration', 'confounder_add', 'confounder_close', 'goal_set', 'goal_clear',
+                'weighins', 'weighin_set', 'weighin_replace', 'weighin_pair', 'weighin_unpair', 'scale_calibration', 'confounder_add', 'confounder_close', 'goal_set', 'goal_clear',
               ],
             },
             meal_id: { type: 'number', description: 'estimate / void: the meal (from meal.logged meta or a day read)' },
@@ -452,7 +463,7 @@ export function createServer(ipc: IpcClient) {
               type: 'string',
               description: 'log / estimate: when it was EATEN, ISO 8601 or local HH:MM (a time ahead of now = last night). The food day rolls over at 04:00.',
             },
-            reason: { type: 'string', description: 'estimate: why it changed (e.g. "he said soto, not gulai"); void: why it is removed; weighin_set (include:false): why it is excluded' },
+            reason: { type: 'string', description: 'estimate: why it changed (e.g. "he said soto, not gulai"); void: why it is removed; weighin_set (include:false): why it is excluded; weighin_replace: why the earlier one is replaced (e.g. "first one in clothes")' },
             date: {
               type: 'string',
               description: 'day / day_complete: YYYY-MM-DD food day (default today); confounder_add: the day it started; confounder_close: the day it ended (default today)',
@@ -465,7 +476,7 @@ export function createServer(ipc: IpcClient) {
             include: { type: 'boolean', description: 'weighin_set: true = count this reading in the trend, false = exclude it' },
             measured_at: {
               type: 'string',
-              description: 'weighin_set: ISO time of the weigh-in (nearest within 3 min); weighin_pair / weighin_unpair: ISO time of the S400 weigh-in (matched within 180 s, error if none). Both e.g. from body.weighin meta measured_at',
+              description: 'weighin_set / weighin_replace: ISO time of the weigh-in (nearest within 3 min); weighin_pair / weighin_unpair: ISO time of the S400 weigh-in (matched within 180 s, error if none). Both e.g. from body.weighin meta measured_at',
             },
             metric: {
               type: 'string',
@@ -478,7 +489,7 @@ export function createServer(ipc: IpcClient) {
               type: 'boolean',
               description: 'weighin_pair: true pairs anyway when the weigh-in is excluded (not his?) or the value is far from the formula; only after he confirms',
             },
-            uuid: { type: 'string', description: 'weighin_set: a sample uuid (from weighins) instead of measured_at' },
+            uuid: { type: 'string', description: 'weighin_set / weighin_replace: a sample uuid (from weighins) instead of measured_at' },
             days: { type: 'number', description: 'weighins: how many days back (default 14)' },
             target_kcal: { type: 'number', description: 'baseline: set an explicit kcal budget instead of the suggestion' },
             recalibrate: { type: 'boolean', description: 'baseline: recompute the WHOOP calibration factor now (it otherwise refreshes weekly)' },
@@ -504,11 +515,15 @@ export function createServer(ipc: IpcClient) {
       {
         name: 'health__money',
         description:
-          'Recent money notifications forwarded from the phone (bank / wallet alerts), parsed: app, kind, amount, currency, merchant, balance after, plus the raw text. Also each app\'s last report time, to spot gaps. Local archive only.',
+          'Money notifications forwarded from the phone (bank / wallet alerts). action list (default): recent ones parsed (app, kind, amount, currency, merchant, balance after, raw text), each app\'s last report time, ignored-noise counts, and the mute rules. action mute: add (or re-mode) a rule by app and/or keyword; mode silent (default) = stored, no event; drop = stored nothing, only counted. action unmute: remove the rule with that app / keyword. Mute on his word or for repeat promo senders; the OTP gate always runs first. Local archive only.',
         inputSchema: {
           type: 'object' as const,
           properties: {
-            days: { type: 'number', description: 'How many days back (default 7, max 90)' },
+            action: { type: 'string', enum: ['list', 'mute', 'unmute'], description: 'list (default), mute, or unmute' },
+            days: { type: 'number', description: 'list: how many days back (default 7, max 90)' },
+            app: { type: 'string', description: 'mute / unmute: the notifying app name, exact match ignoring case (e.g. "Pintu")' },
+            keyword: { type: 'string', description: 'mute / unmute: a phrase in the title or body, 3+ chars, ignoring case (e.g. "Futures"); with app, both must match' },
+            mode: { type: 'string', enum: ['silent', 'drop'], description: 'mute: silent (default) stores it with no event; drop stores nothing' },
           },
           required: [],
         },
@@ -623,7 +638,7 @@ export function createServer(ipc: IpcClient) {
           return toolResult(`${summary ? `${summary}\n\n` : ''}${JSON.stringify(rest, null, 2)}`)
         }
         case 'health__money':
-          return toolResult(JSON.stringify(await ipc.rpc('money', { days: args.days ?? 7 }), null, 2))
+          return toolResult(JSON.stringify(await ipc.rpc('money', { ...args, days: args.days ?? 7 }), null, 2))
         case 'health__config': {
           if (args.action === 'get') {
             return toolResult(JSON.stringify(await ipc.rpc('config_get'), null, 2))

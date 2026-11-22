@@ -1,10 +1,11 @@
 import { readFileSync, writeFileSync, mkdirSync, renameSync, chmodSync } from 'fs'
 import { join, dirname } from 'path'
 import { homedir } from 'os'
-import type { HealthConfig } from './types.js'
+import type { HealthConfig, MoneyMuteRule } from './types.js'
 import { DEFAULT_CONFIG } from './types.js'
 import { resolveResignConfig } from './resign/policy.js'
 import { resolveLiftVideoConfig } from './liftvideo.js'
+import { MAX_MUTE_RULES, muteRuleFrom } from './money.js'
 
 // HEALTH_CONFIG_PATH override exists for tests only; real installs use the default.
 const CONFIG_PATH =
@@ -53,6 +54,7 @@ export function loadConfig(): HealthConfig {
         own_names: Array.isArray(parsed.money?.own_names)
           ? parsed.money.own_names.filter((x: unknown): x is string => typeof x === 'string').slice(0, 10)
           : [],
+        mute: resolveMuteRules(parsed.money?.mute),
       },
       // Field-by-field tolerant: a malformed value falls back to the default.
       resign: resolveResignConfig(parsed.resign, DEFAULT_CONFIG.resign),
@@ -66,6 +68,22 @@ export function loadConfig(): HealthConfig {
   } catch {
     return structuredClone(DEFAULT_CONFIG)
   }
+}
+
+/** money.mute, rule by rule (the same validator health__money mute uses):
+ *  a malformed rule is dropped, never the block. */
+function resolveMuteRules(v: unknown): MoneyMuteRule[] {
+  if (!Array.isArray(v)) return []
+  const out: MoneyMuteRule[] = []
+  for (const r of v.slice(0, MAX_MUTE_RULES)) {
+    if (!r || typeof r !== 'object') continue
+    try {
+      out.push(muteRuleFrom(r as Record<string, unknown>))
+    } catch {
+      // a bad rule is skipped
+    }
+  }
+  return out
 }
 
 /** Where the /gym plan JSON lives; config override or the runtime dir default. */

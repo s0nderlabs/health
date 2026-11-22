@@ -25,7 +25,7 @@ import {
 import { ensureRuntimeDir, loadConfig, saveConfig, configFileWritable, inQuietHours, resolvePlanPath, PID_PATH, SOCKET_PATH, RUNTIME_DIR, ROUTES_DIR, MEALS_DIR } from './config.js'
 import { FoodService } from './food.js'
 import { KJ_PER_KCAL } from './energy.js'
-import { MoneyService } from './money.js'
+import { MAX_MUTE_RULES, MoneyService, muteRuleFrom, muteTarget, sameMuteTarget } from './money.js'
 import { ScaleService } from './scale.js'
 import { LiftVideoService, TAILNET_PORT, discoverTailnetIPv4, resolveLiftRoot, tailnetPlan } from './liftvideo.js'
 import { piercesQuietHours } from './types.js'
@@ -278,9 +278,10 @@ if (config().scale) {
 // Money notifications (bank / wallet alerts forwarded by the phone).
 const money = new MoneyService({
   db: store.db,
-  emit: (key, payload) => engine.actionEvent('money.notif', key, payload),
+  emit: (key, payload, priority) => engine.actionEvent('money.notif', key, payload, priority ? { priority } : undefined),
   log: (msg) => log(`money: ${msg}`),
   ownNames: () => config().money?.own_names ?? [],
+  muteRules: () => config().money?.mute ?? [],
 })
 
 // Lift clips from the phone (POST /lift-video): streamed into ~/Pictures/lift
@@ -728,7 +729,7 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
     case 'meal':
       return mealRpc(params)
     case 'money':
-      return money.recent(params.days ?? 7)
+      return moneyRpc(params)
     case 'poll_now': {
       const changes = await pollOnce(store, onFact)
       return { changes }
@@ -838,6 +839,8 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
         live: { ...current.live, ...patch.live },
         food: { ...current.food, ...patch.food },
         lift_video: { ...current.lift_video, ...patch.lift_video },
+        // A partial money patch must not wipe own_names or the mute rules.
+        money: { ...current.money, ...patch.money },
         // Partial resign patches merge field by field ({resign:{enabled:true}}
         // keeps device_udid and the bands).
         resign: patch.resign === undefined ? current.resign : resolveResignConfig(patch.resign, current.resign),
@@ -910,6 +913,42 @@ async function rpc(method: string, params: Record<string, unknown>): Promise<unk
   }
 }
 
+/** health__money: list (default) recent notifications, or edit the mute
+ *  rules in the local config (mute adds or replaces the rule for that
+ *  app / keyword target, unmute removes it). */
+function moneyRpc(p: Record<string, unknown>): unknown {
+  const action = typeof p.action === 'string' ? p.action : 'list'
+  if (action === 'list') return money.recent(p.days ?? 7)
+  if (action !== 'mute' && action !== 'unmute') throw new Error(`unknown health__money action: ${action}`)
+  // A malformed config.json loads as the defaults: writing that back would
+  // erase the live token, own names and every other setting.
+  if (!configFileWritable()) throw new Error('config.json does not parse: fix it by hand before changing mute rules')
+  const current = config()
+  const rules = [...(current.money?.mute ?? [])]
+  let changed = false
+  if (action === 'mute') {
+    const rule = muteRuleFrom(p)
+    const at = rules.findIndex((r) => sameMuteTarget(r, rule))
+    if (at >= 0) {
+      changed = rules[at].mode !== rule.mode
+      rules[at] = rule
+    } else {
+      if (rules.length >= MAX_MUTE_RULES) throw new Error(`${MAX_MUTE_RULES} mute rules is the cap: unmute one first`)
+      rules.push(rule)
+      changed = true
+    }
+  } else {
+    const target = muteTarget(p)
+    if (!target.app && !target.keyword) throw new Error('unmute needs the app and/or keyword of the rule to remove')
+    const before = rules.length
+    for (let k = rules.length - 1; k >= 0; k--) if (sameMuteTarget(rules[k], target)) rules.splice(k, 1)
+    changed = rules.length !== before
+  }
+  if (changed) saveConfig({ ...current, money: { ...current.money, mute: rules } })
+  return { action, changed, mute_rules: rules }
+}
+
+
 // health__meal: chat's front door to the food log (same rules as the phone).
 async function mealRpc(p: Record<string, unknown>): Promise<unknown> {
   const action = String(p.action ?? 'day')
@@ -967,6 +1006,8 @@ async function mealRpc(p: Record<string, unknown>): Promise<unknown> {
       return food.weighins(typeof p.days === 'number' ? p.days : 14)
     case 'weighin_set':
       return food.setWeighin(p)
+    case 'weighin_replace':
+      return food.replaceWeighin(p)
     case 'scale_calibration':
       return food.scaleCalibration()
     case 'weighin_pair':

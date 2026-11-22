@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { Store } from '../src/store.js'
-import { MoneyService, isNoise, looksLikeOtp, parseIdr, parseIndoDateTime, parseMoney, parseUsd } from '../src/money.js'
+import { MoneyService, isNoise, looksLikeOtp, matchMute, muteRuleFrom, muteTarget, parseIdr, parseIndoDateTime, parseMoney, parseUsd, sameMuteTarget } from '../src/money.js'
+import type { MoneyMuteRule } from '../src/types.js'
 
 function harness(now = Date.parse('2026-11-16T03:00:00Z')) {
   const store = new Store(':memory:')
@@ -572,5 +573,129 @@ describe('Nov 17 marketing leaks (SeaBank deposito, Jago 11.11, Jenius referral,
 describe('referral cue with a spaced slash (review finding)', () => {
   test('"Rp25.000 / referral" is noise like "Rp25 rb/referral"', () => {
     expect(isNoise('Ajak Kawan', 'Dapatkan cashback Rp25.000 / referral untuk setiap teman', 'bank')).toBe(true)
+  })
+})
+
+describe('Nov 22: promo kind, shorthand amounts, mute rules', () => {
+  // The real leaks of Nov 19-22 (texts as received).
+  const LEAKS: Array<[string, string, string]> = [
+    ['ShopeePay', 'Isi saldo ShopeePay-mu', 'Pastikan saldomu cukup untuk pembayaran yang aman dan tepat waktu ke Layanan Terhubung. Klik di sini untuk isi saldo'],
+    ['Pintu', 'Anthropic stock target: US$150 (Needham)', 'ANTon, tokenized Anthropic, lands on Pintu 20 Nov, 00.50 WIB.'],
+    ['Jenius', '✋Stop ✋ Jangan Di-skip! ', 'Kupon hingga 7,05% p.a., return-nya rutin, plus cashback s.d. Rp15 jt. Beli sekarang!'],
+    ['Jenius', 'Jajan Chatime & Merchant Lainnya Dapat Cashback🧋', 'Kumpulkan Yay Stickers dari jajan di merchant F&B ID dapat cashback Rp35.000 buat jajan lagi 👉'],
+    ['Tangem', '🟥 Bitcoin is below $59K', 'Down 6.5% in 24h. Ethereum –8% to $1,635. Follow rates in Tangem →'],
+    ['Gojek', 'Undangan belum diterima 📲', 'Ada undangan akun keluarga yang menunggu. Gabung dan mulai nikmati manfaatnya 👉'],
+    ['Shopee', 'Shopee Video >>', '📩 Pesan masuk dari gumaisyah, dapet sabun refill gratis!'],
+    ['Pintu', 'Try Futures With 50 USDT Balance!', 'Learn to trade Futures with 50 USDT demo balance. Start practicing now! 👉'],
+    ['Jago', '🚀 Your next payment comes with a bonus!', 'Use QRIS Jago and earn a Rp10,000 bonus.'],
+    ['Gojek', 'HORE! Promo 20RB diterima 🎁', 'Klik di sini untuk klaim promo trip GoCar berikutnya 👉'],
+  ]
+
+  test('every leak is stored as kind=promo and raised at info priority with no budget flow', () => {
+    const { money, events } = harness()
+    const prio: Array<string | undefined> = []
+    ;(money as unknown as { deps: { emit: (k: string, p: { content: string; meta: Record<string, string> }, pr?: string) => boolean } }).deps.emit = (key, p, pr) => {
+      events.push({ key, ...p })
+      prio.push(pr)
+      return true
+    }
+    for (const [app, title, body] of LEAKS) {
+      expect(money.ingest({ app, title, body }, 'app')).toMatchObject({ status: 'stored', kind: 'promo' })
+    }
+    expect(events).toHaveLength(LEAKS.length)
+    expect(prio.every((p) => p === 'info')).toBe(true)
+    for (const e of events) {
+      expect(e.meta.kind).toBe('promo')
+      expect(e.content).not.toContain('/budget')
+      expect(e.content).toContain('No budget action')
+    }
+  })
+
+  test('real money of the same week is never a promo', () => {
+    const { money } = harness()
+    const real: Array<[string, string, string, string]> = [
+      ['Pintu', '🎁 You received USDC', 'Hi Muhammad, you have received USDC 128 from 0xB923...109D! Check now 👉', 'incoming'],
+      ['Pintu', 'USDC Successfully Sold', 'You have successfully sold USDC 128,000014 worth Rp 2.339.208.', 'trade'],
+      ['Pintu', 'Rupiah Withdrawal Successful', 'You have successfully withdrawn Rp 2.329.796 to SEABANK MUHAMMAD 901527378583. Thank you', 'transfer_out'],
+      ['Plasma One', 'You converted: $10.09', 'Balance: $10.88', 'trade'],
+      ['Shopee', 'Pembayaran ke Astro berhasil', 'Pembayaran sebesar Rp183.828 telah dibayarkan ke Astro. Klik di sini untuk informasi lebih lanjut.', 'payment'],
+      ['Jago', 'Jago', "You've transferred Rp50.000 to 6281399244520. Need help? Contact Tanya Jago at 1500 746.", 'transfer_out'],
+      ['Kredivo', 'Tagihan', 'Tagihan kamu akan jatuh tempo 3 hari lagi', 'bill'],
+      ['Jago', 'Cashback masuk', 'Cashback Rp10.000 sudah masuk ke saldo kamu', 'incoming'],
+    ]
+    for (const [app, title, body, kind] of real) {
+      expect(money.ingest({ app, title, body }, 'app')).toMatchObject({ status: 'stored', kind })
+    }
+  })
+
+  test('Indonesian shorthand amounts: "Rp15 jt", "Rp3 juta", "Rp25 rb", "Rp1,5 jt"', () => {
+    expect(parseMoney('Jenius', null, 'cashback s.d. Rp15 jt').amount).toBe(15_000_000)
+    expect(parseMoney('Jenius', null, 'potongan s.d. Rp3 juta!').amount).toBe(3_000_000)
+    expect(parseMoney('Jenius', null, 'cashback Rp25 rb').amount).toBe(25_000)
+    expect(parseMoney('Jenius', null, 'limit Rp1,5 jt').amount).toBe(1_500_000)
+    expect(parseMoney('Jenius', null, 'Pembayaran Rp 25.000 berhasil').amount).toBe(25_000)
+  })
+
+  test('mute rules: drop stores nothing, silent stores without an event, OTP gate still first', () => {
+    const rules: MoneyMuteRule[] = [
+      { app: 'pintu', keyword: 'futures', mode: 'drop' },
+      { app: 'Tangem', mode: 'silent' },
+    ]
+    const store = new Store(':memory:')
+    const events: unknown[] = []
+    const money = new MoneyService({ db: store.db, emit: (_k, p) => (events.push(p), true), muteRules: () => rules, now: () => Date.parse('2026-11-22T03:00:00Z') })
+    expect(money.ingest({ app: 'Pintu', title: 'Try Futures With 50 USDT Balance!', body: 'Learn to trade Futures.' }, 'app')).toEqual({ status: 'ignored', reason: 'muted' })
+    // Same app, other phrase: not muted.
+    expect(money.ingest({ app: 'Pintu', title: 'USDC Successfully Sold', body: 'You have successfully sold USDC 1 worth Rp 18.000.' }, 'app').status).toBe('stored')
+    const silent = money.ingest({ app: 'Tangem', title: 'Received', body: 'Received 100 USDT from 0x1234567890abcdef' }, 'app')
+    expect(silent).toMatchObject({ status: 'stored', silent: true })
+    expect(events).toHaveLength(1)
+    expect(money.ingest({ app: 'Tangem', title: 'Kode verifikasi', body: 'Kode OTP kamu 123456, jangan berikan' }, 'app')).toEqual({ status: 'dropped', reason: 'otp' })
+    expect(money.recent(7).mute_rules).toEqual(rules)
+    expect(money.recent(7).ignored_noise.find((n) => n.app === 'Pintu')!.n).toBe(1)
+  })
+
+  test('mute rule helpers: validation, matching, same target', () => {
+    expect(() => muteRuleFrom({})).toThrow(/app and\/or keyword/)
+    expect(() => muteRuleFrom({ keyword: 'ab' })).toThrow(/3 characters/)
+    expect(() => muteRuleFrom({ app: 'Pintu', mode: 'loud' })).toThrow(/mode/)
+    expect(muteRuleFrom({ app: ' Pintu ' })).toEqual({ app: 'Pintu', mode: 'silent' })
+    expect(matchMute([{ keyword: 'Futures', mode: 'drop' }], 'Pintu', 'x', 'trade FUTURES now')).not.toBeNull()
+    expect(matchMute([{ app: 'Pintu', mode: 'drop' }], 'Pintu Pro', null, 'x')).toBeNull()
+    expect(sameMuteTarget({ app: 'Pintu', mode: 'drop' }, { app: 'pintu' })).toBe(true)
+    expect(sameMuteTarget({ app: 'Pintu', keyword: 'x y z', mode: 'drop' }, { app: 'pintu' })).toBe(false)
+  })
+
+  test('an info-priority money event waits out quiet hours; a real one pierces', async () => {
+    const { piercesQuietHours } = await import('../src/types.js')
+    expect(piercesQuietHours({ class: 'money.notif', priority: 'info', dedupe_key: 'money.notif:1' })).toBe(false)
+    expect(piercesQuietHours({ class: 'money.notif', priority: 'notable', dedupe_key: 'money.notif:2' })).toBe(true)
+  })
+})
+
+describe('Nov 22 review findings', () => {
+  test('a bill reminder with a rate or "bayar sekarang" stays a bill, never a promo', () => {
+    const { money } = harness()
+    expect(money.ingest({ app: 'GoPay', title: 'Tagihan GoPayLater', body: 'Tagihan GoPayLater Rp 300.000 jatuh tempo besok, bunga 2,5%' }, 'app')).toMatchObject({ kind: 'bill' })
+    expect(money.ingest({ app: 'Kredivo', title: 'Tagihan', body: 'Tagihan Rp 1.200.000 jatuh tempo 25 Nov. Bayar sekarang, denda 4% jika telat' }, 'app')).toMatchObject({ kind: 'bill' })
+  })
+
+  test('"sold out" bond pitches are promos, never trades; a real sell is a trade', () => {
+    const { money } = harness()
+    expect(money.ingest({ app: 'Jenius', title: 'SBR014', body: 'SBR014 hampir sold out! Investasi mulai Rp1 jt' }, 'app')).toMatchObject({ kind: 'promo' })
+    expect(money.ingest({ app: 'Bibit', title: 'ORI027', body: 'ORI027 sudah sold out 80%, pesan sekarang mulai Rp 1.000.000' }, 'app')).toMatchObject({ kind: 'promo' })
+    expect(money.ingest({ app: 'Pintu', title: 'Sold', body: 'You sold 0.01 ETH for Rp 325.000' }, 'app')).toMatchObject({ kind: 'trade' })
+  })
+
+  test('shorthand with dot thousands: "Rp 1.500 rb" is 1,500,000; "Rp 1.5 jt" is 1,500,000', () => {
+    expect(parseMoney('BRImo', 'Notif', 'Rp 1.500 rb debit').amount).toBe(1_500_000)
+    expect(parseMoney('BRImo', 'Notif', 'Rp 1.250 jt').amount).toBe(1_250_000_000)
+    expect(parseMoney('BRImo', 'Notif', 'Rp 1.5 jt').amount).toBe(1_500_000)
+  })
+
+  test('the stored-rule loader uses the same validator as the tool (keyword capped at 80)', async () => {
+    const long = 'k'.repeat(100)
+    expect(muteRuleFrom({ keyword: long }).keyword).toHaveLength(80)
+    expect(sameMuteTarget(muteRuleFrom({ keyword: long }), muteTarget({ keyword: long }))).toBe(true)
   })
 })

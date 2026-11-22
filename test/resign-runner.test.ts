@@ -503,6 +503,10 @@ describe('runner: happy path', () => {
     const t = setup()
     mkdirSync(t.P.lockDir, { recursive: true })
     writeFileSync(join(t.P.lockDir, 'owner.json'), JSON.stringify({ pid: process.pid, started_at: iso(T0 - 60_000), child_pids: [] }))
+    // The holder started before its lock (injected: the real ps start time of
+    // this test process is after the fixed T0, which read as pid reuse once
+    // the wall clock passed Nov 20 2026).
+    t.deps.processStart = () => T0 - H
     const r = await t.run()
     expect(r.outcome).toBe('busy')
     expect(t.w.calls).toHaveLength(0)

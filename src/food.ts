@@ -287,10 +287,20 @@ export function walkNotHis(
   const roles = masses.map((m) =>
     reclaimed.has(m.ts) ? 'mine' : disowned.has(m.ts) ? 'skip' : m.t < sinceMs ? 'fixed' : notHisCandidate(m.was) ? 'judge' : 'skip',
   )
+  // Only a reading that could COUNT may anchor: measured in the morning
+  // window or the late fasted band. The date rule's tests anchor at any hour
+  // (his deliberate readings before the protocol began: day one's afternoon
+  // tests corroborate each other into the first strong anchor). An evening
+  // "not a morning reading" is still judged (and filed when far off) but
+  // never anchors and never corroborates a look-ahead: housemates weigh in at
+  // night, and Nov 20 a housemate's 80.2 kg at 19:17 (3.8 kg off, so not
+  // filed) became the anchor and filed his fasted 85.0 the next morning.
+  const anchorable = (m: NotHisRow) =>
+    inMorningWindow(m.t) || inLateFastedBand(m.t) || (m.was != null && m.was.startsWith(EXCL_DATE_RULE))
   const lookAhead = (from: number, t: number): number | null => {
     let first: number | null = null, lo = Infinity, hi = -Infinity, n = 0, lastTs = ''
     for (let k = from; k < masses.length && masses[k].t <= t + NOT_HIS_LOOKAHEAD_MS; k++) {
-      if (roles[k] === 'skip' || masses[k].ts === lastTs) continue
+      if (roles[k] === 'skip' || masses[k].ts === lastTs || !anchorable(masses[k])) continue
       lastTs = masses[k].ts
       const v = masses[k].value
       if (first == null) first = v
@@ -315,7 +325,7 @@ export function walkNotHis(
       const m = masses[k]
       let strong: boolean | null = null // null = not trusted
       if (roles[k] === 'mine') strong = true
-      else if (roles[k] === 'fixed') strong = timingVerdict(m.was) ? true : null
+      else if (roles[k] === 'fixed') strong = timingVerdict(m.was) && anchorable(m) ? true : null
       else if (roles[k] === 'judge') {
         const ref = a?.strong ? a.v : lookAhead(j, t)
         if (ref != null) {
@@ -323,6 +333,7 @@ export function walkNotHis(
           if (off > NOT_HIS_KG) filed.set(m.uuid, off)
           else strong = true
         } else strong = a != null && Math.abs(m.value - a.v) <= NOT_HIS_KG
+        if (!anchorable(m)) strong = null
       }
       if (strong != null && (next == null || (strong && !next.strong))) next = { t, v: m.value, strong }
     }
@@ -419,6 +430,11 @@ function normKind(k: unknown): string {
 function dayStartIso(ms: number): string {
   const d = new Date(ms)
   return new Date(d.getFullYear(), d.getMonth(), d.getDate()).toISOString()
+}
+/** The next local midnight after ms (the exclusive end of its day). */
+function dayEndIso(ms: number): string {
+  const d = new Date(ms)
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).toISOString()
 }
 export function inMorningWindow(ms: number): boolean {
   const d = new Date(ms)
@@ -1568,6 +1584,19 @@ export class FoodService {
     return out
   }
 
+  /** One weigh-in (mass + its fat pair) by sample uuid (that row's own
+   *  source only: another source's copy at the same instant is a separate
+   *  record with its own verdict) or by measured time (nearest within 3 min). */
+  private findWeighin(p: { uuid?: unknown; measured_at?: unknown }, missing: string): Array<{ uuid: string; ts: string; kind: string; value: number; source: string | null; excluded: string | null }> {
+    if (typeof p.uuid === 'string' && p.uuid.length >= 8) {
+      const row = this.book.bodySampleByUuid(p.uuid)
+      return row ? this.book.weighinAt(row.ts, row.source) : []
+    }
+    if (typeof p.measured_at === 'string' && Number.isFinite(Date.parse(p.measured_at)))
+      return this.book.weighinNear(new Date(Date.parse(p.measured_at)).toISOString(), 3 * 60_000)
+    throw new BadRequest(missing)
+  }
+
   /** Manual include / exclude of ONE weigh-in (mass + its fat pair), found
    *  by uuid or by measured time (nearest within 3 min). include:true clears
    *  the exclusion; include:false sets `reason` (default "excluded by hand").
@@ -1577,17 +1606,7 @@ export class FoodService {
     weighin: { measured_at: string; kg: number | null; excluded: string | null } | null
   } {
     if (typeof p.include !== 'boolean') throw new BadRequest('include must be true or false')
-    let pair: Array<{ uuid: string; ts: string; kind: string; value: number; source: string | null; excluded: string | null }> = []
-    if (typeof p.uuid === 'string' && p.uuid.length >= 8) {
-      const row = this.book.bodySampleByUuid(p.uuid)
-      // Only this row's own weigh-in: another source's copy at the same
-      // instant is a separate record with its own verdict.
-      if (row) pair = this.book.weighinAt(row.ts, row.source)
-    } else if (typeof p.measured_at === 'string' && Number.isFinite(Date.parse(p.measured_at))) {
-      pair = this.book.weighinNear(new Date(Date.parse(p.measured_at)).toISOString(), 3 * 60_000)
-    } else {
-      throw new BadRequest('give uuid or measured_at (ISO time of the weigh-in)')
-    }
+    const pair = this.findWeighin(p, 'give uuid or measured_at (ISO time of the weigh-in)')
     if (!pair.length) return { changed: 0, weighin: null }
     // An exclusion with no reason on a weigh-in already filed as not his
     // KEEPS that verdict (now by hand): "exclude it" there means "yes, not
@@ -1626,6 +1645,44 @@ export class FoodService {
     this.changed(this.today())
     const mass = pair.find((r) => r.kind === 'mass') ?? null
     return { changed, weighin: { measured_at: pair[0].ts, kg: mass?.value ?? null, excluded: reason } }
+  }
+
+  /** "Count this reading instead": the given weigh-in replaces the one that
+   *  counts for its local day (a redo after a clothed or botched first
+   *  reading, on his word). Every other counted weigh-in that day (every
+   *  source's copy) is excluded by hand as "replaced by the HH:MM reading",
+   *  then this one is included by hand (so the repeat rule never pushes it
+   *  out again). Found by uuid or measured_at like weighin_set. */
+  replaceWeighin(p: { uuid?: unknown; measured_at?: unknown; reason?: unknown }): {
+    replaced: Array<{ measured_at: string; kg: number | null; source: string | null }>
+    weighin: { measured_at: string; kg: number | null; excluded: string | null } | null
+  } {
+    const pair = this.findWeighin(p, 'give uuid or measured_at (ISO time of the weigh-in that should count)')
+    const target = pair.find((r) => r.kind === 'mass')
+    if (!target) return { replaced: [], weighin: null }
+    const t = Date.parse(target.ts)
+    const start = dayStartIso(t)
+    const end = dayEndIso(t)
+    const counted = this.book
+      .bodySamplesAll(start)
+      .filter((r) => r.kind === 'mass' && r.excluded == null && r.ts < end && r.ts !== target.ts)
+    const at = new Date(t).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
+    const why = cleanText(p.reason, 80, false)
+    const reason = `replaced by the ${at} reading${why ? `: ${why}` : ''} ${BY_HAND}`
+    const manual = this.manualIncludes()
+    const replaced: Array<{ measured_at: string; kg: number | null; source: string | null }> = []
+    for (const ts of new Set(counted.map((r) => r.ts))) {
+      const copies = this.book.samplesAt(ts)
+      this.book.setBodyExcluded(copies.map((r) => r.uuid), reason)
+      for (const r of copies) manual.delete(r.uuid)
+      const m = counted.find((r) => r.ts === ts)!
+      replaced.push({ measured_at: ts, kg: m.value, source: m.source })
+    }
+    this.deps.setMeta(MANUAL_INCLUDE_META, JSON.stringify([...manual].slice(-500)))
+    // The include re-runs every rule and the calibration, and announces the change.
+    const res = this.setWeighin({ uuid: target.uuid, include: true })
+    if (replaced.length) this.log(`weigh-in ${target.ts} now counts for its day, replacing ${replaced.map((r) => r.measured_at).join(', ')}`)
+    return { replaced, weighin: res.weighin }
   }
 
   /** Every weigh-in rule, in the one order that keeps a housemate out of
@@ -1818,9 +1875,7 @@ export class FoodService {
     // verdicts on each moved day (a hand one carries BY_HAND and stays), and
     // the timing pass that always follows this one re-decides them.
     for (const start of days) {
-      const d = new Date(start)
-      const end = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime()
-      this.book.liftExactExclusions([EXCL_REPEAT], new Date(Math.max(start, sinceMs)).toISOString(), new Date(end).toISOString())
+      this.book.liftExactExclusions([EXCL_REPEAT], new Date(Math.max(start, sinceMs)).toISOString(), dayEndIso(start))
     }
     return days.size > 0
   }

@@ -92,7 +92,8 @@ WHOOP band ──(BLE Broadcast HR)──> health-relay ──(WS, raw frames)�
   body-composition figure (fat drawn as a shell around the lean body, true
   by area), goal progress and the weigh-in history. Readings
   far from your recent weight (a housemate on the same scale) are filed as
-  someone else's and can be reclaimed.
+  someone else's and can be reclaimed. Only the first morning reading
+  counts; a redo (the first one was in clothes) can replace it.
   Photos are converted to plain JPEGs with GPS and all other metadata
   stripped; your originals are never touched.
 - **Lift clips**: pick lift videos on the phone, trim each to the lift (a
@@ -114,7 +115,9 @@ WHOOP band ──(BLE Broadcast HR)──> health-relay ──(WS, raw frames)�
   between your own pockets or accounts (`money.own_names` in the config)
   are internal, and card authorization requests are pending, neither
   counted as spending; a zero or dust-sized crypto deposit is
-  flagged as possible address poisoning, never counted as income. Setup: [guides/money-notifications.md](guides/money-notifications.md).
+  flagged as possible address poisoning, never counted as income. Marketing
+  that still slips through is stored as `kind=promo` and raised quietly (no
+  budget flow), and `health__money` can mute a sender or phrase. Setup: [guides/money-notifications.md](guides/money-notifications.md).
 - **`/health`**: today's read on demand. `/health trend` for the long view.
 - **A permanent local archive** of your WHOOP data in one SQLite file.
 

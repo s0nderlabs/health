@@ -1429,3 +1429,70 @@ describe('HTTP wiring for the new routes', () => {
     expect(((await h!.json()) as { days: unknown[] }).days).toHaveLength(0)
   })
 })
+
+describe('Nov 22 fixes: evening anchors and weighin_replace', () => {
+  // Synthetic weights shaped like the Nov 20-22 sequence.
+  const iso = (ms: number) => new Date(ms).toISOString()
+  const S = 'S400 BLE'
+  const mass = (uuid: string, at: number, kg: number) => ({ uuid: `nov22-${uuid}`, ts: iso(at), kind: 'mass' as const, value: kg, source: S })
+  const fat = (uuid: string, at: number, f: number) => ({ uuid: `nov22-${uuid}`, ts: iso(at), kind: 'fat' as const, value: f, source: S })
+  const withDate = (food: FoodService, from: string) => {
+    const cfg = { ...DEFAULT_CONFIG.food, weighins_from: from }
+    ;(food as unknown as { deps: { getConfig: () => typeof cfg } }).deps.getConfig = () => cfg
+  }
+
+  test('an evening reading inside 4 kg never becomes the anchor (his next fasted reading counts)', () => {
+    const { food, store, setNow } = harness(local(2026, 11, 17, 9))
+    const book = new MealBook(store.db)
+    withDate(food, '2026-11-17')
+    for (const [d, v] of [[17, 83.9], [18, 84.5], [19, 84.2], [20, 84.0]] as const) {
+      setNow(local(2026, 11, d, 11))
+      food.ingestBodySamples([mass(`m${d}`, local(2026, 11, d, 10, 30), v)], [])
+    }
+    // Housemates in the evening: one far off (filed), one 3.8 kg off (not filed, not morning).
+    setNow(local(2026, 11, 20, 20))
+    food.ingestBodySamples([mass('pal-a', local(2026, 11, 20, 17, 9), 68.0)], [])
+    food.ingestBodySamples([mass('pal-b', local(2026, 11, 20, 19, 17), 80.2)], [])
+    expect(book.bodyExcluded('nov22-pal-a')).toBe('not his (weight outlier)')
+    expect(book.bodyExcluded('nov22-pal-b')).toBe('not a morning reading')
+    setNow(local(2026, 11, 21, 12))
+    food.ingestBodySamples([mass('pal-c', local(2026, 11, 21, 0, 22), 71.3)], [])
+    food.ingestBodySamples([mass('m21', local(2026, 11, 21, 11, 40), 85.0)], [])
+    // Before the fix the 80.2 anchored and filed this one 4.8 kg "off".
+    expect(book.bodyExcluded('nov22-m21')).toBeNull()
+    expect(book.bodyExcluded('nov22-pal-c')).toBe('not his (weight outlier)')
+  })
+
+  test('weighin_replace: the redo counts, the clothed first one is excluded by hand, and it sticks', () => {
+    const { food, store, setNow } = harness(local(2026, 11, 22, 9))
+    const book = new MealBook(store.db)
+    withDate(food, '2026-11-17')
+    for (const [d, v] of [[19, 84.2], [20, 84.0], [21, 85.0]] as const) {
+      setNow(local(2026, 11, d, 11))
+      food.ingestBodySamples([mass(`m${d}`, local(2026, 11, d, 10, 30), v)], [])
+    }
+    setNow(local(2026, 11, 22, 10, 30))
+    const first = local(2026, 11, 22, 10, 19), redo = local(2026, 11, 22, 10, 21)
+    food.ingestBodySamples([mass('m22a', first, 86.1), fat('f22a', first, 0.251)], [])
+    food.ingestBodySamples([mass('m22b', redo, 85.5), fat('f22b', redo, 0.248)], [])
+    expect(book.bodyExcluded('nov22-m22a')).toBeNull()
+    expect(book.bodyExcluded('nov22-m22b')).toBe('repeat: a morning reading already counts today')
+
+    const res = food.replaceWeighin({ measured_at: iso(redo), reason: 'first one in clothes' })
+    expect(res.replaced).toEqual([{ measured_at: iso(first), kg: 86.1, source: S }])
+    expect(res.weighin).toMatchObject({ kg: 85.5, excluded: null })
+    expect(book.bodyExcluded('nov22-m22b')).toBeNull()
+    expect(book.bodyExcluded('nov22-f22b')).toBeNull()
+    const why = 'replaced by the 10:21 reading: first one in clothes (by hand)'
+    expect(book.bodyExcluded('nov22-m22a')).toBe(why)
+    expect(book.bodyExcluded('nov22-f22a')).toBe(why)
+    // The 7-day average reads the redo: (84.2 + 84.0 + 85.0 + 85.5) / 4 = 84.7
+    // (with the clothed 86.1 it would be 84.8).
+    expect(food.avg7(iso(redo))).toMatchObject({ kg: 84.7, n: 4 })
+    // A later pass (another ingest) keeps both verdicts.
+    food.ingestBodySamples([mass('pal', local(2026, 11, 22, 20), 68.0)], [])
+    expect(book.bodyExcluded('nov22-m22b')).toBeNull()
+    expect(book.bodyExcluded('nov22-m22a')).toBe(why)
+    expect(() => food.replaceWeighin({})).toThrow(/uuid or measured_at/)
+  })
+})

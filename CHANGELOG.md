@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.23.0 - 2026-11-22
+
+### Added
+
+- **Money: a promo kind.** Marketing that slips past the noise rules (cashback
+  and bond pitches, price alerts, demo-balance ads, invites, chat bait) is now
+  stored as `kind=promo` and raised at info priority: no budget flow, and it
+  waits out quiet hours. Only the generic parser's guesses are re-labelled; a
+  completed event (received, successfully sold, withdrawn, paid), a bill
+  reminder and a decline never are.
+- **Money: mute rules.** `health__money` gains `action: mute | unmute` by app
+  and/or keyword. `silent` stores the notification with no event, `drop`
+  stores nothing (counted with the ignored noise). The OTP gate always runs
+  first; rules live in the local config (`money.mute`).
+- **Weigh-ins: count this reading instead.** `health__meal` gains
+  `weighin_replace`: a later reading replaces the one that counts for its
+  day (a redo after a clothed or botched first step-on). The earlier one is
+  excluded by hand as "replaced by the HH:MM reading" and stays excluded.
+
+### Fixed
+
+- **The friend rule no longer anchors on evening readings.** Only readings in
+  the morning window or the late fasted band (plus the date rule's day-one
+  tests) can become the reference weight or back up a look-ahead. A
+  housemate's evening reading within 4 kg had become the reference and filed
+  the owner's next fasted reading as someone else's.
+- **Indonesian shorthand amounts.** "Rp15 jt" reads as 15,000,000 (was 15),
+  "Rp 1.500 rb" as 1,500,000, "Rp1,5 jt" as 1,500,000.
+- **Completed sells and conversions are trades** ("You have successfully
+  sold", "You converted"), while "sold out" in a pitch is not.
+- **A partial `money` config patch keeps `own_names`.** `config_set` now
+  merges the `money` block field by field.
+- **Re-sign runner test no longer depends on the wall clock** (the held-lock
+  case read as pid reuse once the real date passed its fixed test time).
+
 ## 0.22.1 - 2026-11-18
 
 ### Fixed

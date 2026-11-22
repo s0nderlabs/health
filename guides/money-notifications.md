@@ -22,7 +22,15 @@ the archive. Nothing goes to a third party.
 Kinds: `payment` (the only one that is spending), `refund`, `topup` (your own
 money moving into a wallet), `incoming`, `transfer_out`, `trade` (an
 exchange order), `declined` (nothing moved, but a dead card or low balance
-matters), `bill` (a paylater or statement coming due).
+matters), `bill` (a paylater or statement coming due), `promo` (marketing,
+a price alert or an invite the generic rule guessed at: stored, raised at
+info priority, never a budget event).
+
+**Mute rules.** Ask your session to mute a sender or a phrase:
+`health__money {action: 'mute', app?, keyword?, mode?}` (`silent` keeps the
+record with no event; `drop` stores nothing but the per-app count) and
+`{action: 'unmute', app?, keyword?}`. The rules live in the local config
+(`money.mute`); the OTP gate always runs first.
 
 **Marketplaces and super-apps are allowlisted.** Tokopedia, Shopee, Gojek,
 Grab and similar apps send far more marketing than money ("Cara nikmatin
